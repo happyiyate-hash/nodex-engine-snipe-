@@ -1,5 +1,8 @@
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -31,12 +34,20 @@ struct Health {
 }
 
 async fn health() -> Json<Health> {
-    Json(Health { status: "ok", mode: "paper", service: "nodex-engine" })
+    Json(Health {
+        status: "ok",
+        mode: "paper",
+        service: "nodex-engine",
+    })
 }
 
 async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let stream = state.stream_status.read().await.clone();
-    Json(json!({"mode":"paper","live_execution_enabled":false,"solana_stream":stream}))
+    Json(json!({
+        "mode": "paper",
+        "live_execution_enabled": false,
+        "solana_stream": stream,
+    }))
 }
 
 async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
@@ -50,17 +61,22 @@ async fn token_account_rent(
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "Solana HTTP RPC is not configured".to_string(),
     ))?;
-    let rent = rpc.token_account_rent_lamports().await
+    let rent = rpc
+        .token_account_rent_lamports()
+        .await
         .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(Json(json!({
-        "account_size_bytes":165,
-        "rent_lamports":rent,
-        "rent_sol":rent as f64 / LAMPORTS_PER_SOL as f64,
-        "source":"solana_getMinimumBalanceForRentExemption"
+        "account_size_bytes": 165,
+        "rent_lamports": rent,
+        "rent_sol": rent as f64 / LAMPORTS_PER_SOL as f64,
+        "source": "solana_getMinimumBalanceForRentExemption"
     })))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| client_socket(socket, state))
 }
 
@@ -69,22 +85,33 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
     let initial = json!({"type":"connection_status","data":status}).to_string();
-    if sender.send(Message::Text(initial)).await.is_err() { return; }
+    if sender.send(Message::Text(initial)).await.is_err() {
+        return;
+    }
     loop {
         tokio::select! {
             event = receiver.recv() => match event {
                 Ok(value) => {
-                    if sender.send(Message::Text(value.to_string())).await.is_err() { break; }
+                    if sender.send(Message::Text(value.to_string())).await.is_err() {
+                        break;
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
-                    let warning = json!({"type":"stream_warning","data":{"dropped_events":count}}).to_string();
-                    if sender.send(Message::Text(warning)).await.is_err() { break; }
+                    let warning = json!({
+                        "type": "stream_warning",
+                        "data": {"dropped_events": count}
+                    }).to_string();
+                    if sender.send(Message::Text(warning)).await.is_err() {
+                        break;
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             incoming = receiver_socket.next() => match incoming {
                 Some(Ok(Message::Ping(payload))) => {
-                    if sender.send(Message::Pong(payload)).await.is_err() { break; }
+                    if sender.send(Message::Pong(payload)).await.is_err() {
+                        break;
+                    }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 _ => {}
@@ -92,11 +119,14 @@ async fn client_socket(socket: WebSocket, state: AppState) {
         }
     }
 }
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let config = EngineConfig::from_env();
@@ -114,12 +144,14 @@ async fn main() -> anyhow::Result<()> {
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
 
-    // Persist every raw upstream log notification independently of browser subscribers.
+    // Persist raw upstream log notifications independently of browser subscribers.
     let mut persistence_receiver = events.subscribe();
     let persistence_db = db.clone();
     tokio::spawn(async move {
         while let Ok(event) = persistence_receiver.recv().await {
-            if let Err(error) = nodex_persistence::save_raw_solana_event(&persistence_db, &event).await {
+            if let Err(error) =
+                nodex_persistence::save_raw_solana_event(&persistence_db, &event).await
+            {
                 tracing::error!(%error, "Could not persist raw Solana event");
             }
         }
