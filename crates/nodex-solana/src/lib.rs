@@ -16,29 +16,53 @@ pub struct SolanaRpc {
 
 impl SolanaRpc {
     pub fn new(http_url: impl Into<String>) -> Self {
-        Self { http_url: http_url.into(), client: reqwest::Client::new() }
+        Self {
+            http_url: http_url.into(),
+            client: reqwest::Client::new(),
+        }
     }
 
-    async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
-        let response = self.client.post(&self.http_url)
+    async fn call<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T> {
+        let response = self
+            .client
+            .post(&self.http_url)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
-            .send().await.context("sending Solana JSON-RPC request")?
-            .error_for_status().context("Solana RPC returned HTTP error")?
-            .json::<RpcResponse<T>>().await.context("decoding Solana JSON-RPC response")?;
+            .send()
+            .await
+            .context("sending Solana JSON-RPC request")?
+            .error_for_status()
+            .context("Solana RPC returned HTTP error")?
+            .json::<RpcResponse<T>>()
+            .await
+            .context("decoding Solana JSON-RPC response")?;
         if let Some(error) = response.error {
             return Err(anyhow!("Solana RPC {method} error: {}", error.message));
         }
-        response.result.ok_or_else(|| anyhow!("Solana RPC {method} returned no result"))
+        response
+            .result
+            .ok_or_else(|| anyhow!("Solana RPC {method} returned no result"))
     }
 
     /// Current rent-exempt minimum for a standard 165-byte SPL token account.
     pub async fn token_account_rent_lamports(&self) -> Result<u64> {
-        self.call("getMinimumBalanceForRentExemption", json!([SPL_TOKEN_ACCOUNT_SIZE, {"commitment":"confirmed"}])).await
+        self.call(
+            "getMinimumBalanceForRentExemption",
+            json!([SPL_TOKEN_ACCOUNT_SIZE, {"commitment":"confirmed"}]),
+        )
+        .await
     }
 
     /// Fee quote for an already compiled base64 transaction message; never submits it.
     pub async fn fee_for_message(&self, base64_message: &str) -> Result<Option<u64>> {
-        self.call("getFeeForMessage", json!([base64_message, {"commitment":"confirmed"}])).await
+        self.call(
+            "getFeeForMessage",
+            json!([base64_message, {"commitment":"confirmed"}]),
+        )
+        .await
     }
 
     pub async fn recent_prioritization_fees(&self) -> Result<Vec<PriorityFeeSample>> {
@@ -51,8 +75,11 @@ struct RpcResponse<T> {
     result: Option<T>,
     error: Option<RpcError>,
 }
+
 #[derive(Debug, Deserialize)]
-struct RpcError { message: String }
+struct RpcError {
+    message: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriorityFeeSample {
@@ -99,15 +126,29 @@ async fn connect_and_subscribe(
     sender: &broadcast::Sender<Value>,
     status: &std::sync::Arc<tokio::sync::RwLock<StreamStatus>>,
 ) -> Result<()> {
-    let (mut socket, _) = connect_async(ws_url).await.context("connecting to Solana WebSocket")?;
-    socket.send(Message::Text(json!({
-        "jsonrpc":"2.0","id":1,"method":"logsSubscribe",
-        "params":[{"mentions":[program_id]},{"commitment":"confirmed"}]
-    }).to_string().into())).await.context("sending logsSubscribe")?;
+    let (mut socket, _) = connect_async(ws_url)
+        .await
+        .context("connecting to Solana WebSocket")?;
+    socket
+        .send(Message::Text(
+            json!({
+                "jsonrpc":"2.0","id":1,"method":"logsSubscribe",
+                "params":[{"mentions":[program_id]},{"commitment":"confirmed"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .context("sending logsSubscribe")?;
 
-    let acknowledgement = socket.next().await.ok_or_else(|| anyhow!("WebSocket closed before subscription acknowledgement"))??;
+    let acknowledgement = socket
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("WebSocket closed before subscription acknowledgement"))??;
     let ack: Value = serde_json::from_str(acknowledgement.to_text()?)?;
-    let subscription_id = ack.get("result").and_then(Value::as_u64)
+    let subscription_id = ack
+        .get("result")
+        .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("logsSubscribe rejected: {ack}"))?;
     {
         let mut current = status.write().await;
