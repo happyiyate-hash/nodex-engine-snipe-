@@ -3,7 +3,10 @@ use nodex_core::TokenLaunch;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool> {
-    let options = SqlitePoolOptions::new().max_connections(5).connect(database_url).await?;
+    let options = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS token_launches (
             id TEXT PRIMARY KEY NOT NULL,
@@ -14,8 +17,10 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             slot INTEGER NOT NULL,
             detected_at TEXT NOT NULL,
             payload_json TEXT NOT NULL
-        )"#
-    ).execute(&options).await?;
+        )"#,
+    )
+    .execute(&options)
+    .await?;
     Ok(options)
 }
 
@@ -24,7 +29,7 @@ pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool
     let result = sqlx::query(
         r#"INSERT OR IGNORE INTO token_launches
            (id, mint_address, creator_address, source, signature, slot, detected_at, payload_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(launch.id.to_string())
     .bind(&launch.mint_address)
@@ -34,6 +39,7 @@ pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool
     .bind(launch.slot as i64)
     .bind(launch.detected_at.to_rfc3339())
     .bind(payload)
-    .execute(pool).await?;
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() == 1)
 }
