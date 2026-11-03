@@ -64,26 +64,27 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     ws.on_upgrade(move |socket| client_socket(socket, state))
 }
 
-async fn client_socket(mut socket: WebSocket, state: AppState) {
+async fn client_socket(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver_socket) = socket.split();
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
     let initial = json!({"type":"connection_status","data":status}).to_string();
-    if socket.send(Message::Text(initial)).await.is_err() { return; }
+    if sender.send(Message::Text(initial)).await.is_err() { return; }
     loop {
         tokio::select! {
             event = receiver.recv() => match event {
                 Ok(value) => {
-                    if socket.send(Message::Text(value.to_string())).await.is_err() { break; }
+                    if sender.send(Message::Text(value.to_string())).await.is_err() { break; }
                 }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     let warning = json!({"type":"stream_warning","data":{"dropped_events":count}}).to_string();
-                    if socket.send(Message::Text(warning)).await.is_err() { break; }
+                    if sender.send(Message::Text(warning)).await.is_err() { break; }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            incoming = socket.next() => match incoming {
+            incoming = receiver_socket.next() => match incoming {
                 Some(Ok(Message::Ping(payload))) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() { break; }
+                    if sender.send(Message::Pong(payload)).await.is_err() { break; }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 _ => {}
@@ -91,7 +92,6 @@ async fn client_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 }
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
