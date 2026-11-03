@@ -21,7 +21,21 @@ pub struct TokenLaunch {
 }
 
 impl TokenLaunch {
-    pub fn new(mint_address: String, creator_address: Option<String>, source: LaunchSource, signature: String, slot: u64) -> Self {
-        Self { id: Uuid::new_v4(), mint_address, creator_address, source, signature, slot, detected_at: Utc::now() }
+    pub fn new(
+        mint_address: String,
+        creator_address: Option<String>,
+        source: LaunchSource,
+        signature: String,
+        slot: u64,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            mint_address,
+            creator_address,
+            source,
+            signature,
+            slot,
+            detected_at: Utc::now(),
+        }
     }
 }
