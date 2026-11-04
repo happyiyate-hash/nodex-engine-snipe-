@@ -183,7 +183,6 @@ fn decode_create_creator(args: &[u8]) -> Result<String> {
         .ok_or_else(|| anyhow!("Pump.fun create instruction is missing creator pubkey"))?;
     Ok(bs58::encode(creator).into_string())
 }
-}
 
 #[derive(Debug, Deserialize)]
 struct RpcResponse<T> {
