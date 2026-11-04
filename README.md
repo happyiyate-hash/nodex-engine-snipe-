@@ -41,11 +41,29 @@ The engine listens on `http://127.0.0.1:8080` by default.
 - `GET /api/v1/engine/status` — paper mode and upstream stream status.
 - `GET /api/v1/paper-wallet` — persisted paper wallet snapshot.
 - `GET /api/v1/fees/token-account-rent` — live rent-exempt minimum for a standard 165-byte SPL token account.
-- `WS /api/v1/ws` — raw upstream logs notifications and connection status.
+- `WS /api/v1/ws` — upstream logs, provider status, diagnostics, and engine control messages.
+
+### WebSocket commands
+
+Send JSON text messages to `/api/v1/ws`:
+
+```json
+{"command":"pause"}
+{"command":"resume"}
+{"command":"start"}
+{"command":"status"}
+{"command":"set_mode","mode":"paper"}
+```
+
+The server acknowledges state changes with `engine_state`. A request for `set_mode` to anything other than `paper` returns `command_rejected`. The backend does not accept a frontend-only live-trading toggle.
+
+### Safety and current implementation boundary
+
+The engine remains paper-only. Token discovery currently forwards raw Pump.fun program log notifications; it does not yet decode verified create instructions or perform token risk analysis. No real signing, swap construction, transaction submission, position tracking, or automatic sell path is implemented. Do not configure a funded private key. Live mode is explicitly rejected by the backend, regardless of UI state. Provider connection failures are emitted as `diagnostic` events with a component, message, retry flag and timestamp. Reconnect uses bounded backoff.
 
 ## Paper wallet defaults
 
-- Starting balance: 10 SOL (10,000,000,000 lamports).
+- Starting balance: 1 SOL (1,000,000,000 lamports) by default. Existing database wallet balances are preserved; this setting only applies when the paper wallet is first created.
 - Default strategy trade size: 0.1 SOL (100,000,000 lamports).
 - All wallet arithmetic uses integer lamports.
 - Token-account rent is tracked separately as locked/reclaimable capital.
