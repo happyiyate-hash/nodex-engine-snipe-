@@ -753,8 +753,9 @@ async fn connect_market_stream(
                             || subscription.venue == "pump_swap_quote_vault"
                         {
                             if let Some(state) = pumpswap_states.get(&subscription.mint) {
-                                match pump_swap_price(state) {
-                                    Ok((price_sol, market_cap_sol, effective_quote_reserves)) => {
+                                if let Ok((price_sol, market_cap_sol, effective_quote_reserves)) =
+                                    pump_swap_price(state)
+                                {
                                         let now_ms = chrono::Utc::now().timestamp_millis();
                                         let history =
                                             price_history.entry(subscription.mint.clone()).or_default();
@@ -789,8 +790,6 @@ async fn connect_market_stream(
                                             "price_change_status":if change_1m.is_some() && change_5m.is_some() {"ready"} else {"warming_up"},
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }}));
-                                    }
-                                    Err(_) => {}
                                 }
                             }
                             continue;
