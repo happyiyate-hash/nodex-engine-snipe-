@@ -1388,6 +1388,37 @@ mod pumpswap_log_tests {
             .unwrap()
             .is_empty());
     }
+
+    #[test]
+    fn backfilled_notifications_match_the_live_logs_notification_shape() {
+        let notification = backfilled_log_notification(
+            PUMPSWAP_PROGRAM_ID,
+            "test-signature".to_owned(),
+            42,
+            Value::Null,
+            vec!["Program log: test".to_owned()],
+        );
+        assert_eq!(
+            notification.get("nodex_program_id").and_then(Value::as_str),
+            Some(PUMPSWAP_PROGRAM_ID)
+        );
+        assert_eq!(
+            notification.pointer("/params/result/context/slot").and_then(Value::as_u64),
+            Some(42)
+        );
+        assert_eq!(
+            notification.pointer("/params/result/value/signature").and_then(Value::as_str),
+            Some("test-signature")
+        );
+        assert_eq!(
+            notification.pointer("/params/result/value/logs/0").and_then(Value::as_str),
+            Some("Program log: test")
+        );
+        assert_eq!(
+            notification.get("nodex_backfilled").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
 }
 
 #[cfg(test)]
