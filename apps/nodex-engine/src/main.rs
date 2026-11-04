@@ -798,11 +798,31 @@ async fn main() -> anyhow::Result<()> {
     let mut persistence_receiver = events.subscribe();
     let persistence_db = db.clone();
     tokio::spawn(async move {
-        while let Ok(event) = persistence_receiver.recv().await {
-            if let Err(error) =
-                nodex_persistence::save_raw_solana_event(&persistence_db, &event).await
-            {
-                tracing::error!(%error, "Could not persist raw Solana event");
+        loop {
+            match persistence_receiver.recv().await {
+                Ok(event) => {
+                    // This table is an upstream-notification history, not a copy of
+                    // every derived diagnostic and market event on the broadcast bus.
+                    if event.get("method").and_then(serde_json::Value::as_str)
+                        != Some("logsNotification")
+                    {
+                        continue;
+                    }
+                    if let Err(error) =
+                        nodex_persistence::save_raw_solana_event(&persistence_db, &event).await
+                    {
+                        tracing::error!(%error, "Could not persist raw Solana event");
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    // Keep the persistence worker alive. The gap is explicit in logs;
+                    // a later reconnect can use the upstream signature checkpoint.
+                    tracing::warn!(
+                        dropped_notifications = count,
+                        "Raw Solana event persistence consumer lagged; continuing"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
