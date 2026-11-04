@@ -10,7 +10,10 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::config::EngineConfig;
-use nodex_solana::{decode_pump_fun_create, run_logs_stream, start_market_monitor, MarketMonitor, SolanaRpc, StreamStatus};
+use nodex_solana::{
+    decode_pump_fun_create, run_logs_stream, start_market_monitor, MarketMonitor, SolanaRpc,
+    StreamStatus,
+};
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
 use serde_json::json;
@@ -193,15 +196,20 @@ fn start_launch_processor(
                         let mint_address = launch.mint_address.clone();
                         let creator_address = launch.creator_address.clone();
                         if let Some(monitor) = market_monitor.as_ref() {
-                            match monitor.subscribe_pump_fun_bonding_curve(&mint_address, &program_id).await {
+                            match monitor
+                                .subscribe_pump_fun_bonding_curve(&mint_address, &program_id)
+                                .await
+                            {
                                 Ok(account_address) => {
-                                    let _ = events.send(json!({"type":"market_subscription_requested","data":{
-                                        "mint_address":mint_address,
-                                        "account_address":account_address,
-                                        "venue":"pump_fun_bonding_curve",
-                                        "status":"pending",
-                                        "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
+                                    let _ = events.send(
+                                        json!({"type":"market_subscription_requested","data":{
+                                            "mint_address":mint_address,
+                                            "account_address":account_address,
+                                            "venue":"pump_fun_bonding_curve",
+                                            "status":"pending",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}),
+                                    );
                                 }
                                 Err(error) => {
                                     let _ = events.send(json!({"type":"diagnostic","data":{
@@ -454,9 +462,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
-    let market_monitor = config.solana_ws_url.clone().map(|ws_url| {
-        start_market_monitor(ws_url, events.clone())
-    });
+    let market_monitor = config
+        .solana_ws_url
+        .clone()
+        .map(|ws_url| start_market_monitor(ws_url, events.clone()));
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
     if let Some(launch_rpc) = rpc.clone() {

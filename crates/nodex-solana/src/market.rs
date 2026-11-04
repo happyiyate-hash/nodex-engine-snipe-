@@ -2,11 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
-use std::{
-    collections::HashMap,
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -64,10 +60,7 @@ pub fn derive_pump_fun_bonding_curve(mint: &str, program_id: &str) -> Result<Str
 /// Start one multiplexed account-subscription connection with automatic reconnect.
 /// Account updates are emitted independently as market_account_update events.
 /// Raw account bytes are preserved; reserve decoding is a separate layout-verified stage.
-pub fn start_market_monitor(
-    ws_url: String,
-    events: broadcast::Sender<Value>,
-) -> MarketMonitor {
+pub fn start_market_monitor(ws_url: String, events: broadcast::Sender<Value>) -> MarketMonitor {
     let (commands, receiver) = mpsc::channel(MARKET_COMMAND_CAPACITY);
     tokio::spawn(run_market_monitor(ws_url, events, receiver));
     MarketMonitor { commands }
@@ -105,7 +98,9 @@ async fn run_market_monitor(
                 }));
             }
         }
-        let delay = 2_u64.saturating_mul(1_u64 << reconnect_count.min(4)).min(30);
+        let delay = 2_u64
+            .saturating_mul(1_u64 << reconnect_count.min(4))
+            .min(30);
         tokio::time::sleep(Duration::from_secs(delay)).await;
     }
 }
@@ -161,7 +156,10 @@ async fn connect_market_stream(
             "received_at":chrono::Utc::now().to_rfc3339()
         }
     }));
-    info!(desired_accounts = desired.len(), "Market account monitor connected");
+    info!(
+        desired_accounts = desired.len(),
+        "Market account monitor connected"
+    );
 
     loop {
         tokio::select! {
