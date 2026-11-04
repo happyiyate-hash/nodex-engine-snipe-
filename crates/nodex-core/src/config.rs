@@ -49,7 +49,7 @@ impl EngineConfig {
             )
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(10_000_000_000),
+            .unwrap_or(1_000_000_000),
             paper_trade_amount_lamports: std::env::var(
                 "NODEX_PAPER_TRADE_AMOUNT_LAMPORTS",
             )
