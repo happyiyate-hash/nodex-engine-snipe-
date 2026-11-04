@@ -172,8 +172,12 @@ impl SolanaRpc {
                 continue;
             };
             report.transactions_resolved += 1;
-            if let Some(launch) = decode_pump_fun_create(&transaction, signature, pump_fun_program_id)? {
-                if launch.creator_address == creator { report.prior_pump_fun_launches += 1; }
+            if let Some(launch) =
+                decode_pump_fun_create(&transaction, signature, pump_fun_program_id)?
+            {
+                if launch.creator_address == creator {
+                    report.prior_pump_fun_launches += 1;
+                }
             }
         }
         if report.transactions_resolved == 0 {
