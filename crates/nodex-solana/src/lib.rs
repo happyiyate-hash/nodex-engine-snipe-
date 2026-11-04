@@ -68,23 +68,36 @@ impl SolanaRpc {
         self.call("getRecentPrioritizationFees", json!([])).await
     }
 
-
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
     /// This is the first scanner stage; it deliberately cannot approve a token by itself.
     pub async fn scan_token_security(&self, mint: &str) -> Result<TokenSecurityReport> {
-        let account: Value = self.call(
-            "getAccountInfo",
-            json!([mint, {"encoding":"base64","commitment":"confirmed"}]),
-        ).await?;
+        let account: Value = self
+            .call(
+                "getAccountInfo",
+                json!([mint, {"encoding":"base64","commitment":"confirmed"}]),
+            )
+            .await?;
         let context_slot = account.pointer("/context/slot").and_then(Value::as_u64);
         let value = account.get("value").filter(|v| !v.is_null());
         let Some(value) = value else {
-            return Ok(TokenSecurityReport::unverified(mint, "Mint account was not found by RPC", context_slot));
+            return Ok(TokenSecurityReport::unverified(
+                mint,
+                "Mint account was not found by RPC",
+                context_slot,
+            ));
         };
-        let owner = value.get("owner").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let owner = value
+            .get("owner")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let encoded = value.pointer("/data/0").and_then(Value::as_str);
         let Some(encoded) = encoded else {
-            return Ok(TokenSecurityReport::unverified(mint, "Mint account data was not returned in base64 form", context_slot));
+            return Ok(TokenSecurityReport::unverified(
+                mint,
+                "Mint account data was not returned in base64 form",
+                context_slot,
+            ));
         };
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .context("decoding mint account base64 data")?;
@@ -112,7 +125,6 @@ impl SolanaRpc {
         Ok(response.result.filter(|value| !value.is_null()))
     }
 }
-
 
 pub const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -160,23 +172,28 @@ impl TokenSecurityReport {
                 detail: reason.into(),
             }],
             decision: "UNVERIFIED".into(),
-            decision_reason: "The mint account could not be verified; automatic buying is blocked.".into(),
+            decision_reason: "The mint account could not be verified; automatic buying is blocked."
+                .into(),
         }
     }
 }
 
 fn read_coption_pubkey(data: &[u8], offset: usize) -> Result<Option<String>> {
-    let tag = data.get(offset..offset + 4)
+    let tag = data
+        .get(offset..offset + 4)
         .ok_or_else(|| anyhow!("mint account is shorter than the SPL mint layout"))?;
     let tag = u32::from_le_bytes(tag.try_into().expect("four-byte slice"));
     match tag {
         0 => Ok(None),
         1 => {
-            let key = data.get(offset + 4..offset + 36)
+            let key = data
+                .get(offset + 4..offset + 36)
                 .ok_or_else(|| anyhow!("mint authority public key is truncated"))?;
             Ok(Some(bs58::encode(key).into_string()))
         }
-        other => Err(anyhow!("invalid COption public-key tag {other} in mint account")),
+        other => Err(anyhow!(
+            "invalid COption public-key tag {other} in mint account"
+        )),
     }
 }
 
@@ -227,12 +244,15 @@ fn parse_token_2022_extensions(data: &[u8]) -> Result<Vec<String>> {
         if data[offset..].iter().all(|byte| *byte == 0) {
             break;
         }
-        let header = data.get(offset..offset + 4)
+        let header = data
+            .get(offset..offset + 4)
             .ok_or_else(|| anyhow!("Token-2022 extension TLV header is truncated"))?;
         let kind = u16::from_le_bytes([header[0], header[1]]);
         let length = u16::from_le_bytes([header[2], header[3]]) as usize;
         offset += 4;
-        let end = offset.checked_add(length).ok_or_else(|| anyhow!("Token-2022 extension length overflow"))?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow!("Token-2022 extension length overflow"))?;
         if end > data.len() {
             return Err(anyhow!("Token-2022 extension value is truncated"));
         }
@@ -249,12 +269,20 @@ pub fn parse_mint_security_report(
     context_slot: Option<u64>,
 ) -> Result<TokenSecurityReport> {
     if data.len() < 82 {
-        return Err(anyhow!("mint account data is shorter than the 82-byte SPL Mint layout"));
+        return Err(anyhow!(
+            "mint account data is shorter than the 82-byte SPL Mint layout"
+        ));
     }
     let token_program = match owner {
         SPL_TOKEN_PROGRAM_ID => "spl_token",
         TOKEN_2022_PROGRAM_ID => "token_2022",
-        _ => return Ok(TokenSecurityReport::unverified(mint, "Mint account is owned by an unrecognized token program", context_slot)),
+        _ => {
+            return Ok(TokenSecurityReport::unverified(
+                mint,
+                "Mint account is owned by an unrecognized token program",
+                context_slot,
+            ))
+        }
     };
     let mint_authority = read_coption_pubkey(data, 0)?;
     let supply = u64::from_le_bytes(data[36..44].try_into().expect("eight-byte supply"));
@@ -274,12 +302,33 @@ pub fn parse_mint_security_report(
     });
     checks.push(SecurityCheck {
         name: "freeze_authority".into(),
-        status: if freeze_authority.is_none() { "passed" } else { "failed" }.into(),
-        severity: if freeze_authority.is_none() { "info" } else { "critical" }.into(),
-        detail: freeze_authority.as_ref().map(|key| format!("Freeze authority remains active: {key}")).unwrap_or_else(|| "Freeze authority is disabled.".into()),
+        status: if freeze_authority.is_none() {
+            "passed"
+        } else {
+            "failed"
+        }
+        .into(),
+        severity: if freeze_authority.is_none() {
+            "info"
+        } else {
+            "critical"
+        }
+        .into(),
+        detail: freeze_authority
+            .as_ref()
+            .map(|key| format!("Freeze authority remains active: {key}"))
+            .unwrap_or_else(|| "Freeze authority is disabled.".into()),
     });
     for extension in &extensions {
-        let high_risk = matches!(extension.as_str(), "permanent_delegate" | "transfer_hook" | "default_account_state" | "non_transferable" | "pausable" | "mint_close_authority");
+        let high_risk = matches!(
+            extension.as_str(),
+            "permanent_delegate"
+                | "transfer_hook"
+                | "default_account_state"
+                | "non_transferable"
+                | "pausable"
+                | "mint_close_authority"
+        );
         checks.push(SecurityCheck {
             name: format!("token_2022_{extension}"),
             status: if high_risk { "warning" } else { "info" }.into(),
@@ -297,7 +346,8 @@ pub fn parse_mint_security_report(
         name: "creator_history".into(),
         status: "unverified".into(),
         severity: "high".into(),
-        detail: "Creator wallet history and previous launch behaviour have not yet been analyzed.".into(),
+        detail: "Creator wallet history and previous launch behaviour have not yet been analyzed."
+            .into(),
     });
     checks.push(SecurityCheck {
         name: "metadata".into(),
@@ -318,7 +368,11 @@ pub fn parse_mint_security_report(
         detail: "A live sell quote and transaction simulation have not yet been performed.".into(),
     });
     let hard_blocker = mint_authority.is_some() || freeze_authority.is_some();
-    let decision = if hard_blocker { "REJECTED" } else { "UNVERIFIED" };
+    let decision = if hard_blocker {
+        "REJECTED"
+    } else {
+        "UNVERIFIED"
+    };
     let decision_reason = if hard_blocker {
         "A mint or freeze authority is still active. This token fails the current mandatory authority policy.".into()
     } else {
@@ -339,7 +393,6 @@ pub fn parse_mint_security_report(
         decision_reason,
     })
 }
-
 
 /// A Pump.fun create/create_v2 instruction decoded from a confirmed transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -694,7 +747,10 @@ mod transaction_decoder_tests {
         assert_eq!(report.decision, "UNVERIFIED");
         assert_eq!(report.decimals, Some(6));
         assert_eq!(report.supply_raw.as_deref(), Some("1000000"));
-        assert!(report.checks.iter().any(|check| check.name == "sellability" && check.status == "unverified"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "sellability" && check.status == "unverified"));
     }
 
     #[test]
@@ -717,15 +773,16 @@ mod transaction_decoder_tests {
         data.extend_from_slice(&12u16.to_le_bytes()); // PermanentDelegate
         data.extend_from_slice(&32u16.to_le_bytes());
         data.extend_from_slice(&[9u8; 32]);
-        let report = parse_mint_security_report(
-            "MintAddress",
-            TOKEN_2022_PROGRAM_ID,
-            &data,
-            Some(456),
-        )
-        .expect("Token-2022 mint should parse");
-        assert!(report.extensions.iter().any(|name| name == "permanent_delegate"));
-        assert!(report.checks.iter().any(|check| check.name == "token_2022_permanent_delegate" && check.status == "warning"));
+        let report =
+            parse_mint_security_report("MintAddress", TOKEN_2022_PROGRAM_ID, &data, Some(456))
+                .expect("Token-2022 mint should parse");
+        assert!(report
+            .extensions
+            .iter()
+            .any(|name| name == "permanent_delegate"));
+        assert!(report.checks.iter().any(
+            |check| check.name == "token_2022_permanent_delegate" && check.status == "warning"
+        ));
         assert_eq!(report.decision, "UNVERIFIED");
     }
 
