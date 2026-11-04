@@ -1216,11 +1216,23 @@ pub async fn run_logs_stream(
         )
         .await
         {
-            warn!(%error, "Solana WebSocket stream ended; reconnecting");
-            status.write().await.last_error = Some(error.to_string());
-            let _ = sender.send(json!({"type":"diagnostic","data":{"severity":"error","component":"solana_websocket","message":error.to_string(),"retrying":true,"received_at":chrono::Utc::now().to_rfc3339()}}));
+            reconnect_count = reconnect_count.saturating_add(1);
+            let error_message = format!("{error:#}");
+            warn!(error = %error_message, reconnect_count, "Solana WebSocket stream ended; reconnecting");
+            status.write().await.last_error = Some(error_message.clone());
+            let _ = sender.send(json!({
+                "type":"diagnostic",
+                "data":{
+                    "severity":"error",
+                    "component":"solana_websocket",
+                    "message":error_message,
+                    "retrying":true,
+                    "reconnect_count":reconnect_count,
+                    "program_id":program_id,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }
+            }));
         }
-        reconnect_count = reconnect_count.saturating_add(1);
         {
             let mut current = status.write().await;
             current.connected = false;
