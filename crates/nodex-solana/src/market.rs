@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
@@ -15,6 +16,7 @@ struct MarketSubscription {
     mint: String,
     account: String,
     venue: &'static str,
+    program_id: String,
 }
 
 enum MarketCommand {
@@ -40,6 +42,7 @@ impl MarketMonitor {
                 mint: mint.to_owned(),
                 account: account.clone(),
                 venue: "pump_fun_bonding_curve",
+                program_id: program_id.to_owned(),
             }))
             .await
             .map_err(|_| anyhow!("market monitor task is not running"))?;
@@ -348,7 +351,7 @@ async fn connect_market_stream(
                             continue;
                         };
                         let owner = account_value.and_then(|v| v.get("owner")).and_then(Value::as_str);
-                        if owner != Some(PUMP_FUN_PROGRAM_ID) {
+                        if owner != Some(subscription.program_id.as_str()) {
                             let _ = events.send(json!({
                                 "type":"diagnostic",
                                 "data":{
@@ -457,7 +460,6 @@ async fn connect_market_stream(
     }
 }
 
-const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
 #[cfg(test)]
 mod market_monitor_tests {
@@ -485,7 +487,7 @@ mod market_monitor_tests {
         assert_eq!(curve.virtual_token_reserves, 1_000_000_000);
         assert_eq!(curve.virtual_sol_reserves, 30_000_000_000);
         assert!((curve.price_sol - 0.03).abs() < 1e-12);
-        assert!((curve.market_cap_sol - 30_000_000.0).abs() < 1e-6);
+        assert!((curve.market_cap_sol - 30.0).abs() < 1e-9);
         assert!(!curve.complete);
     }
 
