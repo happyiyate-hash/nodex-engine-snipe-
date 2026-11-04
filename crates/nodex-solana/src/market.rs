@@ -932,7 +932,6 @@ async fn connect_market_stream(
     }
 }
 
-
 /// Verified PumpSwap activity decoded from the official Anchor event layouts.
 /// Amounts are raw token units; quote amounts are SOL lamports only for WSOL pools.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1081,7 +1080,6 @@ pub fn decode_pump_swap_activity_log_line(line: &str) -> Result<Option<PumpSwapA
 #[cfg(test)]
 mod market_monitor_tests {
     use super::*;
-
 
     fn encoded_pumpswap_trade(discriminator: [u8; 8]) -> Vec<u8> {
         let mut data = discriminator.to_vec();
