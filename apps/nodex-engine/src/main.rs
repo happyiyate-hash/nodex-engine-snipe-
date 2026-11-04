@@ -113,6 +113,11 @@ async fn client_socket(socket: WebSocket, state: AppState) {
         tokio::select! {
             event = receiver.recv() => match event {
                 Ok(value) => {
+                    let paused = state.control.read().await.paused;
+                    let is_market_stream = value.get("method").and_then(|v| v.as_str()) == Some("logsNotification");
+                    if paused && is_market_stream {
+                        continue;
+                    }
                     if sender.send(Message::Text(value.to_string())).await.is_err() {
                         break;
                     }
