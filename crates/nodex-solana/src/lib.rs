@@ -332,6 +332,20 @@ pub struct SecurityCheck {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenMetadataReport {
+    pub source: String,
+    pub update_authority: Option<String>,
+    pub mutable: Option<bool>,
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub uri: Option<String>,
+    pub metadata_pointer_authority: Option<String>,
+    pub metadata_pointer_address: Option<String>,
+    pub status: String,
+    pub caveat: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSecurityReport {
     pub mint_address: String,
@@ -344,6 +358,7 @@ pub struct TokenSecurityReport {
     pub freeze_authority: Option<String>,
     pub extensions: Vec<String>,
     pub holder_distribution: Option<HolderDistribution>,
+    pub metadata: TokenMetadataReport,
     pub checks: Vec<SecurityCheck>,
     pub decision: String,
     pub decision_reason: String,
@@ -362,6 +377,11 @@ impl TokenSecurityReport {
             freeze_authority: None,
             extensions: vec![],
             holder_distribution: None,
+            metadata: TokenMetadataReport {
+                status: "unverified".into(),
+                caveat: "Mint account metadata was not available.".into(),
+                ..Default::default()
+            },
             checks: vec![SecurityCheck {
                 name: "mint_account".into(),
                 status: "unverified".into(),
@@ -459,6 +479,88 @@ fn parse_token_2022_extensions(data: &[u8]) -> Result<Vec<String>> {
     Ok(extensions)
 }
 
+fn optional_nonzero_pubkey(data: &[u8]) -> Result<Option<String>> {
+    if data.len() < 32 {
+        return Err(anyhow!("metadata public key field is truncated"));
+    }
+    if data[..32].iter().all(|byte| *byte == 0) {
+        Ok(None)
+    } else {
+        Ok(Some(bs58::encode(&data[..32]).into_string()))
+    }
+}
+
+fn read_metadata_string(data: &[u8], offset: &mut usize) -> Result<String> {
+    let length_bytes = data
+        .get(*offset..*offset + 4)
+        .ok_or_else(|| anyhow!("metadata string length is truncated"))?;
+    let length =
+        u32::from_le_bytes(length_bytes.try_into().expect("four-byte metadata length")) as usize;
+    *offset += 4;
+    let end = (*offset)
+        .checked_add(length)
+        .ok_or_else(|| anyhow!("metadata string length overflow"))?;
+    let bytes = data
+        .get(*offset..end)
+        .ok_or_else(|| anyhow!("metadata string value is truncated"))?;
+    *offset = end;
+    String::from_utf8(bytes.to_vec()).context("metadata string is not valid UTF-8")
+}
+
+fn parse_token_2022_metadata(data: &[u8]) -> Result<TokenMetadataReport> {
+    let mut report = TokenMetadataReport {
+        source: "token_2022_extensions".into(),
+        status: "unverified".into(),
+        caveat: "No on-mint TokenMetadata extension was found; external metadata accounts are not yet decoded.".into(),
+        ..Default::default()
+    };
+    if data.len() <= 82 {
+        return Ok(report);
+    }
+    let mut offset = 83usize;
+    while offset + 4 <= data.len() {
+        if data[offset..].iter().all(|byte| *byte == 0) {
+            break;
+        }
+        let kind = u16::from_le_bytes([data[offset], data[offset + 1]]);
+        let length = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
+        offset += 4;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow!("metadata extension length overflow"))?;
+        let value = data
+            .get(offset..end)
+            .ok_or_else(|| anyhow!("metadata extension value is truncated"))?;
+        match kind {
+            18 => {
+                if value.len() < 64 {
+                    return Err(anyhow!("metadata pointer extension is truncated"));
+                }
+                report.metadata_pointer_authority = optional_nonzero_pubkey(&value[..32])?;
+                report.metadata_pointer_address = optional_nonzero_pubkey(&value[32..64])?;
+            }
+            19 => {
+                if value.len() < 64 {
+                    return Err(anyhow!(
+                        "TokenMetadata extension is shorter than its fixed fields"
+                    ));
+                }
+                report.update_authority = optional_nonzero_pubkey(&value[..32])?;
+                let mut cursor = 64usize;
+                report.name = Some(read_metadata_string(value, &mut cursor)?);
+                report.symbol = Some(read_metadata_string(value, &mut cursor)?);
+                report.uri = Some(read_metadata_string(value, &mut cursor)?);
+                report.mutable = Some(report.update_authority.is_some());
+                report.status = "partial".into();
+                report.caveat = "Embedded Token-2022 metadata was parsed. Update authority presence is used as the mutability indicator; external URI content, image integrity and impersonation are not verified.".into();
+            }
+            _ => {}
+        }
+        offset = end;
+    }
+    Ok(report)
+}
+
 pub fn parse_mint_security_report(
     mint: &str,
     owner: &str,
@@ -489,6 +591,16 @@ pub fn parse_mint_security_report(
         parse_token_2022_extensions(data)?
     } else {
         vec![]
+    };
+    let metadata = if token_program == "token_2022" {
+        parse_token_2022_metadata(data)?
+    } else {
+        TokenMetadataReport {
+            source: "metaplex_external_not_yet_supported".into(),
+            status: "unverified".into(),
+            caveat: "Standard SPL metadata PDA and off-chain metadata are not yet fetched; mutability cannot be determined.".into(),
+            ..Default::default()
+        }
     };
     let mut checks = Vec::new();
     checks.push(SecurityCheck {
@@ -548,9 +660,14 @@ pub fn parse_mint_security_report(
     });
     checks.push(SecurityCheck {
         name: "metadata".into(),
-        status: "unverified".into(),
-        severity: "medium".into(),
-        detail: "Metadata update authority, mutability and impersonation checks are not yet implemented.".into(),
+        status: metadata.status.clone(),
+        severity: if metadata.status == "partial" {
+            "medium"
+        } else {
+            "high"
+        }
+        .into(),
+        detail: metadata.caveat.clone(),
     });
     checks.push(SecurityCheck {
         name: "liquidity".into(),
@@ -586,6 +703,7 @@ pub fn parse_mint_security_report(
         freeze_authority,
         extensions,
         holder_distribution: None,
+        metadata,
         checks,
         decision: decision.into(),
         decision_reason,
@@ -931,6 +1049,27 @@ mod transaction_decoder_tests {
             data[50..82].fill(8);
         }
         data
+    }
+
+    #[test]
+    fn parses_token_2022_embedded_metadata_and_update_authority() {
+        let mut data = base_mint_data(false, false);
+        data.push(1);
+        let mut metadata = vec![9u8; 32];
+        metadata.extend_from_slice(&[4u8; 32]);
+        borsh_string("Metadata Token", &mut metadata);
+        borsh_string("META", &mut metadata);
+        borsh_string("https://example.invalid/meta.json", &mut metadata);
+        data.extend_from_slice(&19u16.to_le_bytes());
+        data.extend_from_slice(&(metadata.len() as u16).to_le_bytes());
+        data.extend_from_slice(&metadata);
+        let report =
+            parse_mint_security_report("MintAddress", TOKEN_2022_PROGRAM_ID, &data, Some(7))
+                .unwrap();
+        assert_eq!(report.metadata.name.as_deref(), Some("Metadata Token"));
+        assert_eq!(report.metadata.symbol.as_deref(), Some("META"));
+        assert_eq!(report.metadata.mutable, Some(true));
+        assert_eq!(report.metadata.status, "partial");
     }
 
     #[test]
