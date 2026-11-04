@@ -307,9 +307,6 @@ pub fn decode_pump_swap_pool_account(data: &[u8]) -> Result<PumpSwapPoolAccount>
 #[derive(Debug, Clone, Default)]
 struct PumpSwapLiveState {
     virtual_quote_reserves: i128,
-    base_mint: String,
-    base_vault: String,
-    quote_vault: String,
     base_decimals: Option<u8>,
     base_total_supply: Option<u64>,
     base_reserves: Option<u64>,
@@ -331,13 +328,19 @@ pub struct SplMintState {
 /// Decode the stable SPL Mint base layout. Token-2022 extension bytes may follow it.
 pub fn decode_spl_mint_account(data: &[u8]) -> Result<SplMintState> {
     if data.len() < 82 {
-        return Err(anyhow!("SPL mint account is too short: {} bytes", data.len()));
+        return Err(anyhow!(
+            "SPL mint account is too short: {} bytes",
+            data.len()
+        ));
     }
     if data[45] != 1 {
         return Err(anyhow!("SPL mint is not initialized"));
     }
     let supply = u64::from_le_bytes(data[36..44].try_into().expect("eight-byte mint supply"));
-    Ok(SplMintState { supply, decimals: data[44] })
+    Ok(SplMintState {
+        supply,
+        decimals: data[44],
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -348,7 +351,10 @@ pub struct SplTokenAccountState {
 /// Decode the common SPL Token / Token-2022 account base layout.
 pub fn decode_spl_token_account(data: &[u8]) -> Result<SplTokenAccountState> {
     if data.len() < 165 {
-        return Err(anyhow!("SPL token account is too short: {} bytes", data.len()));
+        return Err(anyhow!(
+            "SPL token account is too short: {} bytes",
+            data.len()
+        ));
     }
     if data[108] != 1 && data[108] != 2 {
         return Err(anyhow!("SPL token account is not initialized"));
@@ -358,10 +364,18 @@ pub fn decode_spl_token_account(data: &[u8]) -> Result<SplTokenAccountState> {
 }
 
 fn pump_swap_price(state: &PumpSwapLiveState) -> Result<(f64, f64, u64)> {
-    let base_reserves = state.base_reserves.ok_or_else(|| anyhow!("base vault has not reported yet"))?;
-    let quote_reserves = state.quote_reserves.ok_or_else(|| anyhow!("quote vault has not reported yet"))?;
-    let decimals = state.base_decimals.ok_or_else(|| anyhow!("base mint decimals have not reported yet"))?;
-    let supply = state.base_total_supply.ok_or_else(|| anyhow!("base mint supply has not reported yet"))?;
+    let base_reserves = state
+        .base_reserves
+        .ok_or_else(|| anyhow!("base vault has not reported yet"))?;
+    let quote_reserves = state
+        .quote_reserves
+        .ok_or_else(|| anyhow!("quote vault has not reported yet"))?;
+    let decimals = state
+        .base_decimals
+        .ok_or_else(|| anyhow!("base mint decimals have not reported yet"))?;
+    let supply = state
+        .base_total_supply
+        .ok_or_else(|| anyhow!("base mint supply has not reported yet"))?;
     if base_reserves == 0 {
         return Err(anyhow!("PumpSwap base vault reserve is zero"));
     }
@@ -611,9 +625,6 @@ async fn connect_market_stream(
                             }
                             let mut state = PumpSwapLiveState {
                                 virtual_quote_reserves: pool.virtual_quote_reserves,
-                                base_mint: pool.base_mint.clone(),
-                                base_vault: pool.pool_base_token_account.clone(),
-                                quote_vault: pool.pool_quote_token_account.clone(),
                                 pool_slot: slot,
                                 latest_slot: slot,
                                 ..PumpSwapLiveState::default()
@@ -626,13 +637,30 @@ async fn connect_market_stream(
                             }
                             pumpswap_states.insert(subscription.mint.clone(), state);
                             let required = [
-                                ("spl_mint", subscription.mint.clone(), None, "spl_token_program"),
-                                ("pump_swap_base_vault", pool.pool_base_token_account.clone(), Some(pool.base_mint.clone()), "spl_token_program"),
-                                ("pump_swap_quote_vault", pool.pool_quote_token_account.clone(), Some(pool.quote_mint.clone()), SPL_TOKEN_PROGRAM_ID),
+                                (
+                                    "spl_mint",
+                                    subscription.mint.clone(),
+                                    None,
+                                    "spl_token_program",
+                                ),
+                                (
+                                    "pump_swap_base_vault",
+                                    pool.pool_base_token_account.clone(),
+                                    Some(pool.base_mint.clone()),
+                                    "spl_token_program",
+                                ),
+                                (
+                                    "pump_swap_quote_vault",
+                                    pool.pool_quote_token_account.clone(),
+                                    Some(pool.quote_mint.clone()),
+                                    SPL_TOKEN_PROGRAM_ID,
+                                ),
                             ];
                             if desired.len().saturating_add(required.len()) <= MAX_MARKET_SUBSCRIPTIONS {
                                 for (venue, account, expected_mint, expected_program) in required {
-                                    if desired.contains_key(&account) { continue; }
+                                    if desired.contains_key(&account) {
+                                        continue;
+                                    }
                                     let child = MarketSubscription {
                                         mint: subscription.mint.clone(),
                                         account: account.clone(),
@@ -726,14 +754,23 @@ async fn connect_market_stream(
                                 match pump_swap_price(state) {
                                     Ok((price_sol, market_cap_sol, effective_quote_reserves)) => {
                                         let now_ms = chrono::Utc::now().timestamp_millis();
-                                        let history = price_history.entry(subscription.mint.clone()).or_default();
+                                        let history =
+                                            price_history.entry(subscription.mint.clone()).or_default();
                                         let change_1m = percentage_change(history, now_ms, 60, price_sol);
                                         let change_5m = percentage_change(history, now_ms, 300, price_sol);
-                                        let should_sample = history.back().is_none_or(|sample| now_ms.saturating_sub(sample.timestamp_ms) >= 500);
+                                        let should_sample = history.back().is_none_or(|sample| {
+                                            now_ms.saturating_sub(sample.timestamp_ms) >= 500
+                                        });
                                         if should_sample {
-                                            history.push_back(PriceSample { timestamp_ms: now_ms, price_sol });
+                                            history.push_back(PriceSample {
+                                                timestamp_ms: now_ms,
+                                                price_sol,
+                                            });
                                         }
-                                        while history.front().is_some_and(|sample| now_ms.saturating_sub(sample.timestamp_ms) > 600_000) || history.len() > 1_200 {
+                                        while history.front().is_some_and(|sample| {
+                                            now_ms.saturating_sub(sample.timestamp_ms) > 600_000
+                                        }) || history.len() > 1_200
+                                        {
                                             history.pop_front();
                                         }
                                         let _ = events.send(json!({"type":"market_price_update","data":{
