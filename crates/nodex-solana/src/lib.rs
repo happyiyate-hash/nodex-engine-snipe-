@@ -108,6 +108,7 @@ pub async fn run_logs_stream(
         if let Err(error) = connect_and_subscribe(&ws_url, &program_id, &sender, &status).await {
             warn!(%error, "Solana WebSocket stream ended; reconnecting");
             status.write().await.last_error = Some(error.to_string());
+            let _ = sender.send(json!({"type":"diagnostic","data":{"severity":"error","component":"solana_websocket","message":error.to_string(),"retrying":true,"received_at":chrono::Utc::now().to_rfc3339()}}));
         }
         reconnect_count = reconnect_count.saturating_add(1);
         {
@@ -116,7 +117,8 @@ pub async fn run_logs_stream(
             current.subscription_id = None;
             current.reconnect_count = reconnect_count;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let delay = 2_u64.saturating_mul(1_u64 << reconnect_count.min(4)).min(30);
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
     }
 }
 
@@ -157,6 +159,7 @@ async fn connect_and_subscribe(
         current.last_error = None;
     }
     info!(subscription_id, program_id, "Subscribed to Solana program logs");
+    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":true,"subscription_id":subscription_id,"program_id":program_id,"received_at":chrono::Utc::now().to_rfc3339()}}));
 
     while let Some(message) = socket.next().await {
         match message? {
@@ -171,5 +174,6 @@ async fn connect_and_subscribe(
             _ => {}
         }
     }
+    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":false,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())
 }
