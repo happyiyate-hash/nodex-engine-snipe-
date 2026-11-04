@@ -212,7 +212,6 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
     })
 }
 
-
 pub const PUMP_SWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 pub const WRAPPED_SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
@@ -222,15 +221,21 @@ pub fn derive_pump_swap_pool(mint: &str, pump_program_id: &str) -> Result<String
     let pump_program = Pubkey::from_str(pump_program_id).context("invalid Pump.fun program id")?;
     let amm_program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID).expect("valid PumpSwap program id");
     let wrapped_sol = Pubkey::from_str(WRAPPED_SOL_MINT).expect("valid wrapped SOL mint");
-    let (pool_authority, _) = Pubkey::try_find_program_address(
-        &[b"pool-authority", mint.as_ref()],
-        &pump_program,
-    ).ok_or_else(|| anyhow!("could not derive Pump.fun pool-authority PDA"))?;
+    let (pool_authority, _) =
+        Pubkey::try_find_program_address(&[b"pool-authority", mint.as_ref()], &pump_program)
+            .ok_or_else(|| anyhow!("could not derive Pump.fun pool-authority PDA"))?;
     let canonical_index = 0_u16.to_le_bytes();
     let (pool, _) = Pubkey::try_find_program_address(
-        &[b"pool", &canonical_index, pool_authority.as_ref(), mint.as_ref(), wrapped_sol.as_ref()],
+        &[
+            b"pool",
+            &canonical_index,
+            pool_authority.as_ref(),
+            mint.as_ref(),
+            wrapped_sol.as_ref(),
+        ],
         &amm_program,
-    ).ok_or_else(|| anyhow!("could not derive canonical PumpSwap pool PDA"))?;
+    )
+    .ok_or_else(|| anyhow!("could not derive canonical PumpSwap pool PDA"))?;
     Ok(pool.to_string())
 }
 
@@ -251,26 +256,38 @@ pub fn decode_pump_swap_pool_account(data: &[u8]) -> Result<PumpSwapPoolAccount>
     const DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
     const MINIMUM_LENGTH: usize = 211;
     if data.len() < MINIMUM_LENGTH {
-        return Err(anyhow!("PumpSwap Pool account is too short: {} bytes", data.len()));
+        return Err(anyhow!(
+            "PumpSwap Pool account is too short: {} bytes",
+            data.len()
+        ));
     }
     if data[..8] != DISCRIMINATOR {
         return Err(anyhow!("account discriminator is not PumpSwap Pool"));
     }
     let read_u64 = |offset: usize| -> Result<u64> {
-        let bytes: [u8; 8] = data.get(offset..offset + 8)
+        let bytes: [u8; 8] = data
+            .get(offset..offset + 8)
             .ok_or_else(|| anyhow!("PumpSwap Pool integer field is truncated"))?
-            .try_into().map_err(|_| anyhow!("invalid PumpSwap Pool integer field"))?;
+            .try_into()
+            .map_err(|_| anyhow!("invalid PumpSwap Pool integer field"))?;
         Ok(u64::from_le_bytes(bytes))
     };
     let read_key = |offset: usize| -> Result<String> {
-        let bytes = data.get(offset..offset + 32)
+        let bytes = data
+            .get(offset..offset + 32)
             .ok_or_else(|| anyhow!("PumpSwap Pool public-key field is truncated"))?;
         Ok(bs58::encode(bytes).into_string())
     };
     let index = u16::from_le_bytes(data[9..11].try_into().expect("two-byte index"));
     let virtual_quote_reserves = if data.len() >= 261 {
-        i128::from_le_bytes(data[245..261].try_into().expect("sixteen-byte signed reserve"))
-    } else { 0 };
+        i128::from_le_bytes(
+            data[245..261]
+                .try_into()
+                .expect("sixteen-byte signed reserve"),
+        )
+    } else {
+        0
+    };
     Ok(PumpSwapPoolAccount {
         index,
         creator: read_key(11)?,
@@ -675,12 +692,13 @@ mod market_monitor_tests {
         data
     }
 
-
     fn encoded_pool() -> Vec<u8> {
         let mut data = vec![241, 154, 109, 4, 17, 177, 109, 188];
         data.push(254);
         data.extend_from_slice(&0_u16.to_le_bytes());
-        for byte in [1_u8, 2, 3, 4, 5, 6] { data.extend_from_slice(&[byte; 32]); }
+        for byte in [1_u8, 2, 3, 4, 5, 6] {
+            data.extend_from_slice(&[byte; 32]);
+        }
         data.extend_from_slice(&99_u64.to_le_bytes());
         data.extend_from_slice(&[7_u8; 32]);
         data.extend_from_slice(&[0_u8, 0_u8]);
@@ -695,8 +713,14 @@ mod market_monitor_tests {
         assert_eq!(pool.index, 0);
         assert_eq!(pool.base_mint, bs58::encode([2_u8; 32]).into_string());
         assert_eq!(pool.quote_mint, bs58::encode([3_u8; 32]).into_string());
-        assert_eq!(pool.pool_base_token_account, bs58::encode([5_u8; 32]).into_string());
-        assert_eq!(pool.pool_quote_token_account, bs58::encode([6_u8; 32]).into_string());
+        assert_eq!(
+            pool.pool_base_token_account,
+            bs58::encode([5_u8; 32]).into_string()
+        );
+        assert_eq!(
+            pool.pool_quote_token_account,
+            bs58::encode([6_u8; 32]).into_string()
+        );
         assert_eq!(pool.lp_supply, 99);
         assert_eq!(pool.virtual_quote_reserves, -12);
     }
