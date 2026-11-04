@@ -79,9 +79,11 @@ impl RollingTradeVolume {
         let cutoff = now_ms.saturating_sub(window_ms);
         let mut result = WindowVolumeMetrics::default();
 
-        for sample in self.samples.iter().filter(|sample| {
-            sample.timestamp_ms >= cutoff && sample.timestamp_ms <= now_ms
-        }) {
+        for sample in self
+            .samples
+            .iter()
+            .filter(|sample| sample.timestamp_ms >= cutoff && sample.timestamp_ms <= now_ms)
+        {
             match sample.side {
                 TradeSide::Buy => {
                     result.buy_volume_raw = result
@@ -98,21 +100,17 @@ impl RollingTradeVolume {
             }
         }
 
-        result.total_volume_raw = result
-            .buy_volume_raw
-            .saturating_add(result.sell_volume_raw);
+        result.total_volume_raw = result.buy_volume_raw.saturating_add(result.sell_volume_raw);
         if result.total_volume_raw > 0 {
-            result.buy_pressure_pct = Some(
-                result.buy_volume_raw as f64 / result.total_volume_raw as f64 * 100.0,
-            );
+            result.buy_pressure_pct =
+                Some(result.buy_volume_raw as f64 / result.total_volume_raw as f64 * 100.0);
         }
         result
     }
 
     fn prune(&mut self, now_ms: i64) {
         let cutoff = now_ms.saturating_sub(MAX_WINDOW_MS);
-        self.samples
-            .retain(|sample| sample.timestamp_ms >= cutoff);
+        self.samples.retain(|sample| sample.timestamp_ms >= cutoff);
     }
 
     #[cfg(test)]

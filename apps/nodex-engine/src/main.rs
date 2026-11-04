@@ -62,7 +62,6 @@ struct Health {
     service: &'static str,
 }
 
-
 fn volume_window_json(metrics: WindowVolumeMetrics) -> serde_json::Value {
     json!({
         "buy_volume_raw": metrics.buy_volume_raw.to_string(),
