@@ -1247,6 +1247,33 @@ mod market_monitor_tests {
     }
 
     #[test]
+    fn derives_pool_address_from_the_decoded_pair_identity() {
+        let pool = PumpSwapPoolAccount {
+            index: 7,
+            creator: bs58::encode([1_u8; 32]).into_string(),
+            base_mint: bs58::encode([2_u8; 32]).into_string(),
+            quote_mint: bs58::encode([3_u8; 32]).into_string(),
+            pool_base_token_account: bs58::encode([4_u8; 32]).into_string(),
+            pool_quote_token_account: bs58::encode([5_u8; 32]).into_string(),
+            lp_supply: 10,
+            virtual_quote_reserves: 0,
+        };
+        let program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID).unwrap();
+        let creator = Pubkey::from_str(&pool.creator).unwrap();
+        let base = Pubkey::from_str(&pool.base_mint).unwrap();
+        let quote = Pubkey::from_str(&pool.quote_mint).unwrap();
+        let index = pool.index.to_le_bytes();
+        let expected = Pubkey::try_find_program_address(
+            &[b"pool", &index, creator.as_ref(), base.as_ref(), quote.as_ref()],
+            &program,
+        )
+        .unwrap()
+        .0
+        .to_string();
+        assert_eq!(derive_pump_swap_pool_address(&pool).unwrap(), expected);
+    }
+
+    #[test]
     fn accepts_legacy_pumpswap_pool_without_virtual_quote_reserves() {
         let mut legacy = encoded_pool();
         legacy.truncate(245);
