@@ -159,9 +159,10 @@ fn start_launch_processor(
                 let Some(launch) = launch else { return };
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
+                        let mint_address = launch.mint_address.clone();
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
                         let _ = events.send(json!({"type":"token_scan_started","data":{
-                            "mint_address":launch.mint_address,
+                            "mint_address":mint_address,
                             "status":"scanning",
                             "checks_completed":0,
                             "checks_total":0,
@@ -250,7 +251,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
     let control = state.control.read().await.clone();
-    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":true,"token_security_scanning":false,"transaction_decoding":"pump_fun_create_and_create_v2"}}}).to_string();
+    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":state.rpc.is_some() && status.connected,"token_security_scanning":false,"transaction_decoding":"pump_fun_create_and_create_v2","transaction_decoding_enabled":state.rpc.is_some() && status.connected}}}).to_string();
     if sender.send(Message::Text(initial)).await.is_err() {
         return;
     }
