@@ -177,7 +177,7 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
     // The current IDL calls this virtual_quote_reserves, not virtual_sol_reserves.
     // Legacy accounts (81-83 bytes) predate quote_mint and are SOL-paired.
     // Newer accounts store quote_mint after the two appended boolean flags.
-    if (data.len() > 83 && data.len() < 115 {
+    if data.len() > 83 && data.len() < 115 {
         return Err(anyhow!("Pump.fun bonding-curve account has a truncated quote_mint field"));
     }
     if data.len() >= 115 && data[83..115].iter().any(|byte| *byte != 0) {
@@ -429,6 +429,18 @@ async fn connect_market_stream(
                         let real_token_reserves = curve.real_token_reserves;
                         let complete = curve.complete;
                         let _ = events.send(json!({
+                            "type":"market_account_update",
+                            "data":{
+                                "mint_address":subscription.mint,
+                                "account_address":subscription.account,
+                                "venue":"pump_fun_bonding_curve",
+                                "slot":slot,
+                                "owner":owner,
+                                "account_data_size":raw.len(),
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }
+                        }));
+                        let _ = events.send(json!({
                             "type":"market_price_update",
                             "data":{
                                 "mint_address":subscription.mint,
@@ -450,7 +462,7 @@ async fn connect_market_stream(
                                 "price_change_1m_pct":change_1m,
                                 "price_change_5m_pct":change_5m,
                                 "history_samples":history.len(),
-                                "price_change_status":if change_5m.is_some() {"ready"} else {"warming_up"},
+                                "price_change_status":if change_1m.is_some() && change_5m.is_some() {"ready"} else {"warming_up"},
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }
                         }));
