@@ -1,0 +1,13 @@
+[package]
+name = "nodex-persistence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+nodex-core = { path = "../nodex-core" }
+nodex-trading = { path = "../nodex-trading" }
+serde_json.workspace = true
+sqlx.workspace = true
