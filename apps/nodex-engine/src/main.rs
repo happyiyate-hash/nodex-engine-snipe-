@@ -738,8 +738,16 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ws_url) = config.solana_ws_url.clone() {
         let sender = events.clone();
         let status = Arc::new(RwLock::new(StreamStatus::default()));
+        let recovery_rpc = rpc.clone();
         tokio::spawn(async move {
-            run_logs_stream(ws_url, PUMPSWAP_PROGRAM_ID.to_owned(), sender, status).await;
+            run_logs_stream(
+                ws_url,
+                PUMPSWAP_PROGRAM_ID.to_owned(),
+                sender,
+                status,
+                recovery_rpc,
+            )
+            .await;
         });
     }
 
@@ -760,8 +768,9 @@ async fn main() -> anyhow::Result<()> {
         let sender = events.clone();
         let status = stream_status.clone();
         let program_id = config.pump_fun_program_id.clone();
+        let recovery_rpc = rpc.clone();
         tokio::spawn(async move {
-            run_logs_stream(ws_url, program_id, sender, status).await;
+            run_logs_stream(ws_url, program_id, sender, status, recovery_rpc).await;
         });
     } else {
         tracing::warn!("Helius not configured; set HELIUS_API_KEY or SOLANA_RPC_WS_URL");
