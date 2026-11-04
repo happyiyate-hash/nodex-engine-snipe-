@@ -10,6 +10,8 @@ use tracing::{info, warn};
 
 const MAX_MARKET_SUBSCRIPTIONS: usize = 250;
 const MARKET_COMMAND_CAPACITY: usize = 512;
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 #[derive(Debug, Clone)]
 struct MarketSubscription {
@@ -17,6 +19,7 @@ struct MarketSubscription {
     account: String,
     venue: &'static str,
     program_id: String,
+    expected_mint: Option<String>,
 }
 
 enum MarketCommand {
@@ -43,6 +46,7 @@ impl MarketMonitor {
                 account: account.clone(),
                 venue: "pump_fun_bonding_curve",
                 program_id: program_id.to_owned(),
+                expected_mint: None,
             }))
             .await
             .map_err(|_| anyhow!("market monitor task is not running"))?;
@@ -300,6 +304,101 @@ pub fn decode_pump_swap_pool_account(data: &[u8]) -> Result<PumpSwapPoolAccount>
     })
 }
 
+#[derive(Debug, Clone, Default)]
+struct PumpSwapLiveState {
+    virtual_quote_reserves: i128,
+    base_decimals: Option<u8>,
+    base_total_supply: Option<u64>,
+    base_reserves: Option<u64>,
+    quote_reserves: Option<u64>,
+    pool_slot: Option<u64>,
+    latest_slot: Option<u64>,
+}
+
+fn is_supported_token_program(owner: &str) -> bool {
+    owner == SPL_TOKEN_PROGRAM_ID || owner == TOKEN_2022_PROGRAM_ID
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplMintState {
+    pub supply: u64,
+    pub decimals: u8,
+}
+
+/// Decode the stable SPL Mint base layout. Token-2022 extension bytes may follow it.
+pub fn decode_spl_mint_account(data: &[u8]) -> Result<SplMintState> {
+    if data.len() < 82 {
+        return Err(anyhow!(
+            "SPL mint account is too short: {} bytes",
+            data.len()
+        ));
+    }
+    if data[45] != 1 {
+        return Err(anyhow!("SPL mint is not initialized"));
+    }
+    let supply = u64::from_le_bytes(data[36..44].try_into().expect("eight-byte mint supply"));
+    Ok(SplMintState {
+        supply,
+        decimals: data[44],
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplTokenAccountState {
+    pub amount: u64,
+}
+
+/// Decode the common SPL Token / Token-2022 account base layout.
+pub fn decode_spl_token_account(data: &[u8]) -> Result<SplTokenAccountState> {
+    if data.len() < 165 {
+        return Err(anyhow!(
+            "SPL token account is too short: {} bytes",
+            data.len()
+        ));
+    }
+    if data[108] != 1 && data[108] != 2 {
+        return Err(anyhow!("SPL token account is not initialized"));
+    }
+    let amount = u64::from_le_bytes(data[64..72].try_into().expect("eight-byte token amount"));
+    Ok(SplTokenAccountState { amount })
+}
+
+fn pump_swap_price(state: &PumpSwapLiveState) -> Result<(f64, f64, u64)> {
+    let base_reserves = state
+        .base_reserves
+        .ok_or_else(|| anyhow!("base vault has not reported yet"))?;
+    let quote_reserves = state
+        .quote_reserves
+        .ok_or_else(|| anyhow!("quote vault has not reported yet"))?;
+    let decimals = state
+        .base_decimals
+        .ok_or_else(|| anyhow!("base mint decimals have not reported yet"))?;
+    let supply = state
+        .base_total_supply
+        .ok_or_else(|| anyhow!("base mint supply has not reported yet"))?;
+    if base_reserves == 0 {
+        return Err(anyhow!("PumpSwap base vault reserve is zero"));
+    }
+    let effective_quote = i128::from(quote_reserves)
+        .checked_add(state.virtual_quote_reserves)
+        .ok_or_else(|| anyhow!("effective quote reserve overflow"))?;
+    let effective_quote = u64::try_from(effective_quote)
+        .map_err(|_| anyhow!("effective quote reserves are negative or exceed u64"))?;
+    if effective_quote == 0 {
+        return Err(anyhow!("PumpSwap effective quote reserve is zero"));
+    }
+    let base_scale = 10_f64.powi(i32::from(decimals));
+    let price_sol =
+        (effective_quote as f64 / 1_000_000_000.0) / (base_reserves as f64 / base_scale);
+    let market_cap_sol = price_sol * (supply as f64 / base_scale);
+    if !price_sol.is_finite() || price_sol <= 0.0 || !market_cap_sol.is_finite() {
+        return Err(anyhow!(
+            "PumpSwap price calculation was not finite and positive"
+        ));
+    }
+    Ok((price_sol, market_cap_sol, effective_quote))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PriceSample {
     timestamp_ms: i64,
@@ -337,6 +436,7 @@ async fn connect_market_stream(
     let mut pending = HashMap::<u64, MarketSubscription>::new();
     let mut active = HashMap::<u64, MarketSubscription>::new();
     let mut price_history = HashMap::<String, std::collections::VecDeque<PriceSample>>::new();
+    let mut pumpswap_states = HashMap::<String, PumpSwapLiveState>::new();
 
     for subscription in desired.values() {
         if pending.len() >= MAX_MARKET_SUBSCRIPTIONS {
@@ -464,7 +564,12 @@ async fn connect_market_stream(
                         let owner = account_value.and_then(|v| v.get("owner")).and_then(Value::as_str);
                         let lamports = account_value.and_then(|v| v.get("lamports")).and_then(Value::as_u64);
                         let space = account_value.and_then(|v| v.get("space")).and_then(Value::as_u64);
-                        if owner != Some(subscription.program_id.as_str()) {
+                        let owner_valid = match subscription.venue {
+                            "spl_mint" | "pump_swap_base_vault" => owner.is_some_and(is_supported_token_program),
+                            "pump_swap_quote_vault" => owner == Some(SPL_TOKEN_PROGRAM_ID),
+                            _ => owner == Some(subscription.program_id.as_str()),
+                        };
+                        if !owner_valid {
                             let _ = events.send(json!({
                                 "type":"diagnostic",
                                 "data":{
@@ -473,6 +578,7 @@ async fn connect_market_stream(
                                     "message":"Market account owner did not match the expected program for this subscription.",
                                     "mint_address":subscription.mint,
                                     "account_address":subscription.account,
+                                    "venue":subscription.venue,
                                     "expected_owner":subscription.program_id,
                                     "observed_owner":owner
                                 }
@@ -519,6 +625,65 @@ async fn connect_market_stream(
                                 }}));
                                 continue;
                             }
+                            let mut state = PumpSwapLiveState {
+                                virtual_quote_reserves: pool.virtual_quote_reserves,
+                                pool_slot: slot,
+                                latest_slot: slot,
+                                ..PumpSwapLiveState::default()
+                            };
+                            if let Some(existing) = pumpswap_states.get(&subscription.mint) {
+                                state.base_decimals = existing.base_decimals;
+                                state.base_total_supply = existing.base_total_supply;
+                                state.base_reserves = existing.base_reserves;
+                                state.quote_reserves = existing.quote_reserves;
+                            }
+                            pumpswap_states.insert(subscription.mint.clone(), state);
+                            let required = [
+                                (
+                                    "spl_mint",
+                                    subscription.mint.clone(),
+                                    None,
+                                    "spl_token_program",
+                                ),
+                                (
+                                    "pump_swap_base_vault",
+                                    pool.pool_base_token_account.clone(),
+                                    Some(pool.base_mint.clone()),
+                                    "spl_token_program",
+                                ),
+                                (
+                                    "pump_swap_quote_vault",
+                                    pool.pool_quote_token_account.clone(),
+                                    Some(pool.quote_mint.clone()),
+                                    SPL_TOKEN_PROGRAM_ID,
+                                ),
+                            ];
+                            if desired.len().saturating_add(required.len()) <= MAX_MARKET_SUBSCRIPTIONS {
+                                for (venue, account, expected_mint, expected_program) in required {
+                                    if desired.contains_key(&account) {
+                                        continue;
+                                    }
+                                    let child = MarketSubscription {
+                                        mint: subscription.mint.clone(),
+                                        account: account.clone(),
+                                        venue,
+                                        program_id: expected_program.to_owned(),
+                                        expected_mint,
+                                    };
+                                    let request_id = next_request_id;
+                                    next_request_id = next_request_id.saturating_add(1);
+                                    send_account_subscribe(&mut sink, request_id, &account).await?;
+                                    desired.insert(account, child.clone());
+                                    pending.insert(request_id, child);
+                                }
+                            } else {
+                                let _ = events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"warning","component":"market_monitor",
+                                    "message":"Not enough remaining account-subscription capacity for the PumpSwap mint and both vaults.",
+                                    "mint_address":subscription.mint,"required_additional_accounts":3,
+                                    "remaining_capacity":MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len())
+                                }}));
+                            }
                             let _ = events.send(json!({"type":"market_pool_verified","data":{
                                 "mint_address":subscription.mint,"pool_address":subscription.account,
                                 "venue":"pump_swap","index":pool.index,"pool_creator":pool.creator,
@@ -527,9 +692,106 @@ async fn connect_market_stream(
                                 "pool_quote_token_account":pool.pool_quote_token_account,
                                 "lp_supply":pool.lp_supply,
                                 "virtual_quote_reserves":pool.virtual_quote_reserves,
-                                "slot":slot,"status":"pool_verified_vault_monitoring_pending",
+                                "slot":slot,"status":"pool_verified_vault_subscriptions_pending",
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
+                            continue;
+                        }
+                        if subscription.venue == "spl_mint" {
+                            let mint_state = match decode_spl_mint_account(&raw) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"warning","component":"pump_swap_mint_decoder",
+                                        "message":error.to_string(),"mint_address":subscription.mint
+                                    }}));
+                                    continue;
+                                }
+                            };
+                            if let Some(state) = pumpswap_states.get_mut(&subscription.mint) {
+                                state.base_decimals = Some(mint_state.decimals);
+                                state.base_total_supply = Some(mint_state.supply);
+                                state.latest_slot = slot.or(state.latest_slot);
+                            }
+                        } else if subscription.venue == "pump_swap_base_vault"
+                            || subscription.venue == "pump_swap_quote_vault"
+                        {
+                            let token_state = match decode_spl_token_account(&raw) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"warning","component":"pump_swap_vault_decoder",
+                                        "message":error.to_string(),"mint_address":subscription.mint,
+                                        "account_address":subscription.account
+                                    }}));
+                                    continue;
+                                }
+                            };
+                            let actual_mint = bs58::encode(&raw[0..32]).into_string();
+                            if subscription.expected_mint.as_deref() != Some(actual_mint.as_str()) {
+                                let _ = events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"warning","component":"pump_swap_vault_validation",
+                                    "message":"Vault token mint did not match the mint recorded in the verified PumpSwap pool.",
+                                    "mint_address":subscription.mint,"account_address":subscription.account,
+                                    "expected_mint":subscription.expected_mint,"observed_mint":actual_mint
+                                }}));
+                                continue;
+                            }
+                            if let Some(state) = pumpswap_states.get_mut(&subscription.mint) {
+                                if subscription.venue == "pump_swap_base_vault" {
+                                    state.base_reserves = Some(token_state.amount);
+                                } else {
+                                    state.quote_reserves = Some(token_state.amount);
+                                }
+                                state.latest_slot = slot.or(state.latest_slot);
+                            }
+                        } else {
+                            // Bonding-curve account path continues below.
+                        }
+                        if subscription.venue == "spl_mint"
+                            || subscription.venue == "pump_swap_base_vault"
+                            || subscription.venue == "pump_swap_quote_vault"
+                        {
+                            if let Some(state) = pumpswap_states.get(&subscription.mint) {
+                                if let Ok((price_sol, market_cap_sol, effective_quote_reserves)) =
+                                    pump_swap_price(state)
+                                {
+                                        let now_ms = chrono::Utc::now().timestamp_millis();
+                                        let history =
+                                            price_history.entry(subscription.mint.clone()).or_default();
+                                        let change_1m = percentage_change(history, now_ms, 60, price_sol);
+                                        let change_5m = percentage_change(history, now_ms, 300, price_sol);
+                                        let should_sample = history.back().is_none_or(|sample| {
+                                            now_ms.saturating_sub(sample.timestamp_ms) >= 500
+                                        });
+                                        if should_sample {
+                                            history.push_back(PriceSample {
+                                                timestamp_ms: now_ms,
+                                                price_sol,
+                                            });
+                                        }
+                                        while history.front().is_some_and(|sample| {
+                                            now_ms.saturating_sub(sample.timestamp_ms) > 600_000
+                                        }) || history.len() > 1_200
+                                        {
+                                            history.pop_front();
+                                        }
+                                        let _ = events.send(json!({"type":"market_price_update","data":{
+                                            "mint_address":subscription.mint,"account_address":subscription.account,
+                                            "venue":"pump_swap","pool_address":desired.values().find(|item| item.mint == subscription.mint && item.venue == "pump_swap_pool").map(|item| item.account.clone()),
+                                            "slot":state.latest_slot,"pool_slot":state.pool_slot,
+                                            "price_sol":price_sol,"market_cap_sol":market_cap_sol,
+                                            "base_reserves":state.base_reserves,"quote_vault_reserves":state.quote_reserves,
+                                            "virtual_quote_reserves":state.virtual_quote_reserves,
+                                            "effective_quote_reserves":effective_quote_reserves,
+                                            "base_decimals":state.base_decimals,"token_total_supply":state.base_total_supply,
+                                            "price_change_1m_pct":change_1m,"price_change_5m_pct":change_5m,
+                                            "history_samples":history.len(),
+                                            "price_change_status":if change_1m.is_some() && change_5m.is_some() {"ready"} else {"warming_up"},
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                }
+                            }
                             continue;
                         }
                         let curve = match decode_pump_bonding_curve_account(&raw) {
@@ -629,6 +891,7 @@ async fn connect_market_stream(
                                             account: pool_address.clone(),
                                             venue: "pump_swap_pool",
                                             program_id: PUMP_SWAP_PROGRAM_ID.to_owned(),
+                                            expected_mint: None,
                                         };
                                         let request_id = next_request_id;
                                         next_request_id = next_request_id.saturating_add(1);
@@ -739,6 +1002,62 @@ mod market_monitor_tests {
         legacy.truncate(245);
         let pool = decode_pump_swap_pool_account(&legacy).unwrap();
         assert_eq!(pool.virtual_quote_reserves, 0);
+    }
+
+    #[test]
+    fn decodes_spl_mint_supply_and_decimals() {
+        let mut data = vec![0_u8; 82];
+        data[36..44].copy_from_slice(&1_000_000_000_u64.to_le_bytes());
+        data[44] = 6;
+        data[45] = 1;
+        assert_eq!(
+            decode_spl_mint_account(&data).unwrap(),
+            SplMintState {
+                supply: 1_000_000_000,
+                decimals: 6
+            }
+        );
+        data[45] = 0;
+        assert!(decode_spl_mint_account(&data).is_err());
+    }
+
+    #[test]
+    fn decodes_spl_token_account_amount_and_rejects_uninitialized() {
+        let mut data = vec![0_u8; 165];
+        data[64..72].copy_from_slice(&987_654_u64.to_le_bytes());
+        data[108] = 1;
+        assert_eq!(decode_spl_token_account(&data).unwrap().amount, 987_654);
+        data[108] = 0;
+        assert!(decode_spl_token_account(&data).is_err());
+    }
+
+    #[test]
+    fn pumpswap_price_uses_signed_virtual_quote_reserves() {
+        let state = PumpSwapLiveState {
+            virtual_quote_reserves: -500_000_000,
+            base_decimals: Some(6),
+            base_total_supply: Some(1_000_000_000),
+            base_reserves: Some(10_000_000),
+            quote_reserves: Some(1_500_000_000),
+            ..PumpSwapLiveState::default()
+        };
+        let (price, cap, effective) = pump_swap_price(&state).unwrap();
+        assert_eq!(effective, 1_000_000_000);
+        assert!((price - 0.1).abs() < 1e-12);
+        assert!((cap - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pumpswap_price_rejects_negative_effective_quote_reserves() {
+        let state = PumpSwapLiveState {
+            virtual_quote_reserves: -2_000_000_000,
+            base_decimals: Some(6),
+            base_total_supply: Some(1_000_000_000),
+            base_reserves: Some(10_000_000),
+            quote_reserves: Some(1_000_000_000),
+            ..PumpSwapLiveState::default()
+        };
+        assert!(pump_swap_price(&state).is_err());
     }
 
     #[test]
