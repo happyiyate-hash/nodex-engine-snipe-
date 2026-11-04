@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
@@ -15,6 +16,7 @@ struct MarketSubscription {
     mint: String,
     account: String,
     venue: &'static str,
+    program_id: String,
 }
 
 enum MarketCommand {
@@ -40,6 +42,7 @@ impl MarketMonitor {
                 mint: mint.to_owned(),
                 account: account.clone(),
                 venue: "pump_fun_bonding_curve",
+                program_id: program_id.to_owned(),
             }))
             .await
             .map_err(|_| anyhow!("market monitor task is not running"))?;
@@ -121,6 +124,117 @@ where
         .context("sending Solana accountSubscribe request")
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PumpBondingCurveState {
+    pub virtual_token_reserves: u64,
+    pub virtual_quote_reserves: u64,
+    pub real_token_reserves: u64,
+    pub real_quote_reserves: u64,
+    pub token_total_supply: u64,
+    pub complete: bool,
+    pub creator: String,
+    pub price_sol: f64,
+    pub market_cap_sol: f64,
+}
+
+/// Decode the documented Anchor BondingCurve account layout.
+/// The account discriminator and required fields are checked; unknown trailing
+/// fields are tolerated because Pump.fun appends fields over time.
+pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurveState> {
+    const DISCRIMINATOR: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
+    const MINIMUM_ACCOUNT_LENGTH: usize = 81;
+    if data.len() < MINIMUM_ACCOUNT_LENGTH {
+        return Err(anyhow!(
+            "Pump.fun bonding-curve account is too short: {} bytes",
+            data.len()
+        ));
+    }
+    if data[..8] != DISCRIMINATOR {
+        return Err(anyhow!(
+            "account discriminator is not Pump.fun BondingCurve"
+        ));
+    }
+    let read_u64 = |offset: usize| -> Result<u64> {
+        let bytes: [u8; 8] = data
+            .get(offset..offset + 8)
+            .ok_or_else(|| anyhow!("bonding-curve field is truncated"))?
+            .try_into()
+            .map_err(|_| anyhow!("invalid bonding-curve integer field"))?;
+        Ok(u64::from_le_bytes(bytes))
+    };
+    let complete = match data[48] {
+        0 => false,
+        1 => true,
+        value => return Err(anyhow!("invalid Pump.fun complete flag: {value}")),
+    };
+    let virtual_token_reserves = read_u64(8)?;
+    let virtual_quote_reserves = read_u64(16)?;
+    let real_token_reserves = read_u64(24)?;
+    let real_quote_reserves = read_u64(32)?;
+    let token_total_supply = read_u64(40)?;
+    if virtual_token_reserves == 0 || token_total_supply == 0 {
+        return Err(anyhow!("bonding-curve reserves or token supply are zero"));
+    }
+
+    // The current IDL calls this virtual_quote_reserves, not virtual_sol_reserves.
+    // Legacy accounts (81-83 bytes) predate quote_mint and are SOL-paired.
+    // Newer accounts store quote_mint after the two appended boolean flags.
+    if data.len() > 83 && data.len() < 115 {
+        return Err(anyhow!(
+            "Pump.fun bonding-curve account has a truncated quote_mint field"
+        ));
+    }
+    if data.len() >= 115 && data[83..115].iter().any(|byte| *byte != 0) {
+        return Err(anyhow!(
+            "non-SOL Pump.fun quote pairs are not yet supported by the SOL price monitor"
+        ));
+    }
+
+    // Pump.fun tokens use 6 decimals; SOL quote reserves are denominated in lamports.
+    let price_sol = (virtual_quote_reserves as f64 / 1_000_000_000.0)
+        / (virtual_token_reserves as f64 / 1_000_000.0);
+    if !price_sol.is_finite() || price_sol <= 0.0 {
+        return Err(anyhow!("bonding-curve price is not finite and positive"));
+    }
+    let market_cap_sol = price_sol * (token_total_supply as f64 / 1_000_000.0);
+    let creator = bs58::encode(&data[49..81]).into_string();
+
+    Ok(PumpBondingCurveState {
+        virtual_token_reserves,
+        virtual_quote_reserves,
+        real_token_reserves,
+        real_quote_reserves,
+        token_total_supply,
+        complete,
+        creator,
+        price_sol,
+        market_cap_sol,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PriceSample {
+    timestamp_ms: i64,
+    price_sol: f64,
+}
+
+fn percentage_change(
+    samples: &std::collections::VecDeque<PriceSample>,
+    now_ms: i64,
+    seconds: i64,
+    current: f64,
+) -> Option<f64> {
+    let target = now_ms.saturating_sub(seconds.saturating_mul(1_000));
+    let baseline = samples
+        .iter()
+        .rev()
+        .find(|sample| sample.timestamp_ms <= target)?;
+    if baseline.price_sol <= 0.0 {
+        return None;
+    }
+    Some(((current / baseline.price_sol) - 1.0) * 100.0)
+}
+
 async fn connect_market_stream(
     ws_url: &str,
     events: &broadcast::Sender<Value>,
@@ -134,6 +248,7 @@ async fn connect_market_stream(
     let mut next_request_id = 100_u64;
     let mut pending = HashMap::<u64, MarketSubscription>::new();
     let mut active = HashMap::<u64, MarketSubscription>::new();
+    let mut price_history = HashMap::<String, std::collections::VecDeque<PriceSample>>::new();
 
     for subscription in desired.values() {
         if pending.len() >= MAX_MARKET_SUBSCRIPTIONS {
@@ -261,20 +376,125 @@ async fn connect_market_stream(
                         let owner = account_value.and_then(|v| v.get("owner")).and_then(Value::as_str);
                         let lamports = account_value.and_then(|v| v.get("lamports")).and_then(Value::as_u64);
                         let space = account_value.and_then(|v| v.get("space")).and_then(Value::as_u64);
+                        if owner != Some(subscription.program_id.as_str()) {
+                            let _ = events.send(json!({
+                                "type":"diagnostic",
+                                "data":{
+                                    "severity":"warning",
+                                    "component":"market_monitor_owner_check",
+                                    "message":"Bonding-curve account owner did not match the configured Pump.fun program.",
+                                    "mint_address":subscription.mint,
+                                    "account_address":subscription.account,
+                                    "observed_owner":owner
+                                }
+                            }));
+                            continue;
+                        }
+                        let raw = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                let _ = events.send(json!({
+                                    "type":"diagnostic",
+                                    "data":{
+                                        "severity":"warning",
+                                        "component":"market_monitor_base64",
+                                        "message":error.to_string(),
+                                        "mint_address":subscription.mint
+                                    }
+                                }));
+                                continue;
+                            }
+                        };
+                        let curve = match decode_pump_bonding_curve_account(&raw) {
+                            Ok(curve) => curve,
+                            Err(error) => {
+                                let _ = events.send(json!({
+                                    "type":"diagnostic",
+                                    "data":{
+                                        "severity":"warning",
+                                        "component":"pump_curve_decoder",
+                                        "message":error.to_string(),
+                                        "mint_address":subscription.mint,
+                                        "account_address":subscription.account
+                                    }
+                                }));
+                                continue;
+                            }
+                        };
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        let history = price_history.entry(subscription.mint.clone()).or_default();
+                        let change_1m = percentage_change(history, now_ms, 60, curve.price_sol);
+                        let change_5m = percentage_change(history, now_ms, 300, curve.price_sol);
+                        let should_sample = history
+                            .back()
+                            .is_none_or(|sample| now_ms.saturating_sub(sample.timestamp_ms) >= 500);
+                        if should_sample {
+                            history.push_back(PriceSample {
+                                timestamp_ms: now_ms,
+                                price_sol: curve.price_sol,
+                            });
+                        }
+                        while history.front().is_some_and(|sample| now_ms.saturating_sub(sample.timestamp_ms) > 600_000)
+                            || history.len() > 1_200
+                        {
+                            history.pop_front();
+                        }
+                        let real_token_reserves = curve.real_token_reserves;
+                        let complete = curve.complete;
                         let _ = events.send(json!({
                             "type":"market_account_update",
                             "data":{
                                 "mint_address":subscription.mint,
                                 "account_address":subscription.account,
-                                "venue":subscription.venue,
+                                "venue":"pump_fun_bonding_curve",
                                 "slot":slot,
                                 "owner":owner,
                                 "lamports":lamports,
                                 "space":space,
+                                "account_data_size":raw.len(),
                                 "account_data_base64":encoded,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }
                         }));
+                        let _ = events.send(json!({
+                            "type":"market_price_update",
+                            "data":{
+                                "mint_address":subscription.mint,
+                                "account_address":subscription.account,
+                                "venue":"pump_fun_bonding_curve",
+                                "slot":slot,
+                                "price_sol":curve.price_sol,
+                                "price_lamports_per_token":curve.price_sol * 1_000_000_000.0,
+                                "market_cap_sol":curve.market_cap_sol,
+                                "virtual_token_reserves":curve.virtual_token_reserves,
+                                "virtual_quote_reserves":curve.virtual_quote_reserves,
+                                "virtual_sol_reserves":curve.virtual_quote_reserves,
+                                "real_token_reserves":curve.real_token_reserves,
+                                "real_quote_reserves":curve.real_quote_reserves,
+                                "real_sol_reserves":curve.real_quote_reserves,
+                                "token_total_supply":curve.token_total_supply,
+                                "creator":curve.creator,
+                                "complete":curve.complete,
+                                "price_change_1m_pct":change_1m,
+                                "price_change_5m_pct":change_5m,
+                                "history_samples":history.len(),
+                                "price_change_status":if change_1m.is_some() && change_5m.is_some() {"ready"} else {"warming_up"},
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }
+                        }));
+                        if complete {
+                            let _ = events.send(json!({
+                                "type":"market_curve_completed",
+                                "data":{
+                                    "mint_address":subscription.mint,
+                                    "account_address":subscription.account,
+                                    "venue":"pump_fun_bonding_curve",
+                                    "real_token_reserves":real_token_reserves,
+                                    "status":"graduation_required",
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }
+                            }));
+                        }
                     }
                     Message::Ping(payload) => {
                         sink.send(Message::Pong(payload)).await.context("replying to market monitor ping")?;
@@ -291,18 +511,82 @@ async fn connect_market_stream(
 mod market_monitor_tests {
     use super::*;
 
-    #[test]
-    fn pump_fun_bonding_curve_pda_is_deterministic() {
-        let program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-        let mint = "So11111111111111111111111111111111111111112";
-        let first = derive_pump_fun_bonding_curve(mint, program_id).unwrap();
-        let second = derive_pump_fun_bonding_curve(mint, program_id).unwrap();
-        assert_eq!(first, second);
-        assert_ne!(first, mint);
+    fn encoded_curve(complete: u8) -> Vec<u8> {
+        let mut data = vec![23, 183, 248, 55, 96, 216, 172, 96];
+        for value in [
+            1_000_000_000_u64,
+            30_000_000_000,
+            800_000_000,
+            1_000_000,
+            1_000_000_000,
+        ] {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        data.push(complete);
+        data.extend_from_slice(&[7_u8; 32]);
+        // Current IDL appends mayhem/cashback flags and a quote_mint pubkey.
+        data.extend_from_slice(&[0_u8, 0_u8]);
+        data.extend_from_slice(&[0_u8; 32]);
+        data
     }
 
     #[test]
-    fn invalid_public_keys_are_rejected() {
-        assert!(derive_pump_fun_bonding_curve("not-a-mint", "not-a-program").is_err());
+    fn decodes_documented_bonding_curve_layout_and_price() {
+        let curve = decode_pump_bonding_curve_account(&encoded_curve(0)).unwrap();
+        assert_eq!(curve.virtual_token_reserves, 1_000_000_000);
+        assert_eq!(curve.virtual_quote_reserves, 30_000_000_000);
+        assert!((curve.price_sol - 0.03).abs() < 1e-12);
+        assert!((curve.market_cap_sol - 30.0).abs() < 1e-9);
+        assert!(!curve.complete);
+    }
+
+    #[test]
+    fn rejects_wrong_discriminator_and_truncated_accounts() {
+        let mut wrong = encoded_curve(0);
+        wrong[0] = 0;
+        assert!(decode_pump_bonding_curve_account(&wrong).is_err());
+        assert!(decode_pump_bonding_curve_account(&[0; 80]).is_err());
+    }
+
+    #[test]
+    fn rejects_non_sol_quote_mints_instead_of_mispricing_them() {
+        let mut data = encoded_curve(0);
+        data[83] = 1;
+        assert!(decode_pump_bonding_curve_account(&data).is_err());
+    }
+
+    #[test]
+    fn supports_legacy_sol_curve_accounts_without_appended_quote_mint() {
+        let mut data = encoded_curve(0);
+        data.truncate(81);
+        let curve = decode_pump_bonding_curve_account(&data).unwrap();
+        assert!((curve.price_sol - 0.03).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rejects_invalid_complete_flag_and_zero_reserves() {
+        assert!(decode_pump_bonding_curve_account(&encoded_curve(2)).is_err());
+        let mut zero = encoded_curve(0);
+        zero[8..16].copy_from_slice(&0_u64.to_le_bytes());
+        assert!(decode_pump_bonding_curve_account(&zero).is_err());
+    }
+
+    #[test]
+    fn price_windows_require_a_sample_at_or_before_the_window() {
+        let mut samples = std::collections::VecDeque::new();
+        samples.push_back(PriceSample {
+            timestamp_ms: 1_000,
+            price_sol: 1.0,
+        });
+        assert!(percentage_change(&samples, 30_000, 60, 1.5).is_none());
+        samples.push_back(PriceSample {
+            timestamp_ms: 20_000,
+            price_sol: 1.1,
+        });
+        samples.push_back(PriceSample {
+            timestamp_ms: 30_000,
+            price_sol: 1.2,
+        });
+        assert_eq!(percentage_change(&samples, 90_000, 60, 1.5), Some(25.0));
     }
 }
