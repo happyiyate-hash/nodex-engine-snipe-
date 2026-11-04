@@ -26,6 +26,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -621,6 +622,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 }
 
 async fn client_socket(socket: WebSocket, state: AppState) {
+    static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
     let (mut sender, mut receiver_socket) = socket.split();
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
@@ -629,26 +631,48 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     if sender.send(Message::Text(initial)).await.is_err() {
         return;
     }
+    let mut pending_dropped_events = 0_u64;
+    let mut last_lag_warning = std::time::Instant::now() - std::time::Duration::from_secs(5);
     loop {
         tokio::select! {
             event = receiver.recv() => match event {
-                Ok(value) => {
+                Ok(mut value) => {
                     let paused = state.control.read().await.paused;
                     let is_market_stream = value.get("method").and_then(|v| v.as_str()) == Some("logsNotification");
                     if paused && is_market_stream {
                         continue;
+                    }
+                    if let Some(object) = value.as_object_mut() {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        object.entry("event_id").or_insert_with(|| json!(format!("nodex-{now_ms}-{}", NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed))));
+                        object.entry("server_timestamp").or_insert_with(|| json!(now_ms));
                     }
                     if sender.send(Message::Text(value.to_string())).await.is_err() {
                         break;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
-                    let warning = json!({
-                        "type": "stream_warning",
-                        "data": {"dropped_events": count}
-                    }).to_string();
-                    if sender.send(Message::Text(warning)).await.is_err() {
-                        break;
+                    pending_dropped_events = pending_dropped_events.saturating_add(count);
+                    if last_lag_warning.elapsed() >= std::time::Duration::from_secs(5) {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        let warning = json!({
+                            "type": "stream_warning",
+                            "event_id": format!("nodex-stream-gap-{now_ms}-{}", NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed)),
+                            "server_timestamp": now_ms,
+                            "data": {
+                                "severity":"warning",
+                                "component":"backend_websocket_broadcaster",
+                                "message":"The browser event subscriber fell behind the backend broadcast stream.",
+                                "dropped_events": pending_dropped_events,
+                                "aggregation_window_seconds": 5,
+                                "received_at": chrono::Utc::now().to_rfc3339()
+                            }
+                        }).to_string();
+                        pending_dropped_events = 0;
+                        last_lag_warning = std::time::Instant::now();
+                        if sender.send(Message::Text(warning)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -711,7 +735,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let (events, _) = broadcast::channel(2048);
+    let (events, _) = broadcast::channel(8192);
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
     let control = Arc::new(RwLock::new(EngineControl {
@@ -774,11 +798,31 @@ async fn main() -> anyhow::Result<()> {
     let mut persistence_receiver = events.subscribe();
     let persistence_db = db.clone();
     tokio::spawn(async move {
-        while let Ok(event) = persistence_receiver.recv().await {
-            if let Err(error) =
-                nodex_persistence::save_raw_solana_event(&persistence_db, &event).await
-            {
-                tracing::error!(%error, "Could not persist raw Solana event");
+        loop {
+            match persistence_receiver.recv().await {
+                Ok(event) => {
+                    // This table is an upstream-notification history, not a copy of
+                    // every derived diagnostic and market event on the broadcast bus.
+                    if event.get("method").and_then(serde_json::Value::as_str)
+                        != Some("logsNotification")
+                    {
+                        continue;
+                    }
+                    if let Err(error) =
+                        nodex_persistence::save_raw_solana_event(&persistence_db, &event).await
+                    {
+                        tracing::error!(%error, "Could not persist raw Solana event");
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    // Keep the persistence worker alive. The gap is explicit in logs;
+                    // a later reconnect can use the upstream signature checkpoint.
+                    tracing::warn!(
+                        dropped_notifications = count,
+                        "Raw Solana event persistence consumer lagged; continuing"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
