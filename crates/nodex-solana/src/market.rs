@@ -150,7 +150,9 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
         ));
     }
     if data[..8] != DISCRIMINATOR {
-        return Err(anyhow!("account discriminator is not Pump.fun BondingCurve"));
+        return Err(anyhow!(
+            "account discriminator is not Pump.fun BondingCurve"
+        ));
     }
     let read_u64 = |offset: usize| -> Result<u64> {
         let bytes: [u8; 8] = data
@@ -178,7 +180,9 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
     // Legacy accounts (81-83 bytes) predate quote_mint and are SOL-paired.
     // Newer accounts store quote_mint after the two appended boolean flags.
     if data.len() > 83 && data.len() < 115 {
-        return Err(anyhow!("Pump.fun bonding-curve account has a truncated quote_mint field"));
+        return Err(anyhow!(
+            "Pump.fun bonding-curve account has a truncated quote_mint field"
+        ));
     }
     if data.len() >= 115 && data[83..115].iter().any(|byte| *byte != 0) {
         return Err(anyhow!(
@@ -214,9 +218,17 @@ struct PriceSample {
     price_sol: f64,
 }
 
-fn percentage_change(samples: &std::collections::VecDeque<PriceSample>, now_ms: i64, seconds: i64, current: f64) -> Option<f64> {
+fn percentage_change(
+    samples: &std::collections::VecDeque<PriceSample>,
+    now_ms: i64,
+    seconds: i64,
+    current: f64,
+) -> Option<f64> {
     let target = now_ms.saturating_sub(seconds.saturating_mul(1_000));
-    let baseline = samples.iter().rev().find(|sample| sample.timestamp_ms <= target)?;
+    let baseline = samples
+        .iter()
+        .rev()
+        .find(|sample| sample.timestamp_ms <= target)?;
     if baseline.price_sol <= 0.0 {
         return None;
     }
@@ -236,8 +248,7 @@ async fn connect_market_stream(
     let mut next_request_id = 100_u64;
     let mut pending = HashMap::<u64, MarketSubscription>::new();
     let mut active = HashMap::<u64, MarketSubscription>::new();
-    let mut price_history =
-        HashMap::<String, std::collections::VecDeque<PriceSample>>::new();
+    let mut price_history = HashMap::<String, std::collections::VecDeque<PriceSample>>::new();
 
     for subscription in desired.values() {
         if pending.len() >= MAX_MARKET_SUBSCRIPTIONS {
@@ -496,7 +507,6 @@ async fn connect_market_stream(
     }
 }
 
-
 #[cfg(test)]
 mod market_monitor_tests {
     use super::*;
@@ -564,11 +574,19 @@ mod market_monitor_tests {
     #[test]
     fn price_windows_require_a_sample_at_or_before_the_window() {
         let mut samples = std::collections::VecDeque::new();
-        samples.push_back(PriceSample { timestamp_ms: 1_000, price_sol: 1.0 });
+        samples.push_back(PriceSample {
+            timestamp_ms: 1_000,
+            price_sol: 1.0,
+        });
         assert!(percentage_change(&samples, 30_000, 60, 1.5).is_none());
-        samples.push_back(PriceSample { timestamp_ms: 20_000, price_sol: 1.1 });
-        samples.push_back(PriceSample { timestamp_ms: 30_000, price_sol: 1.2 });
+        samples.push_back(PriceSample {
+            timestamp_ms: 20_000,
+            price_sol: 1.1,
+        });
+        samples.push_back(PriceSample {
+            timestamp_ms: 30_000,
+            price_sol: 1.2,
+        });
         assert_eq!(percentage_change(&samples, 90_000, 60, 1.5), Some(25.0));
     }
 }
-
