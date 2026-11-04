@@ -388,11 +388,13 @@ fn pump_swap_price(state: &PumpSwapLiveState) -> Result<(f64, f64, u64)> {
         return Err(anyhow!("PumpSwap effective quote reserve is zero"));
     }
     let base_scale = 10_f64.powi(i32::from(decimals));
-    let price_sol = (effective_quote as f64 / 1_000_000_000.0)
-        / (base_reserves as f64 / base_scale);
+    let price_sol =
+        (effective_quote as f64 / 1_000_000_000.0) / (base_reserves as f64 / base_scale);
     let market_cap_sol = price_sol * (supply as f64 / base_scale);
     if !price_sol.is_finite() || price_sol <= 0.0 || !market_cap_sol.is_finite() {
-        return Err(anyhow!("PumpSwap price calculation was not finite and positive"));
+        return Err(anyhow!(
+            "PumpSwap price calculation was not finite and positive"
+        ));
     }
     Ok((price_sol, market_cap_sol, effective_quote))
 }
@@ -1010,7 +1012,10 @@ mod market_monitor_tests {
         data[45] = 1;
         assert_eq!(
             decode_spl_mint_account(&data).unwrap(),
-            SplMintState { supply: 1_000_000_000, decimals: 6 }
+            SplMintState {
+                supply: 1_000_000_000,
+                decimals: 6
+            }
         );
         data[45] = 0;
         assert!(decode_spl_mint_account(&data).is_err());
