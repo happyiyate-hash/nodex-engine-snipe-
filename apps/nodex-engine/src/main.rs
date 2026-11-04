@@ -199,8 +199,8 @@ fn start_launch_processor(
                         }}));
                         if let Some(creator) = creator_address {
                             let _ = events.send(json!({"type":"creator_history_started","data":{"mint_address":mint_address,"creator_address":creator,"status":"scanning","received_at":chrono::Utc::now().to_rfc3339()}}));
-                            match rpc.scan_creator_history(&creator, &signature, &program_id).await {
-                                Ok(history) => { let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":history,"received_at":chrono::Utc::now().to_rfc3339()}})); }
+                            match rpc\n                                .scan_creator_history(&creator, &signature, &program_id)\n                                .await\n                            {
+                                Ok(history) => {\n                                    let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":history,"received_at":chrono::Utc::now().to_rfc3339()}}));\n                                }
                                 Err(error) => {
                                     let _ = events.send(json!({"type":"diagnostic","data":{"severity":"warning","component":"creator_history_scanner","message":error.to_string(),"mint_address":mint_address,"creator_address":creator,"received_at":chrono::Utc::now().to_rfc3339()}}));
                                     let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":{"creator_address":creator,"status":"unverified","early_selling":"UNVERIFIED","sample_is_partial":true,"caveat":"Creator history RPC failed; no conclusion can be drawn."},"received_at":chrono::Utc::now().to_rfc3339()}}));
