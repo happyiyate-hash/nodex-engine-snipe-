@@ -1,5 +1,11 @@
 pub mod market;
-pub use market::{derive_pump_fun_bonding_curve, start_market_monitor, MarketMonitor};
+pub use market::{
+    decode_pump_swap_activity_event, decode_pump_swap_activity_log_line,
+    derive_pump_fun_bonding_curve, start_market_monitor, MarketMonitor,
+    PumpSwapActivityEvent,
+};
+
+pub const PUMPSWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -14,6 +20,68 @@ const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [0x18, 0x1e, 0xc8, 0x28, 0x05, 0x1c, 
 const PUMP_CREATE_V2_DISCRIMINATOR: [u8; 8] = [0xd6, 0x90, 0x4c, 0xec, 0x5f, 0x8b, 0x31, 0xb4];
 
 pub const SPL_TOKEN_ACCOUNT_SIZE: usize = 165;
+
+/// Decode PumpSwap Anchor events only while the PumpSwap program is the active
+/// invocation. This prevents accepting identically shaped events emitted by a CPI.
+pub fn decode_pump_swap_activity_logs(
+    logs: &[String],
+    target_program_id: &str,
+) -> Result<Vec<PumpSwapActivityEvent>> {
+    let mut invocation_stack: Vec<(String, usize)> = Vec::new();
+    let mut decoded = Vec::new();
+
+    for line in logs {
+        if let Some(rest) = line.strip_prefix("Program ") {
+            if let Some((program_id, depth_text)) = rest.split_once(" invoke [") {
+                if let Some(depth) = depth_text
+                    .strip_suffix(']')
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    while invocation_stack
+                        .last()
+                        .is_some_and(|(_, active_depth)| *active_depth >= depth)
+                    {
+                        invocation_stack.pop();
+                    }
+                    invocation_stack.push((program_id.to_owned(), depth));
+                    continue;
+                }
+            }
+
+            if let Some((program_id, _)) = rest.split_once(" success") {
+                if let Some(index) = invocation_stack
+                    .iter()
+                    .rposition(|(active, _)| active == program_id)
+                {
+                    invocation_stack.truncate(index);
+                }
+                continue;
+            }
+
+            if let Some((program_id, _)) = rest.split_once(" failed:") {
+                if let Some(index) = invocation_stack
+                    .iter()
+                    .rposition(|(active, _)| active == program_id)
+                {
+                    invocation_stack.truncate(index);
+                }
+                continue;
+            }
+        }
+
+        if invocation_stack
+            .last()
+            .is_some_and(|(program_id, _)| program_id == target_program_id)
+        {
+            if let Some(event) = decode_pump_swap_activity_log_line(line)? {
+                decoded.push(event);
+            }
+        }
+    }
+
+    Ok(decoded)
+}
+
 
 #[derive(Debug, Clone)]
 pub struct SolanaRpc {
@@ -965,7 +1033,11 @@ async fn connect_and_subscribe(
             Message::Text(text) => {
                 let value: Value = serde_json::from_str(&text)?;
                 if value.get("method").and_then(Value::as_str) == Some("logsNotification") {
-                    let _ = sender.send(value);
+                    let mut tagged = value;
+                    if let Some(object) = tagged.as_object_mut() {
+                        object.insert("nodex_program_id".into(), Value::String(program_id.to_owned()));
+                    }
+                    let _ = sender.send(tagged);
                 }
             }
             Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
@@ -975,6 +1047,45 @@ async fn connect_and_subscribe(
     }
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":false,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())
+}
+
+#[cfg(test)]
+mod pumpswap_log_tests {
+    use super::*;
+
+    #[test]
+    fn only_accepts_program_data_from_the_active_pumpswap_invocation() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [103, 244, 82, 31, 44, 245, 119, 119]
+                .into_iter()
+                .chain(1_700_000_000_i64.to_le_bytes())
+                .chain((1_u64..=13).flat_map(u64::to_le_bytes))
+                .chain([8_u8; 32])
+                .chain([9_u8; 32])
+                .chain([0_u8; 128])
+                .collect::<Vec<_>>(),
+        );
+        let logs = vec![
+            format!("Program {PUMPSWAP_PROGRAM_ID} invoke [1]"),
+            "Program SomeOtherProgram invoke [2]".to_owned(),
+            format!("Program data: {encoded}"),
+            "Program SomeOtherProgram success".to_owned(),
+            format!("Program data: {encoded}"),
+            format!("Program {PUMPSWAP_PROGRAM_ID} success"),
+        ];
+        let events = decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], PumpSwapActivityEvent::Buy { .. }));
+    }
+
+    #[test]
+    fn ignores_program_data_without_a_matching_invocation() {
+        let logs = vec!["Program data: AQID".to_owned()];
+        assert!(decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID)
+            .unwrap()
+            .is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -11,8 +11,9 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::config::EngineConfig;
 use nodex_solana::{
-    decode_pump_fun_create, run_logs_stream, start_market_monitor, MarketMonitor, SolanaRpc,
-    StreamStatus,
+    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream,
+    start_market_monitor, MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus,
+    PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
@@ -59,6 +60,113 @@ struct Health {
     service: &'static str,
 }
 
+fn start_pumpswap_activity_processor(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    control: Arc<RwLock<EngineControl>>,
+) {
+    let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
+    tokio::spawn(async move {
+        loop {
+            let notification = match receiver.recv().await {
+                Ok(value) => value,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    let _ = events.send(json!({"type":"diagnostic","data":{
+                        "severity":"warning","component":"pumpswap_activity_processor",
+                        "message":"PumpSwap activity consumer lagged; a bounded notification gap may exist.",
+                        "dropped_notifications":count,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+
+            if notification.get("method").and_then(serde_json::Value::as_str)
+                != Some("logsNotification")
+                || notification.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                    != Some(PUMPSWAP_PROGRAM_ID)
+                || control.read().await.paused
+            {
+                continue;
+            }
+
+            let Some(value) = notification.pointer("/params/result/value") else {
+                continue;
+            };
+            if !value.get("err").is_some_and(serde_json::Value::is_null) {
+                continue;
+            }
+            let Some(signature) = value.get("signature")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            {
+                let mut seen = seen_signatures.lock().await;
+                if !seen.insert(signature.clone()) {
+                    continue;
+                }
+                if seen.len() > 20_000 {
+                    seen.clear();
+                    seen.insert(signature.clone());
+                }
+            }
+
+            let Some(logs) = value.get("logs").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            let logs: Vec<String> = logs.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            let slot = notification.pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+
+            match decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID) {
+                Ok(decoded) => {
+                    for (event_index, event) in decoded.into_iter().enumerate() {
+                        let (kind, timestamp, pool, user, base_amount, quote_amount) = match event {
+                            PumpSwapActivityEvent::Buy { timestamp, pool, user, base_amount, quote_amount } =>
+                                ("buy", timestamp, pool, user, base_amount, quote_amount),
+                            PumpSwapActivityEvent::Sell { timestamp, pool, user, base_amount, quote_amount } =>
+                                ("sell", timestamp, pool, user, base_amount, quote_amount),
+                            PumpSwapActivityEvent::Deposit { timestamp, pool, user, base_amount, quote_amount } =>
+                                ("deposit", timestamp, pool, user, base_amount, quote_amount),
+                            PumpSwapActivityEvent::Withdraw { timestamp, pool, user, base_amount, quote_amount } =>
+                                ("withdraw", timestamp, pool, user, base_amount, quote_amount),
+                        };
+                        let _ = events.send(json!({"type":"pumpswap_activity","data":{
+                            "venue":"pump_swap",
+                            "event_type":kind,
+                            "event_index":event_index,
+                            "signature":signature,
+                            "slot":slot,
+                            "timestamp":timestamp,
+                            "pool_address":pool,
+                            "user_address":user,
+                            "base_amount_raw":base_amount.to_string(),
+                            "quote_amount_raw":quote_amount.to_string(),
+                            "quote_amount_unit":"raw_quote_asset_units",
+                            "quote_asset":"unknown_until_pool_pair_is_resolved",
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
+                    }
+                }
+                Err(error) => {
+                    let _ = events.send(json!({"type":"diagnostic","data":{
+                        "severity":"warning","component":"pumpswap_activity_decoder",
+                        "message":error.to_string(),"signature":signature,"slot":slot,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                }
+            }
+        }
+    });
+}
+
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -84,7 +192,10 @@ fn start_launch_processor(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
-            if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification") {
+            if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
+                || event.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                    != Some(pump_fun_program_id.as_str())
+            {
                 continue;
             }
             if control.read().await.paused {
@@ -485,6 +596,18 @@ async fn main() -> anyhow::Result<()> {
             "message":"Token transaction decoding is disabled because SOLANA_RPC_HTTP_URL / HELIUS_API_KEY is not configured.",
             "received_at":chrono::Utc::now().to_rfc3339()
         }}));
+    }
+
+    // PumpSwap activity uses its own program-level subscription. The provider's
+    // mentions filter accepts one program address per subscription.
+    start_pumpswap_activity_processor(events.subscribe(), events.clone(), control.clone());
+
+    if let Some(ws_url) = config.solana_ws_url.clone() {
+        let sender = events.clone();
+        let status = Arc::new(RwLock::new(StreamStatus::default()));
+        tokio::spawn(async move {
+            run_logs_stream(ws_url, PUMPSWAP_PROGRAM_ID.to_owned(), sender, status).await;
+        });
     }
 
     // Persist raw upstream log notifications independently of browser subscribers.
