@@ -347,7 +347,7 @@ mod transaction_decoder_tests {
         let tx = json!({
             "slot": 456,
             "transaction": {"message": {
-                "accountKeys": ["Mint222", "PumpProgram"],
+                "signatures": ["signature"], "accountKeys": ["Mint222", "PumpProgram"],
                 "instructions": [{
                     "programIdIndex": 1, "accounts": [0],
                     "data": create_instruction(PUMP_CREATE_V2_DISCRIMINATOR, creator)
