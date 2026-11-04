@@ -6,6 +6,9 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
+const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [0x18, 0x1e, 0xc8, 0x28, 0x05, 0x1c, 0x07, 0x77];
+const PUMP_CREATE_V2_DISCRIMINATOR: [u8; 8] = [0xd6, 0x90, 0x4c, 0xec, 0x5f, 0x8b, 0x31, 0xb4];
+
 pub const SPL_TOKEN_ACCOUNT_SIZE: usize = 165;
 
 #[derive(Debug, Clone)]
@@ -68,6 +71,118 @@ impl SolanaRpc {
     pub async fn recent_prioritization_fees(&self) -> Result<Vec<PriorityFeeSample>> {
         self.call("getRecentPrioritizationFees", json!([])).await
     }
+
+    /// Fetches a confirmed transaction in raw JSON form, including version-0 transactions.
+    /// A null result is returned as None because RPC nodes may not have indexed it yet.
+    pub async fn get_transaction(&self, signature: &str) -> Result<Option<Value>> {
+        let response = self.client
+            .post(&self.http_url)
+            .json(&json!({
+                "jsonrpc":"2.0", "id":1, "method":"getTransaction",
+                "params":[signature, {"encoding":"json","commitment":"confirmed","maxSupportedTransactionVersion":0}]
+            }))
+            .send().await.context("sending Solana getTransaction request")?
+            .error_for_status().context("Solana getTransaction returned HTTP error")?
+            .json::<RpcResponse<Value>>().await.context("decoding getTransaction response")?;
+        if let Some(error) = response.error {
+            return Err(anyhow!("Solana RPC getTransaction error: {}", error.message));
+        }
+        Ok(response.result.filter(|value| !value.is_null()))
+    }
+}
+
+/// A Pump.fun create/create_v2 instruction decoded from a confirmed transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecodedPumpFunCreate {
+    pub mint_address: String,
+    pub creator_address: String,
+    pub slot: u64,
+}
+
+/// Scans top-level and CPI instructions for documented Pump.fun create discriminators.
+/// Account indexes are resolved against static keys plus v0 loaded addresses.
+pub fn decode_pump_fun_create(
+    transaction: &Value,
+    signature: &str,
+    configured_program_id: &str,
+) -> Result<Option<DecodedPumpFunCreate>> {
+    if transaction.pointer("/meta/err").is_some_and(|error| !error.is_null()) {
+        return Ok(None);
+    }
+    let message = transaction.pointer("/transaction/message")
+        .ok_or_else(|| anyhow!("getTransaction response has no transaction.message"))?;
+    let mut keys: Vec<String> = message.get("accountKeys").and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("transaction message has no accountKeys array"))?
+        .iter().map(|key| {
+            key.as_str().map(str::to_owned)
+                .or_else(|| key.get("pubkey").and_then(Value::as_str).map(str::to_owned))
+                .ok_or_else(|| anyhow!("transaction contains an invalid account key"))
+        }).collect::<Result<Vec<_>>>()?;
+    if let Some(loaded) = transaction.pointer("/meta/loadedAddresses") {
+        for field in ["writable", "readonly"] {
+            if let Some(addresses) = loaded.get(field).and_then(Value::as_array) {
+                for address in addresses {
+                    if let Some(address) = address.as_str() {
+                        keys.push(address.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mut instructions: Vec<&Value> = Vec::new();
+    if let Some(top) = message.get("instructions").and_then(Value::as_array) {
+        instructions.extend(top.iter());
+    }
+    if let Some(groups) = transaction.pointer("/meta/innerInstructions").and_then(Value::as_array) {
+        for group in groups {
+            if let Some(inner) = group.get("instructions").and_then(Value::as_array) {
+                instructions.extend(inner.iter());
+            }
+        }
+    }
+    for instruction in instructions {
+        let Some(program_index) = instruction.get("programIdIndex").and_then(Value::as_u64) else { continue };
+        let Some(program_id) = keys.get(program_index as usize) else { continue };
+        if program_id != configured_program_id { continue; }
+        let Some(data) = instruction.get("data").and_then(Value::as_str) else { continue };
+        let bytes = bs58::decode(data).into_vec().context("decoding Pump.fun instruction data")?;
+        if bytes.len() < 8 { continue; }
+        let discriminator: [u8; 8] = bytes[..8].try_into().expect("checked discriminator length");
+        if discriminator != PUMP_CREATE_DISCRIMINATOR && discriminator != PUMP_CREATE_V2_DISCRIMINATOR {
+            continue;
+        }
+        let accounts = instruction.get("accounts").and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("Pump.fun create instruction has no accounts array"))?;
+        let mint_index = accounts.first().and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("Pump.fun create instruction has no mint account index"))?;
+        let mint_address = keys.get(mint_index as usize)
+            .ok_or_else(|| anyhow!("Pump.fun mint account index is out of range"))?.clone();
+        let creator_address = decode_create_creator(&bytes[8..])?;
+        let slot = transaction.get("slot").and_then(Value::as_u64).unwrap_or_default();
+        if signature.trim().is_empty() {
+            return Err(anyhow!("transaction signature is empty"));
+        }
+        return Ok(Some(DecodedPumpFunCreate { mint_address, creator_address, slot }));
+    }
+    Ok(None)
+}
+
+fn decode_create_creator(args: &[u8]) -> Result<String> {
+    let mut offset = 0usize;
+    for label in ["name", "symbol", "uri"] {
+        let length_bytes = args.get(offset..offset + 4)
+            .ok_or_else(|| anyhow!("Pump.fun create instruction is missing {label} length"))?;
+        let length = u32::from_le_bytes(length_bytes.try_into().expect("four-byte slice")) as usize;
+        offset += 4;
+        let value = args.get(offset..offset + length)
+            .ok_or_else(|| anyhow!("Pump.fun create instruction is missing {label} bytes"))?;
+        std::str::from_utf8(value).with_context(|| format!("Pump.fun {label} is not UTF-8"))?;
+        offset += length;
+    }
+    let creator = args.get(offset..offset + 32)
+        .ok_or_else(|| anyhow!("Pump.fun create instruction is missing creator pubkey"))?;
+    Ok(bs58::encode(creator).into_string())
+}
 }
 
 #[derive(Debug, Deserialize)]
