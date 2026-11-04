@@ -198,7 +198,8 @@ fn start_launch_processor(
                         }}));
                         match rpc.scan_token_security(&mint_address).await {
                             Ok(report) => {
-                                let _ = events.send(json!({"type":"token_scan_update","data":report}));
+                                let _ =
+                                    events.send(json!({"type":"token_scan_update","data":report}));
                             }
                             Err(error) => {
                                 let _ = events.send(json!({"type":"diagnostic","data":{
@@ -281,7 +282,9 @@ async fn scan_token(
             format!("Token security scan failed: {error}"),
         )
     })?;
-    Ok(Json(serde_json::to_value(report).unwrap_or_else(|_| json!({}))))
+    Ok(Json(
+        serde_json::to_value(report).unwrap_or_else(|_| json!({})),
+    ))
 }
 
 async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
