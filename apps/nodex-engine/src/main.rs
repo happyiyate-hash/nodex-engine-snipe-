@@ -176,7 +176,7 @@ fn start_launch_processor(
                 };
                 let launch = detect_pump_fun_launch(CreateInstruction {
                     program_id: program_id.clone(),
-                    configured_pump_fun_program_id: program_id,
+                    configured_pump_fun_program_id: program_id.clone(),
                     mint_address: decoded.mint_address,
                     creator_address: Some(decoded.creator_address.clone()),
                     signature: signature.clone(),
@@ -190,13 +190,13 @@ fn start_launch_processor(
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
                         let mint_address = launch.mint_address.clone();
+                        let creator_address = launch.creator_address.clone();
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
-                        let creator_address = launch.creator_address.clone();
                         if let Some(creator) = creator_address {
                             let _ = events.send(json!({"type":"creator_history_started","data":{"mint_address":mint_address,"creator_address":creator,"status":"scanning","received_at":chrono::Utc::now().to_rfc3339()}}));
                             match rpc.scan_creator_history(&creator, &signature, &program_id).await {
