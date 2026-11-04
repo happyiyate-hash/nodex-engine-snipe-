@@ -377,6 +377,19 @@ impl SolanaRpc {
         }))
     }
 
+    /// Check whether a signature is still available from the RPC node's transaction history.
+    pub async fn signature_status_available(&self, signature: &str) -> Result<bool> {
+        let response: Value = self
+            .call(
+                "getSignatureStatuses",
+                json!([[signature], {"searchTransactionHistory":true}]),
+            )
+            .await?;
+        Ok(response
+            .pointer("/value/0")
+            .is_some_and(|status| !status.is_null()))
+    }
+
     /// Return recent signatures for an address, optionally bounded by before/until cursors.
     /// The RPC limit is capped at Solana's documented maximum of 1,000 entries.
     pub async fn get_signatures_for_address(
@@ -1046,6 +1059,9 @@ async fn backfill_logs_gap(
     let mut before: Option<String> = None;
     let mut reached_checkpoint = false;
     let mut newest: Option<(u64, String)> = None;
+    let checkpoint_available = rpc
+        .signature_status_available(checkpoint_signature)
+        .await?;
 
     for _ in 0..MAX_BACKFILL_PAGES {
         let page = rpc
@@ -1057,7 +1073,7 @@ async fn backfill_logs_gap(
             )
             .await?;
         if page.is_empty() {
-            reached_checkpoint = true;
+            reached_checkpoint = checkpoint_available;
             break;
         }
 
@@ -1096,7 +1112,8 @@ async fn backfill_logs_gap(
             break;
         };
         if page.len() < SIGNATURE_PAGE_SIZE {
-            // The checkpoint may have aged out of the provider's signature history.
+            // The until cursor is bounded only when the checkpoint is still queryable.
+            reached_checkpoint = checkpoint_available;
             break;
         }
         before = Some(oldest_signature.to_owned());
