@@ -480,23 +480,37 @@ fn parse_token_2022_extensions(data: &[u8]) -> Result<Vec<String>> {
 }
 
 fn optional_nonzero_pubkey(data: &[u8]) -> Result<Option<String>> {
-    if data.len() < 32 { return Err(anyhow!("metadata public key field is truncated")); }
-    if data[..32].iter().all(|byte| *byte == 0) { Ok(None) } else { Ok(Some(bs58::encode(&data[..32]).into_string())) }
+    if data.len() < 32 {
+        return Err(anyhow!("metadata public key field is truncated"));
+    }
+    if data[..32].iter().all(|byte| *byte == 0) {
+        Ok(None)
+    } else {
+        Ok(Some(bs58::encode(&data[..32]).into_string()))
+    }
 }
 
 fn read_metadata_string(data: &[u8], offset: &mut usize) -> Result<String> {
-    let length_bytes = data.get(*offset..*offset + 4).ok_or_else(|| anyhow!("metadata string length is truncated"))?;
-    let length = u32::from_le_bytes(length_bytes.try_into().expect("four-byte metadata length")) as usize;
+    let length_bytes = data
+        .get(*offset..*offset + 4)
+        .ok_or_else(|| anyhow!("metadata string length is truncated"))?;
+    let length =
+        u32::from_le_bytes(length_bytes.try_into().expect("four-byte metadata length")) as usize;
     *offset += 4;
-    let end = (*offset).checked_add(length).ok_or_else(|| anyhow!("metadata string length overflow"))?;
-    let bytes = data.get(*offset..end).ok_or_else(|| anyhow!("metadata string value is truncated"))?;
+    let end = (*offset)
+        .checked_add(length)
+        .ok_or_else(|| anyhow!("metadata string length overflow"))?;
+    let bytes = data
+        .get(*offset..end)
+        .ok_or_else(|| anyhow!("metadata string value is truncated"))?;
     *offset = end;
     String::from_utf8(bytes.to_vec()).context("metadata string is not valid UTF-8")
 }
 
 fn parse_token_2022_metadata(data: &[u8]) -> Result<TokenMetadataReport> {
     let mut report = TokenMetadataReport {
-        source: "token_2022_extensions".into(), status: "unverified".into(),
+        source: "token_2022_extensions".into(),
+        status: "unverified".into(),
         caveat: "No on-mint TokenMetadata extension was found; external metadata accounts are not yet decoded.".into(),
         ..Default::default()
     };
@@ -511,8 +525,12 @@ fn parse_token_2022_metadata(data: &[u8]) -> Result<TokenMetadataReport> {
         let kind = u16::from_le_bytes([data[offset], data[offset + 1]]);
         let length = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
         offset += 4;
-        let end = offset.checked_add(length).ok_or_else(|| anyhow!("metadata extension length overflow"))?;
-        let value = data.get(offset..end).ok_or_else(|| anyhow!("metadata extension value is truncated"))?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow!("metadata extension length overflow"))?;
+        let value = data
+            .get(offset..end)
+            .ok_or_else(|| anyhow!("metadata extension value is truncated"))?;
         match kind {
             18 => {
                 if value.len() < 64 {
