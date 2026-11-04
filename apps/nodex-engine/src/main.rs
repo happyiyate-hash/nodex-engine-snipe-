@@ -354,6 +354,7 @@ fn start_launch_processor(
                 .pointer("/params/result/context/slot")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or_default();
+            let concurrency = concurrency.clone();
             let rpc = rpc.clone();
             let events = events.clone();
             let database = database.clone();
