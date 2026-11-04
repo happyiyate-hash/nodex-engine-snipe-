@@ -932,9 +932,242 @@ async fn connect_market_stream(
     }
 }
 
+/// Verified PumpSwap activity decoded from the official Anchor event layouts.
+/// Amounts are raw token units; quote amounts are SOL lamports only for WSOL pools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PumpSwapActivityEvent {
+    Buy {
+        timestamp: i64,
+        pool: String,
+        user: String,
+        base_amount: u64,
+        quote_amount: u64,
+    },
+    Sell {
+        timestamp: i64,
+        pool: String,
+        user: String,
+        base_amount: u64,
+        quote_amount: u64,
+    },
+    Deposit {
+        timestamp: i64,
+        pool: String,
+        user: String,
+        base_amount: u64,
+        quote_amount: u64,
+    },
+    Withdraw {
+        timestamp: i64,
+        pool: String,
+        user: String,
+        base_amount: u64,
+        quote_amount: u64,
+    },
+}
+
+const PUMPSWAP_BUY_EVENT: [u8; 8] = [103, 244, 82, 31, 44, 245, 119, 119];
+const PUMPSWAP_SELL_EVENT: [u8; 8] = [62, 47, 55, 10, 165, 3, 220, 42];
+const PUMPSWAP_DEPOSIT_EVENT: [u8; 8] = [120, 248, 61, 83, 31, 142, 107, 144];
+const PUMPSWAP_WITHDRAW_EVENT: [u8; 8] = [22, 9, 133, 26, 160, 44, 71, 192];
+
+/// Decode the stable prefix of PumpSwap events from the official Anchor IDL.
+/// Unknown trailing fields are ignored to tolerate future appended fields.
+pub fn decode_pump_swap_activity_event(data: &[u8]) -> Result<Option<PumpSwapActivityEvent>> {
+    if data.len() < 8 {
+        return Ok(None);
+    }
+    let discriminator: [u8; 8] = data[..8].try_into().expect("eight-byte discriminator");
+    let read_u64 = |offset: usize| -> Result<u64> {
+        let bytes: [u8; 8] = data
+            .get(offset..offset + 8)
+            .ok_or_else(|| anyhow!("PumpSwap activity event is truncated"))?
+            .try_into()
+            .map_err(|_| anyhow!("invalid PumpSwap activity integer"))?;
+        Ok(u64::from_le_bytes(bytes))
+    };
+    let read_i64 = |offset: usize| -> Result<i64> {
+        let bytes: [u8; 8] = data
+            .get(offset..offset + 8)
+            .ok_or_else(|| anyhow!("PumpSwap activity timestamp is truncated"))?
+            .try_into()
+            .map_err(|_| anyhow!("invalid PumpSwap activity timestamp"))?;
+        Ok(i64::from_le_bytes(bytes))
+    };
+    let read_key = |offset: usize| -> Result<String> {
+        let bytes = data
+            .get(offset..offset + 32)
+            .ok_or_else(|| anyhow!("PumpSwap activity public key is truncated"))?;
+        Ok(bs58::encode(bytes).into_string())
+    };
+
+    let event = match discriminator {
+        PUMPSWAP_BUY_EVENT | PUMPSWAP_SELL_EVENT => {
+            if data.len() < 184 {
+                return Err(anyhow!(
+                    "PumpSwap trade event is shorter than its stable prefix"
+                ));
+            }
+            let timestamp = read_i64(8)?;
+            let base_amount = read_u64(16)?;
+            let quote_amount = read_u64(64)?;
+            let pool = read_key(120)?;
+            let user = read_key(152)?;
+            if discriminator == PUMPSWAP_BUY_EVENT {
+                PumpSwapActivityEvent::Buy {
+                    timestamp,
+                    pool,
+                    user,
+                    base_amount,
+                    quote_amount,
+                }
+            } else {
+                PumpSwapActivityEvent::Sell {
+                    timestamp,
+                    pool,
+                    user,
+                    base_amount,
+                    quote_amount,
+                }
+            }
+        }
+        PUMPSWAP_DEPOSIT_EVENT | PUMPSWAP_WITHDRAW_EVENT => {
+            if data.len() < 160 {
+                return Err(anyhow!(
+                    "PumpSwap liquidity event is shorter than its stable prefix"
+                ));
+            }
+            let timestamp = read_i64(8)?;
+            let base_amount = read_u64(72)?;
+            let quote_amount = read_u64(80)?;
+            let pool = read_key(96)?;
+            let user = read_key(128)?;
+            if discriminator == PUMPSWAP_DEPOSIT_EVENT {
+                PumpSwapActivityEvent::Deposit {
+                    timestamp,
+                    pool,
+                    user,
+                    base_amount,
+                    quote_amount,
+                }
+            } else {
+                PumpSwapActivityEvent::Withdraw {
+                    timestamp,
+                    pool,
+                    user,
+                    base_amount,
+                    quote_amount,
+                }
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(event))
+}
+
+/// Extract an Anchor Program data payload. The caller must verify the emitting
+/// program using the transaction's invocation stack before accepting the event.
+pub fn decode_pump_swap_activity_log_line(line: &str) -> Result<Option<PumpSwapActivityEvent>> {
+    let Some(encoded) = line.strip_prefix("Program data: ") else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .context("decoding PumpSwap Anchor event base64")?;
+    decode_pump_swap_activity_event(&bytes)
+}
+
 #[cfg(test)]
 mod market_monitor_tests {
     use super::*;
+
+    fn encoded_pumpswap_trade(discriminator: [u8; 8]) -> Vec<u8> {
+        let mut data = discriminator.to_vec();
+        data.extend_from_slice(&1_700_000_000_i64.to_le_bytes());
+        for value in 1_u64..=13 {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        data.extend_from_slice(&[8_u8; 32]);
+        data.extend_from_slice(&[9_u8; 32]);
+        data.extend_from_slice(&[0_u8; 128]);
+        data
+    }
+
+    #[test]
+    fn decodes_official_pumpswap_buy_and_sell_event_prefixes() {
+        let buy = decode_pump_swap_activity_event(&encoded_pumpswap_trade(PUMPSWAP_BUY_EVENT))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            buy,
+            PumpSwapActivityEvent::Buy {
+                timestamp: 1_700_000_000,
+                pool: bs58::encode([8_u8; 32]).into_string(),
+                user: bs58::encode([9_u8; 32]).into_string(),
+                base_amount: 1,
+                quote_amount: 7,
+            }
+        );
+        let sell = decode_pump_swap_activity_event(&encoded_pumpswap_trade(PUMPSWAP_SELL_EVENT))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sell,
+            PumpSwapActivityEvent::Sell {
+                timestamp: 1_700_000_000,
+                pool: bs58::encode([8_u8; 32]).into_string(),
+                user: bs58::encode([9_u8; 32]).into_string(),
+                base_amount: 1,
+                quote_amount: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_pumpswap_liquidity_events_separately_from_trades() {
+        for (discriminator, deposit) in [
+            (PUMPSWAP_DEPOSIT_EVENT, true),
+            (PUMPSWAP_WITHDRAW_EVENT, false),
+        ] {
+            let mut data = discriminator.to_vec();
+            data.extend_from_slice(&1_700_000_000_i64.to_le_bytes());
+            for value in 1_u64..=10 {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+            data.extend_from_slice(&[8_u8; 32]);
+            data.extend_from_slice(&[9_u8; 32]);
+            let event = decode_pump_swap_activity_event(&data).unwrap().unwrap();
+            if deposit {
+                assert_eq!(
+                    event,
+                    PumpSwapActivityEvent::Deposit {
+                        timestamp: 1_700_000_000,
+                        pool: bs58::encode([8_u8; 32]).into_string(),
+                        user: bs58::encode([9_u8; 32]).into_string(),
+                        base_amount: 8,
+                        quote_amount: 9,
+                    }
+                );
+            } else {
+                assert_eq!(
+                    event,
+                    PumpSwapActivityEvent::Withdraw {
+                        timestamp: 1_700_000_000,
+                        pool: bs58::encode([8_u8; 32]).into_string(),
+                        user: bs58::encode([9_u8; 32]).into_string(),
+                        base_amount: 8,
+                        quote_amount: 9,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ignores_unrelated_anchor_event_and_rejects_truncated_pumpswap_event() {
+        assert_eq!(decode_pump_swap_activity_event(&[0_u8; 8]).unwrap(), None);
+        assert!(decode_pump_swap_activity_event(&PUMPSWAP_BUY_EVENT).is_err());
+    }
 
     fn encoded_curve(complete: u8) -> Vec<u8> {
         let mut data = vec![23, 183, 248, 55, 96, 216, 172, 96];
