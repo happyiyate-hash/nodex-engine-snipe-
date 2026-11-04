@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path, Query, State,
     },
     response::IntoResponse,
     routing::get,
@@ -194,11 +194,25 @@ fn start_launch_processor(
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
-                            "checks_completed":0,
-                            "checks_total":0,
-                            "message":"Token discovered; security scanner is the next implementation phase.",
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
+                        match rpc.scan_token_security(&mint_address).await {
+                            Ok(report) => {
+                                let _ = events.send(json!({"type":"token_scan_update","data":report}));
+                            }
+                            Err(error) => {
+                                let _ = events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"error","component":"token_security_scanner",
+                                    "message":error.to_string(),"mint_address":mint_address,
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
+                                let _ = events.send(json!({"type":"token_scan_update","data":{
+                                    "mint_address":mint_address,"decision":"UNVERIFIED",
+                                    "decision_reason":"Scanner RPC failed; no automatic buy is permitted.",
+                                    "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
+                            }
+                        }
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -251,6 +265,23 @@ async fn recent_launches(
             )
         })?;
     Ok(Json(launches))
+}
+
+async fn scan_token(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let rpc = state.rpc.ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Solana HTTP RPC is not configured".to_string(),
+    ))?;
+    let report = rpc.scan_token_security(&mint).await.map_err(|error| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Token security scan failed: {error}"),
+        )
+    })?;
+    Ok(Json(serde_json::to_value(report).unwrap_or_else(|_| json!({}))))
 }
 
 async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
@@ -434,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/engine/status", get(engine_status))
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/tokens/recent", get(recent_launches))
+        .route("/api/v1/tokens/:mint/scan", get(scan_token))
         .route("/api/v1/fees/token-account-rent", get(token_account_rent))
         .route("/api/v1/ws", get(ws_handler))
         .with_state(state)
