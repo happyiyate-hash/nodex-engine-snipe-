@@ -666,6 +666,69 @@ mod transaction_decoder_tests {
         assert_eq!(decoded.creator_address, bs58::encode(creator).into_string());
     }
 
+    fn base_mint_data(mint_authority: bool, freeze_authority: bool) -> Vec<u8> {
+        let mut data = vec![0u8; 82];
+        if mint_authority {
+            data[0..4].copy_from_slice(&1u32.to_le_bytes());
+            data[4..36].fill(7);
+        }
+        data[36..44].copy_from_slice(&1_000_000u64.to_le_bytes());
+        data[44] = 6;
+        data[45] = 1;
+        if freeze_authority {
+            data[46..50].copy_from_slice(&1u32.to_le_bytes());
+            data[50..82].fill(8);
+        }
+        data
+    }
+
+    #[test]
+    fn clean_spl_mint_is_unverified_until_remaining_checks_exist() {
+        let report = parse_mint_security_report(
+            "MintAddress",
+            SPL_TOKEN_PROGRAM_ID,
+            &base_mint_data(false, false),
+            Some(123),
+        )
+        .expect("valid SPL mint should parse");
+        assert_eq!(report.decision, "UNVERIFIED");
+        assert_eq!(report.decimals, Some(6));
+        assert_eq!(report.supply_raw.as_deref(), Some("1000000"));
+        assert!(report.checks.iter().any(|check| check.name == "sellability" && check.status == "unverified"));
+    }
+
+    #[test]
+    fn active_authority_is_a_mandatory_policy_blocker() {
+        let report = parse_mint_security_report(
+            "MintAddress",
+            SPL_TOKEN_PROGRAM_ID,
+            &base_mint_data(true, false),
+            Some(123),
+        )
+        .expect("valid SPL mint should parse");
+        assert_eq!(report.decision, "REJECTED");
+        assert!(report.mint_authority.is_some());
+    }
+
+    #[test]
+    fn detects_token_2022_permanent_delegate_extension() {
+        let mut data = base_mint_data(false, false);
+        data.push(1); // Mint account type
+        data.extend_from_slice(&12u16.to_le_bytes()); // PermanentDelegate
+        data.extend_from_slice(&32u16.to_le_bytes());
+        data.extend_from_slice(&[9u8; 32]);
+        let report = parse_mint_security_report(
+            "MintAddress",
+            TOKEN_2022_PROGRAM_ID,
+            &data,
+            Some(456),
+        )
+        .expect("Token-2022 mint should parse");
+        assert!(report.extensions.iter().any(|name| name == "permanent_delegate"));
+        assert!(report.checks.iter().any(|check| check.name == "token_2022_permanent_delegate" && check.status == "warning"));
+        assert_eq!(report.decision, "UNVERIFIED");
+    }
+
     #[test]
     fn ignores_failed_transactions() {
         let tx = json!({"meta":{"err":{"InstructionError":[0,"Custom"]}}});
