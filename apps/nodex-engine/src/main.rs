@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        State, Query,
     },
     response::IntoResponse,
     routing::get,
@@ -14,7 +14,7 @@ use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
 use serde_json::json;
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc};
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -25,6 +25,7 @@ struct AppState {
     stream_status: Arc<RwLock<StreamStatus>>,
     wallet: Arc<RwLock<PaperWallet>>,
     rpc: Option<SolanaRpc>,
+    database: sqlx::SqlitePool,
     control: Arc<RwLock<EngineControl>>,
 }
 
@@ -159,6 +160,14 @@ fn start_launch_processor(
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
+                        let _ = events.send(json!({"type":"token_scan_started","data":{
+                            "mint_address":launch.mint_address,
+                            "status":"scanning",
+                            "checks_completed":0,
+                            "checks_total":0,
+                            "message":"Token discovered; security scanner is the next implementation phase.",
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -192,6 +201,18 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
         "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
         "solana_stream": stream,
     }))
+}
+
+
+async fn recent_launches(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
+    let limit = query.get("limit").and_then(|value| value.parse::<u32>().ok()).unwrap_or(100);
+    let launches = nodex_persistence::list_recent_launches(&state.database, limit)
+        .await
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(launches))
 }
 
 async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
@@ -367,12 +388,14 @@ async fn main() -> anyhow::Result<()> {
         stream_status,
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
+        database: db.clone(),
         control,
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
         .route("/api/v1/paper-wallet", get(paper_wallet))
+        .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/fees/token-account-rent", get(token_account_rent))
         .route("/api/v1/ws", get(ws_handler))
         .with_state(state)
