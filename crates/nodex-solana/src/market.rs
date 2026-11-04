@@ -84,8 +84,13 @@ async fn run_market_monitor(
         match connect_market_stream(&ws_url, &events, &mut commands, &mut desired).await {
             Ok(()) => {
                 reconnect_count = reconnect_count.saturating_add(1);
-                let message = "Market account WebSocket closed by the upstream provider; reconnecting.".to_owned();
-                warn!(reconnect_count, "Market account stream closed; reconnecting");
+                let message =
+                    "Market account WebSocket closed by the upstream provider; reconnecting."
+                        .to_owned();
+                warn!(
+                    reconnect_count,
+                    "Market account stream closed; reconnecting"
+                );
                 let _ = events.send(json!({
                     "type":"market_monitor_status",
                     "data":{
