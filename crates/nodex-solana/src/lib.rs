@@ -103,10 +103,17 @@ impl SolanaRpc {
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .context("decoding mint account base64 data")?;
         let mut report = parse_mint_security_report(mint, &owner, &bytes, context_slot)?;
-        match self.get_holder_distribution(mint, report.supply_raw.as_deref().unwrap_or("0")).await {
+        match self
+            .get_holder_distribution(mint, report.supply_raw.as_deref().unwrap_or("0"))
+            .await
+        {
             Ok(Some(distribution)) => {
                 report.holder_distribution = Some(distribution.clone());
-                if let Some(check) = report.checks.iter_mut().find(|check| check.name == "holder_distribution") {
+                if let Some(check) = report
+                    .checks
+                    .iter_mut()
+                    .find(|check| check.name == "holder_distribution")
+                {
                     check.status = "partial".into();
                     check.severity = "medium".into();
                     check.detail = format!(
@@ -119,50 +126,86 @@ impl SolanaRpc {
             }
             Ok(None) => {}
             Err(error) => {
-                if let Some(check) = report.checks.iter_mut().find(|check| check.name == "holder_distribution") {
-                    check.detail = format!("Holder distribution is UNVERIFIED because RPC analysis failed: {error}");
+                if let Some(check) = report
+                    .checks
+                    .iter_mut()
+                    .find(|check| check.name == "holder_distribution")
+                {
+                    check.detail = format!(
+                        "Holder distribution is UNVERIFIED because RPC analysis failed: {error}"
+                    );
                 }
             }
         }
         Ok(report)
     }
 
-    async fn get_holder_distribution(&self, mint: &str, supply_raw: &str) -> Result<Option<HolderDistribution>> {
-        let largest: Value = self.call(
-            "getTokenLargestAccounts",
-            json!([mint, {"commitment":"confirmed"}]),
-        ).await?;
-        let entries = largest.pointer("/value").and_then(Value::as_array)
+    async fn get_holder_distribution(
+        &self,
+        mint: &str,
+        supply_raw: &str,
+    ) -> Result<Option<HolderDistribution>> {
+        let largest: Value = self
+            .call(
+                "getTokenLargestAccounts",
+                json!([mint, {"commitment":"confirmed"}]),
+            )
+            .await?;
+        let entries = largest
+            .pointer("/value")
+            .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("getTokenLargestAccounts returned no value array"))?;
         if entries.is_empty() {
             return Ok(Some(HolderDistribution::default()));
         }
-        let addresses: Vec<String> = entries.iter()
-            .filter_map(|entry| entry.get("address").and_then(Value::as_str).map(str::to_owned))
+        let addresses: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
             .collect();
-        let account_data: Value = self.call(
-            "getMultipleAccounts",
-            json!([addresses, {"encoding":"base64","commitment":"confirmed"}]),
-        ).await?;
-        let values = account_data.pointer("/value").and_then(Value::as_array)
+        let account_data: Value = self
+            .call(
+                "getMultipleAccounts",
+                json!([addresses, {"encoding":"base64","commitment":"confirmed"}]),
+            )
+            .await?;
+        let values = account_data
+            .pointer("/value")
+            .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("getMultipleAccounts returned no value array"))?;
-        let expected_mint = bs58::decode(mint).into_vec()
+        let expected_mint = bs58::decode(mint)
+            .into_vec()
             .context("decoding mint address for holder account validation")?;
-        let supply = supply_raw.parse::<u128>()
+        let supply = supply_raw
+            .parse::<u128>()
             .context("parsing raw mint supply for holder distribution")?;
         let mut owners: HashMap<String, u128> = HashMap::new();
         let mut top_account_total = 0u128;
         let mut resolved_accounts = 0usize;
         for value in values {
-            let Some(value) = value.as_object() else { continue };
-            let Some(encoded) = value.get("data").and_then(|data| data.get(0)).and_then(Value::as_str) else { continue };
+            let Some(value) = value.as_object() else {
+                continue;
+            };
+            let Some(encoded) = value
+                .get("data")
+                .and_then(|data| data.get(0))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
             let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
                 .context("decoding token account data")?;
             if data.len() < 72 || data.get(0..32) != Some(expected_mint.as_slice()) {
                 continue;
             }
             let owner = bs58::encode(&data[32..64]).into_string();
-            let amount = u64::from_le_bytes(data[64..72].try_into().expect("eight-byte token amount")) as u128;
+            let amount =
+                u64::from_le_bytes(data[64..72].try_into().expect("eight-byte token amount"))
+                    as u128;
             top_account_total = top_account_total.saturating_add(amount);
             *owners.entry(owner).or_default() += amount;
             resolved_accounts += 1;
@@ -171,7 +214,11 @@ impl SolanaRpc {
         owner_amounts.sort_unstable_by(|a, b| b.cmp(a));
         let top_10_owner_total = owner_amounts.iter().take(10).copied().sum::<u128>();
         let percent = |amount: u128| -> f64 {
-            if supply == 0 { 0.0 } else { (amount as f64 / supply as f64) * 100.0 }
+            if supply == 0 {
+                0.0
+            } else {
+                (amount as f64 / supply as f64) * 100.0
+            }
         };
         Ok(Some(HolderDistribution {
             sampled_token_accounts: entries.len(),
