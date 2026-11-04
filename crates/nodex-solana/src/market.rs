@@ -363,6 +363,8 @@ async fn connect_market_stream(
                             continue;
                         };
                         let owner = account_value.and_then(|v| v.get("owner")).and_then(Value::as_str);
+                        let lamports = account_value.and_then(|v| v.get("lamports")).and_then(Value::as_u64);
+                        let space = account_value.and_then(|v| v.get("space")).and_then(Value::as_u64);
                         if owner != Some(subscription.program_id.as_str()) {
                             let _ = events.send(json!({
                                 "type":"diagnostic",
@@ -436,7 +438,10 @@ async fn connect_market_stream(
                                 "venue":"pump_fun_bonding_curve",
                                 "slot":slot,
                                 "owner":owner,
+                                "lamports":lamports,
+                                "space":space,
                                 "account_data_size":raw.len(),
+                                "account_data_base64":encoded,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }
                         }));
@@ -531,6 +536,21 @@ mod market_monitor_tests {
         wrong[0] = 0;
         assert!(decode_pump_bonding_curve_account(&wrong).is_err());
         assert!(decode_pump_bonding_curve_account(&[0; 80]).is_err());
+    }
+
+    #[test]
+    fn rejects_non_sol_quote_mints_instead_of_mispricing_them() {
+        let mut data = encoded_curve(0);
+        data[83] = 1;
+        assert!(decode_pump_bonding_curve_account(&data).is_err());
+    }
+
+    #[test]
+    fn supports_legacy_sol_curve_accounts_without_appended_quote_mint() {
+        let mut data = encoded_curve(0);
+        data.truncate(81);
+        let curve = decode_pump_bonding_curve_account(&data).unwrap();
+        assert!((curve.price_sol - 0.03).abs() < 1e-12);
     }
 
     #[test]
