@@ -191,7 +191,7 @@ fn start_pumpswap_activity_processor(
                                                     }
                                                     _ => None,
                                                 }
-                                            },
+                                            }
                                             Err(_) => None,
                                         }
                                     }
