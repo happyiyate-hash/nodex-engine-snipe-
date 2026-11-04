@@ -176,9 +176,9 @@ fn start_launch_processor(
                 };
                 let launch = detect_pump_fun_launch(CreateInstruction {
                     program_id: program_id.clone(),
-                    configured_pump_fun_program_id: program_id,
+                    configured_pump_fun_program_id: program_id.clone(),
                     mint_address: decoded.mint_address,
-                    creator_address: Some(decoded.creator_address),
+                    creator_address: Some(decoded.creator_address.clone()),
                     signature: signature.clone(),
                     slot: if decoded.slot == 0 {
                         slot_hint
@@ -190,12 +190,28 @@ fn start_launch_processor(
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
                         let mint_address = launch.mint_address.clone();
+                        let creator_address = launch.creator_address.clone();
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
+                        if let Some(creator) = creator_address {
+                            let _ = events.send(json!({"type":"creator_history_started","data":{"mint_address":mint_address,"creator_address":creator,"status":"scanning","received_at":chrono::Utc::now().to_rfc3339()}}));
+                            match rpc
+                                .scan_creator_history(&creator, &signature, &program_id)
+                                .await
+                            {
+                                Ok(history) => {
+                                    let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":history,"received_at":chrono::Utc::now().to_rfc3339()}}));
+                                }
+                                Err(error) => {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{"severity":"warning","component":"creator_history_scanner","message":error.to_string(),"mint_address":mint_address,"creator_address":creator,"received_at":chrono::Utc::now().to_rfc3339()}}));
+                                    let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":{"creator_address":creator,"status":"unverified","early_selling":"UNVERIFIED","sample_is_partial":true,"caveat":"Creator history RPC failed; no conclusion can be drawn."},"received_at":chrono::Utc::now().to_rfc3339()}}));
+                                }
+                            }
+                        }
                         match rpc.scan_token_security(&mint_address).await {
                             Ok(report) => {
                                 let _ =
