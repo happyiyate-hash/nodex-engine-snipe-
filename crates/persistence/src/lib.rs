@@ -152,3 +152,18 @@ pub async fn save_ledger_entry(pool: &SqlitePool, entry: &LedgerEntry) -> Result
     .await?;
     Ok(())
 }
+
+
+/// Returns the newest persisted token launches, newest slot first.
+pub async fn list_recent_launches(pool: &SqlitePool, limit: u32) -> Result<Vec<serde_json::Value>> {
+    let safe_limit = limit.clamp(1, 500) as i64;
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM token_launches ORDER BY slot DESC, detected_at DESC LIMIT ?"
+    )
+    .bind(safe_limit)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .collect()
+}
