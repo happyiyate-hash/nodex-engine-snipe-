@@ -24,6 +24,23 @@ struct AppState {
     stream_status: Arc<RwLock<StreamStatus>>,
     wallet: Arc<RwLock<PaperWallet>>,
     rpc: Option<SolanaRpc>,
+    control: Arc<RwLock<EngineControl>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EngineControl {
+    paused: bool,
+    mode: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum ClientCommand {
+    Pause,
+    Resume,
+    Start,
+    SetMode { mode: String },
+    Status,
 }
 
 #[derive(Serialize)]
@@ -43,9 +60,12 @@ async fn health() -> Json<Health> {
 
 async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let stream = state.stream_status.read().await.clone();
+    let control = state.control.read().await.clone();
     Json(json!({
-        "mode": "paper",
+        "mode": control.mode,
+        "paused": control.paused,
         "live_execution_enabled": false,
+        "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
         "solana_stream": stream,
     }))
 }
@@ -84,7 +104,8 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver_socket) = socket.split();
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
-    let initial = json!({"type":"connection_status","data":status}).to_string();
+    let control = state.control.read().await.clone();
+    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":false}}}).to_string();
     if sender.send(Message::Text(initial)).await.is_err() {
         return;
     }
@@ -111,6 +132,31 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                 Some(Ok(Message::Ping(payload))) => {
                     if sender.send(Message::Pong(payload)).await.is_err() {
                         break;
+                    }
+                }
+                Some(Ok(Message::Text(text))) => {
+                    let result = match serde_json::from_str::<ClientCommand>(&text) {
+                        Ok(ClientCommand::Pause) => {
+                            state.control.write().await.paused = true;
+                            Some(json!({"type":"engine_state","data":{"paused":true,"mode":"paper"}}))
+                        }
+                        Ok(ClientCommand::Resume) | Ok(ClientCommand::Start) => {
+                            state.control.write().await.paused = false;
+                            Some(json!({"type":"engine_state","data":{"paused":false,"mode":"paper"}}))
+                        }
+                        Ok(ClientCommand::SetMode { mode }) if mode == "paper" => {
+                            state.control.write().await.mode = "paper".into();
+                            Some(json!({"type":"engine_state","data":{"paused":state.control.read().await.paused,"mode":"paper"}}))
+                        }
+                        Ok(ClientCommand::SetMode { mode }) => Some(json!({"type":"command_rejected","data":{"command":"set_mode","requested_mode":mode,"reason":"Live mode is not implemented or enabled. Paper mode remains active.","live_execution_enabled":false}})),
+                        Ok(ClientCommand::Status) => {
+                            let control = state.control.read().await.clone();
+                            Some(json!({"type":"engine_state","data":control}))
+                        }
+                        Err(error) => Some(json!({"type":"diagnostic","data":{"severity":"error","component":"websocket_command","message":error.to_string(),"received_at":chrono::Utc::now().to_rfc3339()}})),
+                    };
+                    if let Some(value) = result {
+                        if sender.send(Message::Text(value.to_string())).await.is_err() { break; }
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
@@ -173,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
         stream_status,
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
+        control: Arc::new(RwLock::new(EngineControl { paused: false, mode: "paper".into() })),
     };
     let app = Router::new()
         .route("/health", get(health))
