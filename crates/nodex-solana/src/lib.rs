@@ -9,7 +9,7 @@ pub use market::{
 pub const PUMPSWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -375,6 +375,42 @@ impl SolanaRpc {
             sample_is_partial: true,
             caveat: "Only the largest RPC-returned token accounts are sampled. Pool vaults, burn addresses, exchange wallets and linked-wallet clusters are not yet classified or excluded.".into(),
         }))
+    }
+
+    /// Check whether a signature is still available from the RPC node's transaction history.
+    pub async fn signature_status_available(&self, signature: &str) -> Result<bool> {
+        let response: Value = self
+            .call(
+                "getSignatureStatuses",
+                json!([[signature], {"searchTransactionHistory":true}]),
+            )
+            .await?;
+        Ok(response
+            .pointer("/value/0")
+            .is_some_and(|status| !status.is_null()))
+    }
+
+    /// Return recent signatures for an address, optionally bounded by before/until cursors.
+    /// The RPC limit is capped at Solana's documented maximum of 1,000 entries.
+    pub async fn get_signatures_for_address(
+        &self,
+        address: &str,
+        before: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let mut config = json!({
+            "commitment":"confirmed",
+            "limit":limit.clamp(1, 1_000)
+        });
+        if let Some(before) = before {
+            config["before"] = Value::String(before.to_owned());
+        }
+        if let Some(until) = until {
+            config["until"] = Value::String(until.to_owned());
+        }
+        self.call("getSignaturesForAddress", json!([address, config]))
+            .await
     }
 
     /// Fetches a confirmed transaction in raw JSON form, including version-0 transactions.
@@ -987,16 +1023,199 @@ pub struct StreamStatus {
     pub last_error: Option<String>,
 }
 
+const MAX_BACKFILL_PAGES: usize = 10;
+const SIGNATURE_PAGE_SIZE: usize = 1_000;
+const BACKFILL_CONCURRENCY: usize = 8;
+
+fn backfilled_log_notification(
+    program_id: &str,
+    signature: String,
+    slot: u64,
+    err: Value,
+    logs: Vec<String>,
+) -> Value {
+    json!({
+        "jsonrpc":"2.0",
+        "method":"logsNotification",
+        "nodex_program_id":program_id,
+        "nodex_backfilled":true,
+        "params":{"result":{
+            "context":{"slot":slot},
+            "value":{"signature":signature,"err":err,"logs":logs}
+        }}
+    })
+}
+
+/// Recover confirmed program transactions after the last fully processed signature.
+/// A fresh WebSocket subscription is established first, so transactions arriving during
+/// the backfill are also buffered live; downstream signature de-duplication removes overlap.
+async fn backfill_logs_gap(
+    rpc: &SolanaRpc,
+    program_id: &str,
+    checkpoint_signature: &str,
+    sender: &broadcast::Sender<Value>,
+) -> Result<(usize, bool, Option<(u64, String)>)> {
+    let mut signatures = Vec::<(String, u64)>::new();
+    let mut before: Option<String> = None;
+    let mut reached_checkpoint = false;
+    let mut newest: Option<(u64, String)> = None;
+    let checkpoint_available = rpc.signature_status_available(checkpoint_signature).await?;
+
+    for _ in 0..MAX_BACKFILL_PAGES {
+        let page = rpc
+            .get_signatures_for_address(
+                program_id,
+                before.as_deref(),
+                Some(checkpoint_signature),
+                SIGNATURE_PAGE_SIZE,
+            )
+            .await?;
+        if page.is_empty() {
+            reached_checkpoint = checkpoint_available;
+            break;
+        }
+
+        if newest.is_none() {
+            if let Some(item) = page.first() {
+                if let (Some(signature), Some(slot)) = (
+                    item.get("signature").and_then(Value::as_str),
+                    item.get("slot").and_then(Value::as_u64),
+                ) {
+                    newest = Some((slot, signature.to_owned()));
+                }
+            }
+        }
+
+        for item in &page {
+            let Some(signature) = item.get("signature").and_then(Value::as_str) else {
+                continue;
+            };
+            if signature == checkpoint_signature {
+                reached_checkpoint = true;
+                break;
+            }
+            if let Some(slot) = item.get("slot").and_then(Value::as_u64) {
+                signatures.push((signature.to_owned(), slot));
+            }
+        }
+        if reached_checkpoint {
+            break;
+        }
+
+        let Some(oldest_signature) = page
+            .last()
+            .and_then(|item| item.get("signature"))
+            .and_then(Value::as_str)
+        else {
+            break;
+        };
+        if page.len() < SIGNATURE_PAGE_SIZE {
+            // The until cursor is bounded only when the checkpoint is still queryable.
+            reached_checkpoint = checkpoint_available;
+            break;
+        }
+        before = Some(oldest_signature.to_owned());
+    }
+
+    signatures.sort_by_key(|(_, slot)| *slot);
+    let recovered = stream::iter(signatures.into_iter().map(|(signature, hinted_slot)| {
+        let rpc = rpc.clone();
+        async move {
+            let transaction = rpc.get_transaction(&signature).await;
+            (signature, hinted_slot, transaction)
+        }
+    }))
+    .buffer_unordered(BACKFILL_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut recovered = recovered;
+    recovered.sort_by_key(|(_, hinted_slot, _)| *hinted_slot);
+    let mut emitted = 0_usize;
+    let mut unavailable = 0_usize;
+
+    for (signature, hinted_slot, transaction) in recovered {
+        let transaction = match transaction {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                unavailable = unavailable.saturating_add(1);
+                continue;
+            }
+            Err(error) => {
+                unavailable = unavailable.saturating_add(1);
+                let _ = sender.send(json!({"type":"diagnostic","data":{
+                    "severity":"warning","component":"solana_reconnect_backfill",
+                    "message":error.to_string(),"signature":signature,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }}));
+                continue;
+            }
+        };
+        let Some(meta) = transaction.get("meta").filter(|meta| !meta.is_null()) else {
+            unavailable = unavailable.saturating_add(1);
+            continue;
+        };
+        let Some(logs) = meta.get("logMessages").and_then(Value::as_array) else {
+            unavailable = unavailable.saturating_add(1);
+            continue;
+        };
+        let logs = logs
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let slot = transaction
+            .get("slot")
+            .and_then(Value::as_u64)
+            .unwrap_or(hinted_slot);
+        let err = meta.get("err").cloned().unwrap_or(Value::Null);
+        let _ = sender.send(backfilled_log_notification(
+            program_id, signature, slot, err, logs,
+        ));
+        emitted = emitted.saturating_add(1);
+    }
+
+    if !reached_checkpoint || unavailable > 0 {
+        let _ = sender.send(json!({"type":"diagnostic","data":{
+            "severity":"warning","component":"solana_reconnect_backfill",
+            "message":"Reconnect recovery was partial; some signatures may be unavailable or the checkpoint may be outside the bounded RPC history scan.",
+            "program_id":program_id,
+            "checkpoint_signature":checkpoint_signature,
+            "scanned_signatures":emitted.saturating_add(unavailable),
+            "emitted_transactions":emitted,
+            "unavailable_transactions":unavailable,
+            "page_limit":MAX_BACKFILL_PAGES,
+            "retrying_on_next_reconnect":true,
+            "received_at":chrono::Utc::now().to_rfc3339()
+        }}));
+    }
+
+    Ok((emitted, reached_checkpoint && unavailable == 0, newest))
+}
+
 /// Forwards raw logsNotification JSON. The mentions filter accepts exactly one pubkey.
 pub async fn run_logs_stream(
     ws_url: String,
     program_id: String,
     sender: broadcast::Sender<Value>,
     status: std::sync::Arc<tokio::sync::RwLock<StreamStatus>>,
+    rpc: Option<SolanaRpc>,
 ) {
     let mut reconnect_count = 0_u64;
+    let mut last_seen_signature: Option<(u64, String)> = None;
+    let mut recovery_incomplete = false;
     loop {
-        if let Err(error) = connect_and_subscribe(&ws_url, &program_id, &sender, &status).await {
+        if let Err(error) = connect_and_subscribe(
+            &ws_url,
+            &program_id,
+            &sender,
+            &status,
+            rpc.as_ref(),
+            &mut last_seen_signature,
+            &mut recovery_incomplete,
+        )
+        .await
+        {
             warn!(%error, "Solana WebSocket stream ended; reconnecting");
             status.write().await.last_error = Some(error.to_string());
             let _ = sender.send(json!({"type":"diagnostic","data":{"severity":"error","component":"solana_websocket","message":error.to_string(),"retrying":true,"received_at":chrono::Utc::now().to_rfc3339()}}));
@@ -1020,6 +1239,9 @@ async fn connect_and_subscribe(
     program_id: &str,
     sender: &broadcast::Sender<Value>,
     status: &std::sync::Arc<tokio::sync::RwLock<StreamStatus>>,
+    rpc: Option<&SolanaRpc>,
+    last_seen_signature: &mut Option<(u64, String)>,
+    recovery_incomplete: &mut bool,
 ) -> Result<()> {
     let (mut socket, _) = connect_async(ws_url)
         .await
@@ -1057,6 +1279,48 @@ async fn connect_and_subscribe(
     );
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":true,"subscription_id":subscription_id,"program_id":program_id,"received_at":chrono::Utc::now().to_rfc3339()}}));
 
+    if let Some((_, checkpoint)) = last_seen_signature.clone() {
+        if let Some(rpc) = rpc {
+            match backfill_logs_gap(rpc, program_id, &checkpoint, sender).await {
+                Ok((recovered, complete, newest)) => {
+                    *recovery_incomplete = !complete;
+                    if complete {
+                        if let Some(newest) = newest {
+                            *last_seen_signature = Some(newest);
+                        }
+                    }
+                    let _ = sender.send(json!({
+                        "type":"reconnect_recovery_status",
+                        "data":{
+                            "program_id":program_id,
+                            "recovered_transactions":recovered,
+                            "complete":complete,
+                            "checkpoint_signature":checkpoint,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }
+                    }));
+                }
+                Err(error) => {
+                    *recovery_incomplete = true;
+                    let _ = sender.send(json!({"type":"diagnostic","data":{
+                        "severity":"error","component":"solana_reconnect_backfill",
+                        "message":error.to_string(),"program_id":program_id,
+                        "checkpoint_signature":checkpoint,"retrying_on_next_reconnect":true,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                }
+            }
+        } else {
+            *recovery_incomplete = true;
+            let _ = sender.send(json!({"type":"diagnostic","data":{
+                "severity":"warning","component":"solana_reconnect_backfill",
+                "message":"Reconnect gap cannot be backfilled because HTTP Solana RPC is not configured.",
+                "program_id":program_id,"checkpoint_signature":checkpoint,
+                "received_at":chrono::Utc::now().to_rfc3339()
+            }}));
+        }
+    }
+
     while let Some(message) = socket.next().await {
         match message? {
             Message::Text(text) => {
@@ -1068,6 +1332,23 @@ async fn connect_and_subscribe(
                             "nodex_program_id".into(),
                             Value::String(program_id.to_owned()),
                         );
+                    }
+                    if !*recovery_incomplete {
+                        let slot = tagged
+                            .pointer("/params/result/context/slot")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_default();
+                        if let Some(signature) = tagged
+                            .pointer("/params/result/value/signature")
+                            .and_then(Value::as_str)
+                        {
+                            let is_newer = last_seen_signature
+                                .as_ref()
+                                .is_none_or(|(last_slot, _)| slot >= *last_slot);
+                            if is_newer {
+                                *last_seen_signature = Some((slot, signature.to_owned()));
+                            }
+                        }
                     }
                     let _ = sender.send(tagged);
                 }
@@ -1117,6 +1398,45 @@ mod pumpswap_log_tests {
         assert!(decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn backfilled_notifications_match_the_live_logs_notification_shape() {
+        let notification = backfilled_log_notification(
+            PUMPSWAP_PROGRAM_ID,
+            "test-signature".to_owned(),
+            42,
+            Value::Null,
+            vec!["Program log: test".to_owned()],
+        );
+        assert_eq!(
+            notification.get("nodex_program_id").and_then(Value::as_str),
+            Some(PUMPSWAP_PROGRAM_ID)
+        );
+        assert_eq!(
+            notification
+                .pointer("/params/result/context/slot")
+                .and_then(Value::as_u64),
+            Some(42)
+        );
+        assert_eq!(
+            notification
+                .pointer("/params/result/value/signature")
+                .and_then(Value::as_str),
+            Some("test-signature")
+        );
+        assert_eq!(
+            notification
+                .pointer("/params/result/value/logs/0")
+                .and_then(Value::as_str),
+            Some("Program log: test")
+        );
+        assert_eq!(
+            notification
+                .get("nodex_backfilled")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 }
 
