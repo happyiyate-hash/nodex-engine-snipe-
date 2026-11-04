@@ -79,7 +79,7 @@ impl SolanaRpc {
             .post(&self.http_url)
             .json(&json!({
                 "jsonrpc":"2.0", "id":1, "method":"getTransaction",
-                "params":[signature, {"encoding":"json","commitment":"confirmed","maxSupportedTransactionVersion":0}]
+                "params":[signature, {"encoding":"json","commitment":"confirmed","maxSupportedTransactionVersion":1}]
             }))
             .send().await.context("sending Solana getTransaction request")?
             .error_for_status().context("Solana getTransaction returned HTTP error")?
