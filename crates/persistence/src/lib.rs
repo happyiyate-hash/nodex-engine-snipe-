@@ -166,3 +166,31 @@ pub async fn list_recent_launches(pool: &SqlitePool, limit: u32) -> Result<Vec<s
         .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
         .collect()
 }
+
+/// Returns the newest persisted backend events, newest first.
+pub async fn list_recent_events(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>> {
+    let safe_limit = limit.clamp(1, 500) as i64;
+    let rows = sqlx::query(
+        "SELECT id, signature, slot, event_json, received_at FROM solana_raw_events ORDER BY id DESC LIMIT ?",
+    )
+    .bind(safe_limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let event_json: String = row.get("event_json");
+            let event: serde_json::Value = serde_json::from_str(&event_json)?;
+            Ok(serde_json::json!({
+                "id": row.get::<i64, _>("id"),
+                "signature": row.get::<Option<String>, _>("signature"),
+                "slot": row.get::<Option<i64>, _>("slot"),
+                "received_at": row.get::<String, _>("received_at"),
+                "event": event
+            }))
+        })
+        .collect()
+}
