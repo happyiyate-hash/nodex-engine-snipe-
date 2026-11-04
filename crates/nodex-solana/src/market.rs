@@ -127,9 +127,9 @@ where
 #[derive(Debug, Clone, PartialEq)]
 pub struct PumpBondingCurveState {
     pub virtual_token_reserves: u64,
-    pub virtual_sol_reserves: u64,
+    pub virtual_quote_reserves: u64,
     pub real_token_reserves: u64,
-    pub real_sol_reserves: u64,
+    pub real_quote_reserves: u64,
     pub token_total_supply: u64,
     pub complete: bool,
     pub creator: String,
@@ -166,16 +166,28 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
         value => return Err(anyhow!("invalid Pump.fun complete flag: {value}")),
     };
     let virtual_token_reserves = read_u64(8)?;
-    let virtual_sol_reserves = read_u64(16)?;
+    let virtual_quote_reserves = read_u64(16)?;
     let real_token_reserves = read_u64(24)?;
-    let real_sol_reserves = read_u64(32)?;
+    let real_quote_reserves = read_u64(32)?;
     let token_total_supply = read_u64(40)?;
     if virtual_token_reserves == 0 || token_total_supply == 0 {
         return Err(anyhow!("bonding-curve reserves or token supply are zero"));
     }
 
-    // Pump.fun tokens use 6 decimals; SOL reserves are denominated in lamports.
-    let price_sol = (virtual_sol_reserves as f64 / 1_000_000_000.0)
+    // The current IDL calls this virtual_quote_reserves, not virtual_sol_reserves.
+    // Legacy accounts (81-83 bytes) predate quote_mint and are SOL-paired.
+    // Newer accounts store quote_mint after the two appended boolean flags.
+    if (data.len() > 83 && data.len() < 115 {
+        return Err(anyhow!("Pump.fun bonding-curve account has a truncated quote_mint field"));
+    }
+    if data.len() >= 115 && data[83..115].iter().any(|byte| *byte != 0) {
+        return Err(anyhow!(
+            "non-SOL Pump.fun quote pairs are not yet supported by the SOL price monitor"
+        ));
+    }
+
+    // Pump.fun tokens use 6 decimals; SOL quote reserves are denominated in lamports.
+    let price_sol = (virtual_quote_reserves as f64 / 1_000_000_000.0)
         / (virtual_token_reserves as f64 / 1_000_000.0);
     if !price_sol.is_finite() || price_sol <= 0.0 {
         return Err(anyhow!("bonding-curve price is not finite and positive"));
@@ -185,9 +197,9 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
 
     Ok(PumpBondingCurveState {
         virtual_token_reserves,
-        virtual_sol_reserves,
+        virtual_quote_reserves,
         real_token_reserves,
-        real_sol_reserves,
+        real_quote_reserves,
         token_total_supply,
         complete,
         creator,
@@ -427,9 +439,11 @@ async fn connect_market_stream(
                                 "price_lamports_per_token":curve.price_sol * 1_000_000_000.0,
                                 "market_cap_sol":curve.market_cap_sol,
                                 "virtual_token_reserves":curve.virtual_token_reserves,
-                                "virtual_sol_reserves":curve.virtual_sol_reserves,
+                                "virtual_quote_reserves":curve.virtual_quote_reserves,
+                                "virtual_sol_reserves":curve.virtual_quote_reserves,
                                 "real_token_reserves":curve.real_token_reserves,
-                                "real_sol_reserves":curve.real_sol_reserves,
+                                "real_quote_reserves":curve.real_quote_reserves,
+                                "real_sol_reserves":curve.real_quote_reserves,
                                 "token_total_supply":curve.token_total_supply,
                                 "creator":curve.creator,
                                 "complete":curve.complete,
@@ -483,6 +497,9 @@ mod market_monitor_tests {
         }
         data.push(complete);
         data.extend_from_slice(&[7_u8; 32]);
+        // Current IDL appends mayhem/cashback flags and a quote_mint pubkey.
+        data.extend_from_slice(&[0_u8, 0_u8]);
+        data.extend_from_slice(&[0_u8; 32]);
         data
     }
 
@@ -490,7 +507,7 @@ mod market_monitor_tests {
     fn decodes_documented_bonding_curve_layout_and_price() {
         let curve = decode_pump_bonding_curve_account(&encoded_curve(0)).unwrap();
         assert_eq!(curve.virtual_token_reserves, 1_000_000_000);
-        assert_eq!(curve.virtual_sol_reserves, 30_000_000_000);
+        assert_eq!(curve.virtual_quote_reserves, 30_000_000_000);
         assert!((curve.price_sol - 0.03).abs() < 1e-12);
         assert!((curve.market_cap_sol - 30.0).abs() < 1e-9);
         assert!(!curve.complete);
