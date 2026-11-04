@@ -11,6 +11,7 @@ axum.workspace = true
 futures-util.workspace = true
 dotenvy.workspace = true
 nodex-core = { path = "../../crates/nodex-core" }
+launch-detector = { path = "../../crates/launch-detector" }
 nodex-persistence = { path = "../../crates/persistence" }
 nodex-solana = { path = "../../crates/nodex-solana" }
 nodex-trading = { path = "../../crates/nodex-trading" }
