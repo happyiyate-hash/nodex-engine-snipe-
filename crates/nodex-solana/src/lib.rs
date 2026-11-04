@@ -1172,11 +1172,7 @@ async fn backfill_logs_gap(
             .unwrap_or(hinted_slot);
         let err = meta.get("err").cloned().unwrap_or(Value::Null);
         let _ = sender.send(backfilled_log_notification(
-            program_id,
-            signature,
-            slot,
-            err,
-            logs,
+            program_id, signature, slot, err, logs,
         ));
         emitted = emitted.saturating_add(1);
     }
@@ -1420,19 +1416,27 @@ mod pumpswap_log_tests {
             Some(PUMPSWAP_PROGRAM_ID)
         );
         assert_eq!(
-            notification.pointer("/params/result/context/slot").and_then(Value::as_u64),
+            notification
+                .pointer("/params/result/context/slot")
+                .and_then(Value::as_u64),
             Some(42)
         );
         assert_eq!(
-            notification.pointer("/params/result/value/signature").and_then(Value::as_str),
+            notification
+                .pointer("/params/result/value/signature")
+                .and_then(Value::as_str),
             Some("test-signature")
         );
         assert_eq!(
-            notification.pointer("/params/result/value/logs/0").and_then(Value::as_str),
+            notification
+                .pointer("/params/result/value/logs/0")
+                .and_then(Value::as_str),
             Some("Program log: test")
         );
         assert_eq!(
-            notification.get("nodex_backfilled").and_then(Value::as_bool),
+            notification
+                .get("nodex_backfilled")
+                .and_then(Value::as_bool),
             Some(true)
         );
     }
