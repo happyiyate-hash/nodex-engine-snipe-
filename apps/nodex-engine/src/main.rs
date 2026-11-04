@@ -354,10 +354,6 @@ fn start_launch_processor(
                 .pointer("/params/result/context/slot")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or_default();
-            let permit = match concurrency.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => break,
-            };
             let rpc = rpc.clone();
             let events = events.clone();
             let database = database.clone();
@@ -365,10 +361,13 @@ fn start_launch_processor(
             let control = control.clone();
             let market_monitor = market_monitor.clone();
             tokio::spawn(async move {
+                let _permit = match concurrency.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                };
                 if control.read().await.paused {
                     return;
                 }
-                let _permit = permit;
                 let mut transaction = None;
                 let mut last_error = None;
                 for attempt in 0..4 {
@@ -617,6 +616,24 @@ async fn token_account_rent(
     })))
 }
 
+// Only curated application events are allowed onto the browser WebSocket.
+// Raw Solana notifications, provider status chatter, diagnostics, and pool-level
+// activity remain internal to the engine and its processors.
+fn is_frontend_event(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("type").and_then(serde_json::Value::as_str),
+        Some("connection_status")
+            | Some("engine_state")
+            | Some("launch_detected")
+            | Some("token_scan_started")
+            | Some("token_scan_update")
+            | Some("market_price_update")
+            | Some("paper_buy_executed")
+            | Some("paper_buy_failed")
+            | Some("strategy_rejected_token")
+    )
+}
+
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| client_socket(socket, state))
 }
@@ -637,6 +654,9 @@ async fn client_socket(socket: WebSocket, state: AppState) {
         tokio::select! {
             event = receiver.recv() => match event {
                 Ok(mut value) => {
+                    if !is_frontend_event(&value) {
+                        continue;
+                    }
                     let paused = state.control.read().await.paused;
                     let is_market_stream = value.get("method").and_then(|v| v.as_str()) == Some("logsNotification");
                     if paused && is_market_stream {
