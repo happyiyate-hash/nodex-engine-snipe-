@@ -204,7 +204,7 @@ struct PriceSample {
 
 fn percentage_change(samples: &std::collections::VecDeque<PriceSample>, now_ms: i64, seconds: i64, current: f64) -> Option<f64> {
     let target = now_ms.saturating_sub(seconds.saturating_mul(1_000));
-    let baseline = samples.iter().find(|sample| sample.timestamp_ms <= target)?;
+    let baseline = samples.iter().rev().find(|sample| sample.timestamp_ms <= target)?;
     if baseline.price_sol <= 0.0 {
         return None;
     }
@@ -400,10 +400,15 @@ async fn connect_market_stream(
                         let history = price_history.entry(subscription.mint.clone()).or_default();
                         let change_1m = percentage_change(history, now_ms, 60, curve.price_sol);
                         let change_5m = percentage_change(history, now_ms, 300, curve.price_sol);
-                        history.push_back(PriceSample {
-                            timestamp_ms: now_ms,
-                            price_sol: curve.price_sol,
-                        });
+                        let should_sample = history
+                            .back()
+                            .is_none_or(|sample| now_ms.saturating_sub(sample.timestamp_ms) >= 500);
+                        if should_sample {
+                            history.push_back(PriceSample {
+                                timestamp_ms: now_ms,
+                                price_sol: curve.price_sol,
+                            });
+                        }
                         while history.front().is_some_and(|sample| now_ms.saturating_sub(sample.timestamp_ms) > 600_000)
                             || history.len() > 1_200
                         {
@@ -512,6 +517,7 @@ mod market_monitor_tests {
         let mut samples = std::collections::VecDeque::new();
         samples.push_back(PriceSample { timestamp_ms: 1_000, price_sol: 1.0 });
         assert!(percentage_change(&samples, 30_000, 60, 1.5).is_none());
+        samples.push_back(PriceSample { timestamp_ms: 20_000, price_sol: 1.1 });
         samples.push_back(PriceSample { timestamp_ms: 30_000, price_sol: 1.2 });
         assert_eq!(percentage_change(&samples, 90_000, 60, 1.5), Some(25.0));
     }
