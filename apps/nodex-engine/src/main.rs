@@ -9,12 +9,13 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use nodex_core::config::EngineConfig;
-use nodex_solana::{run_logs_stream, SolanaRpc, StreamStatus};
+use nodex_solana::{decode_pump_fun_create, run_logs_stream, SolanaRpc, StreamStatus};
+use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
 use serde_json::json;
-use std::{net::SocketAddr, sync::Arc};
-use tokio::sync::{broadcast, RwLock};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -48,6 +49,121 @@ struct Health {
     status: &'static str,
     mode: &'static str,
     service: &'static str,
+}
+
+
+fn start_launch_processor(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    rpc: SolanaRpc,
+    database: sqlx::SqlitePool,
+    pump_fun_program_id: String,
+) {
+    let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let concurrency = Arc::new(Semaphore::new(4));
+    tokio::spawn(async move {
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    let _ = events.send(json!({"type":"diagnostic","data":{
+                        "severity":"warning","component":"launch_processor",
+                        "message":"Transaction notification consumer lagged; some notifications may need RPC backfill.",
+                        "dropped_notifications":count,"received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification") {
+                continue;
+            }
+            let Some(value) = event.pointer("/params/result/value") else { continue };
+            let Some(signature) = value.get("signature").and_then(serde_json::Value::as_str).map(str::to_owned) else { continue };
+            {
+                let mut seen = seen_signatures.lock().await;
+                if !seen.insert(signature.clone()) { continue; }
+                if seen.len() > 20_000 {
+                    seen.clear();
+                    seen.insert(signature.clone());
+                }
+            }
+            let slot_hint = event.pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64).unwrap_or_default();
+            let permit = match concurrency.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => break,
+            };
+            let rpc = rpc.clone();
+            let events = events.clone();
+            let database = database.clone();
+            let program_id = pump_fun_program_id.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let mut transaction = None;
+                let mut last_error = None;
+                for attempt in 0..4 {
+                    match rpc.get_transaction(&signature).await {
+                        Ok(Some(value)) => { transaction = Some(value); break; }
+                        Ok(None) => {
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt + 1))).await;
+                            }
+                        }
+                        Err(error) => {
+                            last_error = Some(error.to_string());
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt + 1))).await;
+                            }
+                        }
+                    }
+                }
+                let Some(transaction) = transaction else {
+                    let message = last_error.unwrap_or_else(|| "RPC returned null for this confirmed transaction after retries".to_string());
+                    let _ = events.send(json!({"type":"diagnostic","data":{
+                        "severity":"warning","component":"solana_get_transaction",
+                        "message":message,"signature":signature,"slot_hint":slot_hint,
+                        "retry_exhausted":true,"received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                    return;
+                };
+                let decoded = match decode_pump_fun_create(&transaction, &signature, &program_id) {
+                    Ok(Some(decoded)) => decoded,
+                    Ok(None) => return,
+                    Err(error) => {
+                        let _ = events.send(json!({"type":"diagnostic","data":{
+                            "severity":"error","component":"pump_fun_decoder",
+                            "message":error.to_string(),"signature":signature,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
+                        return;
+                    }
+                };
+                let launch = detect_pump_fun_launch(CreateInstruction {
+                    program_id: program_id.clone(),
+                    configured_pump_fun_program_id: program_id,
+                    mint_address: decoded.mint_address,
+                    creator_address: Some(decoded.creator_address),
+                    signature: signature.clone(),
+                    slot: if decoded.slot == 0 { slot_hint } else { decoded.slot },
+                });
+                let Some(launch) = launch else { return };
+                match nodex_persistence::save_launch(&database, &launch).await {
+                    Ok(true) => {
+                        let _ = events.send(json!({"type":"launch_detected","data":launch}));
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = events.send(json!({"type":"diagnostic","data":{
+                            "severity":"error","component":"launch_persistence",
+                            "message":error.to_string(),"signature":signature,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
+                    }
+                }
+            });
+        }
+    });
 }
 
 async fn health() -> Json<Health> {
@@ -105,7 +221,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
     let control = state.control.read().await.clone();
-    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":false}}}).to_string();
+    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":true,"token_security_scanning":false,"transaction_decoding":"pump_fun_create_and_create_v2"}}}).to_string();
     if sender.send(Message::Text(initial)).await.is_err() {
         return;
     }
@@ -194,6 +310,23 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(2048);
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
+
+    // Decode Pump.fun creation transactions from confirmed logs notifications.
+    if let Some(launch_rpc) = rpc.clone() {
+        start_launch_processor(
+            events.subscribe(),
+            events.clone(),
+            launch_rpc,
+            db.clone(),
+            config.pump_fun_program_id.clone(),
+        );
+    } else {
+        let _ = events.send(json!({"type":"diagnostic","data":{
+            "severity":"warning","component":"solana_http_rpc",
+            "message":"Token transaction decoding is disabled because SOLANA_RPC_HTTP_URL / HELIUS_API_KEY is not configured.",
+            "received_at":chrono::Utc::now().to_rfc3339()
+        }}));
+    }
 
     // Persist raw upstream log notifications independently of browser subscribers.
     let mut persistence_receiver = events.subscribe();
