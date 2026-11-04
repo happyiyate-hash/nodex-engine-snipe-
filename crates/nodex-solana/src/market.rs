@@ -212,6 +212,77 @@ pub fn decode_pump_bonding_curve_account(data: &[u8]) -> Result<PumpBondingCurve
     })
 }
 
+
+pub const PUMP_SWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+pub const WRAPPED_SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+/// Derive the canonical PumpSwap migration pool using Pump's pool-authority PDA.
+pub fn derive_pump_swap_pool(mint: &str, pump_program_id: &str) -> Result<String> {
+    let mint = Pubkey::from_str(mint).context("invalid token mint public key")?;
+    let pump_program = Pubkey::from_str(pump_program_id).context("invalid Pump.fun program id")?;
+    let amm_program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID).expect("valid PumpSwap program id");
+    let wrapped_sol = Pubkey::from_str(WRAPPED_SOL_MINT).expect("valid wrapped SOL mint");
+    let (pool_authority, _) = Pubkey::try_find_program_address(
+        &[b"pool-authority", mint.as_ref()],
+        &pump_program,
+    ).ok_or_else(|| anyhow!("could not derive Pump.fun pool-authority PDA"))?;
+    let canonical_index = 0_u16.to_le_bytes();
+    let (pool, _) = Pubkey::try_find_program_address(
+        &[b"pool", &canonical_index, pool_authority.as_ref(), mint.as_ref(), wrapped_sol.as_ref()],
+        &amm_program,
+    ).ok_or_else(|| anyhow!("could not derive canonical PumpSwap pool PDA"))?;
+    Ok(pool.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PumpSwapPoolAccount {
+    pub index: u16,
+    pub creator: String,
+    pub base_mint: String,
+    pub quote_mint: String,
+    pub pool_base_token_account: String,
+    pub pool_quote_token_account: String,
+    pub lp_supply: u64,
+    pub virtual_quote_reserves: i128,
+}
+
+/// Decode the current official PumpSwap Pool layout; absent appended fields default to zero.
+pub fn decode_pump_swap_pool_account(data: &[u8]) -> Result<PumpSwapPoolAccount> {
+    const DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
+    const MINIMUM_LENGTH: usize = 211;
+    if data.len() < MINIMUM_LENGTH {
+        return Err(anyhow!("PumpSwap Pool account is too short: {} bytes", data.len()));
+    }
+    if data[..8] != DISCRIMINATOR {
+        return Err(anyhow!("account discriminator is not PumpSwap Pool"));
+    }
+    let read_u64 = |offset: usize| -> Result<u64> {
+        let bytes: [u8; 8] = data.get(offset..offset + 8)
+            .ok_or_else(|| anyhow!("PumpSwap Pool integer field is truncated"))?
+            .try_into().map_err(|_| anyhow!("invalid PumpSwap Pool integer field"))?;
+        Ok(u64::from_le_bytes(bytes))
+    };
+    let read_key = |offset: usize| -> Result<String> {
+        let bytes = data.get(offset..offset + 32)
+            .ok_or_else(|| anyhow!("PumpSwap Pool public-key field is truncated"))?;
+        Ok(bs58::encode(bytes).into_string())
+    };
+    let index = u16::from_le_bytes(data[9..11].try_into().expect("two-byte index"));
+    let virtual_quote_reserves = if data.len() >= 261 {
+        i128::from_le_bytes(data[245..261].try_into().expect("sixteen-byte signed reserve"))
+    } else { 0 };
+    Ok(PumpSwapPoolAccount {
+        index,
+        creator: read_key(11)?,
+        base_mint: read_key(43)?,
+        quote_mint: read_key(75)?,
+        pool_base_token_account: read_key(139)?,
+        pool_quote_token_account: read_key(171)?,
+        lp_supply: read_u64(203)?,
+        virtual_quote_reserves,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PriceSample {
     timestamp_ms: i64,
@@ -382,9 +453,10 @@ async fn connect_market_stream(
                                 "data":{
                                     "severity":"warning",
                                     "component":"market_monitor_owner_check",
-                                    "message":"Bonding-curve account owner did not match the configured Pump.fun program.",
+                                    "message":"Market account owner did not match the expected program for this subscription.",
                                     "mint_address":subscription.mint,
                                     "account_address":subscription.account,
+                                    "expected_owner":subscription.program_id,
                                     "observed_owner":owner
                                 }
                             }));
@@ -405,6 +477,44 @@ async fn connect_market_stream(
                                 continue;
                             }
                         };
+                        if subscription.venue == "pump_swap_pool" {
+                            let pool = match decode_pump_swap_pool_account(&raw) {
+                                Ok(pool) => pool,
+                                Err(error) => {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"warning","component":"pump_swap_pool_decoder",
+                                        "message":error.to_string(),"mint_address":subscription.mint,
+                                        "account_address":subscription.account
+                                    }}));
+                                    continue;
+                                }
+                            };
+                            if pool.base_mint != subscription.mint
+                                || pool.quote_mint != WRAPPED_SOL_MINT
+                                || pool.index != 0
+                            {
+                                let _ = events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"warning","component":"pump_swap_pool_validation",
+                                    "message":"Derived PumpSwap pool did not match expected mint, wrapped-SOL quote mint, or canonical migration index.",
+                                    "mint_address":subscription.mint,"account_address":subscription.account,
+                                    "observed_base_mint":pool.base_mint,"observed_quote_mint":pool.quote_mint,
+                                    "observed_index":pool.index
+                                }}));
+                                continue;
+                            }
+                            let _ = events.send(json!({"type":"market_pool_verified","data":{
+                                "mint_address":subscription.mint,"pool_address":subscription.account,
+                                "venue":"pump_swap","index":pool.index,"pool_creator":pool.creator,
+                                "base_mint":pool.base_mint,"quote_mint":pool.quote_mint,
+                                "pool_base_token_account":pool.pool_base_token_account,
+                                "pool_quote_token_account":pool.pool_quote_token_account,
+                                "lp_supply":pool.lp_supply,
+                                "virtual_quote_reserves":pool.virtual_quote_reserves,
+                                "slot":slot,"status":"pool_verified_vault_monitoring_pending",
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            continue;
+                        }
                         let curve = match decode_pump_bonding_curve_account(&raw) {
                             Ok(curve) => curve,
                             Err(error) => {
@@ -494,6 +604,41 @@ async fn connect_market_stream(
                                     "received_at":chrono::Utc::now().to_rfc3339()
                                 }
                             }));
+                            match derive_pump_swap_pool(&subscription.mint, &subscription.program_id) {
+                                Ok(pool_address) if !desired.contains_key(&pool_address) => {
+                                    if desired.len() < MAX_MARKET_SUBSCRIPTIONS {
+                                        let pool_subscription = MarketSubscription {
+                                            mint: subscription.mint.clone(),
+                                            account: pool_address.clone(),
+                                            venue: "pump_swap_pool",
+                                            program_id: PUMP_SWAP_PROGRAM_ID.to_owned(),
+                                        };
+                                        let request_id = next_request_id;
+                                        next_request_id = next_request_id.saturating_add(1);
+                                        send_account_subscribe(&mut sink, request_id, &pool_address).await?;
+                                        desired.insert(pool_address.clone(), pool_subscription.clone());
+                                        pending.insert(request_id, pool_subscription);
+                                        let _ = events.send(json!({"type":"market_pool_discovery","data":{
+                                            "mint_address":subscription.mint,"pool_address":pool_address,
+                                            "venue":"pump_swap","status":"subscription_pending",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                    } else {
+                                        let _ = events.send(json!({"type":"diagnostic","data":{
+                                            "severity":"warning","component":"market_monitor",
+                                            "message":"Market account subscription capacity reached before PumpSwap pool could be monitored.",
+                                            "mint_address":subscription.mint,"limit":MAX_MARKET_SUBSCRIPTIONS
+                                        }}));
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"warning","component":"pump_swap_pool_derivation",
+                                        "message":error.to_string(),"mint_address":subscription.mint
+                                    }}));
+                                }
+                            }
                         }
                     }
                     Message::Ping(payload) => {
@@ -528,6 +673,48 @@ mod market_monitor_tests {
         data.extend_from_slice(&[0_u8, 0_u8]);
         data.extend_from_slice(&[0_u8; 32]);
         data
+    }
+
+
+    fn encoded_pool() -> Vec<u8> {
+        let mut data = vec![241, 154, 109, 4, 17, 177, 109, 188];
+        data.push(254);
+        data.extend_from_slice(&0_u16.to_le_bytes());
+        for byte in [1_u8, 2, 3, 4, 5, 6] { data.extend_from_slice(&[byte; 32]); }
+        data.extend_from_slice(&99_u64.to_le_bytes());
+        data.extend_from_slice(&[7_u8; 32]);
+        data.extend_from_slice(&[0_u8, 0_u8]);
+        data.extend_from_slice(&(-12_i128).to_le_bytes());
+        data.extend_from_slice(&[0_u8; 10]);
+        data
+    }
+
+    #[test]
+    fn decodes_pumpswap_pool_fields_and_signed_virtual_quote_reserves() {
+        let pool = decode_pump_swap_pool_account(&encoded_pool()).unwrap();
+        assert_eq!(pool.index, 0);
+        assert_eq!(pool.base_mint, bs58::encode([2_u8; 32]).into_string());
+        assert_eq!(pool.quote_mint, bs58::encode([3_u8; 32]).into_string());
+        assert_eq!(pool.pool_base_token_account, bs58::encode([5_u8; 32]).into_string());
+        assert_eq!(pool.pool_quote_token_account, bs58::encode([6_u8; 32]).into_string());
+        assert_eq!(pool.lp_supply, 99);
+        assert_eq!(pool.virtual_quote_reserves, -12);
+    }
+
+    #[test]
+    fn rejects_invalid_pumpswap_pool_discriminator_and_short_layout() {
+        assert!(decode_pump_swap_pool_account(&[0; 211]).is_err());
+        let mut invalid = encoded_pool();
+        invalid[0] = 0;
+        assert!(decode_pump_swap_pool_account(&invalid).is_err());
+    }
+
+    #[test]
+    fn accepts_legacy_pumpswap_pool_without_virtual_quote_reserves() {
+        let mut legacy = encoded_pool();
+        legacy.truncate(245);
+        let pool = decode_pump_swap_pool_account(&legacy).unwrap();
+        assert_eq!(pool.virtual_quote_reserves, 0);
     }
 
     #[test]
