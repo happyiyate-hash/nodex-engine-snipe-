@@ -892,6 +892,7 @@ async fn connect_market_stream(
                                             account: pool_address.clone(),
                                             venue: "pump_swap_pool",
                                             program_id: PUMP_SWAP_PROGRAM_ID.to_owned(),
+                                            expected_mint: None,
                                         };
                                         let request_id = next_request_id;
                                         next_request_id = next_request_id.saturating_add(1);
