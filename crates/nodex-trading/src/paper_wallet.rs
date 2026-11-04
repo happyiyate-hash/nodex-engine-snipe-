@@ -80,19 +80,31 @@ impl PaperWallet {
         &mut self,
         costs: &BuyCostBreakdown,
     ) -> Result<LedgerEntry, PaperWalletError> {
-        let total = costs.total_debit_lamports().ok_or(PaperWalletError::ArithmeticOverflow)?;
+        let total = costs
+            .total_debit_lamports()
+            .ok_or(PaperWalletError::ArithmeticOverflow)?;
         if total > self.available_balance_lamports {
             return Err(PaperWalletError::InsufficientBalance);
         }
-        let invested = self.invested_balance_lamports.checked_add(costs.token_input_lamports)
+        let invested = self
+            .invested_balance_lamports
+            .checked_add(costs.token_input_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
-        let rent = self.locked_rent_lamports.checked_add(costs.rent_reserve_lamports)
+        let rent = self
+            .locked_rent_lamports
+            .checked_add(costs.rent_reserve_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
-        let network = self.total_network_fees_lamports.checked_add(costs.network_fee_lamports)
+        let network = self
+            .total_network_fees_lamports
+            .checked_add(costs.network_fee_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
-        let priority = self.total_priority_fees_lamports.checked_add(costs.priority_fee_lamports)
+        let priority = self
+            .total_priority_fees_lamports
+            .checked_add(costs.priority_fee_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
-        let swap = self.total_swap_fees_lamports.checked_add(costs.swap_fee_lamports)
+        let swap = self
+            .total_swap_fees_lamports
+            .checked_add(costs.swap_fee_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
         let available = self.available_balance_lamports - total;
 
@@ -116,9 +128,13 @@ impl PaperWallet {
         if amount_lamports > self.locked_rent_lamports {
             return Err(PaperWalletError::InvalidRentRefund);
         }
-        let available = self.available_balance_lamports.checked_add(amount_lamports)
+        let available = self
+            .available_balance_lamports
+            .checked_add(amount_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
-        let refunded = self.total_rent_refunded_lamports.checked_add(amount_lamports)
+        let refunded = self
+            .total_rent_refunded_lamports
+            .checked_add(amount_lamports)
             .ok_or(PaperWalletError::ArithmeticOverflow)?;
         self.locked_rent_lamports -= amount_lamports;
         self.available_balance_lamports = available;
@@ -167,7 +183,10 @@ mod tests {
     #[test]
     fn rejects_buy_without_enough_available_balance() {
         let mut wallet = PaperWallet::new(1);
-        assert_eq!(wallet.reserve_buy(&costs()), Err(PaperWalletError::InsufficientBalance));
+        assert_eq!(
+            wallet.reserve_buy(&costs()),
+            Err(PaperWalletError::InsufficientBalance)
+        );
     }
 
     #[test]
