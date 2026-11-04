@@ -11,8 +11,10 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::config::EngineConfig;
 use nodex_solana::{
-    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream, start_market_monitor,
-    MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus, PUMPSWAP_PROGRAM_ID,
+    decode_pump_fun_create, decode_pump_swap_activity_logs, decode_pump_swap_pool_account,
+    derive_pump_swap_pool_address, run_logs_stream, start_market_monitor, MarketMonitor,
+    PumpSwapActivityEvent, PumpSwapPoolAccount, SolanaRpc, StreamStatus, PUMPSWAP_PROGRAM_ID,
+    WRAPPED_SOL_MINT,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
@@ -63,9 +65,12 @@ fn start_pumpswap_activity_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
     control: Arc<RwLock<EngineControl>>,
+    rpc: Option<SolanaRpc>,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     tokio::spawn(async move {
+        let mut resolved_pools = HashMap::<String, PumpSwapPoolAccount>::new();
+        let mut pool_retry_after = HashMap::<String, i64>::new();
         loop {
             let notification = match receiver.recv().await {
                 Ok(value) => value,
@@ -164,6 +169,44 @@ fn start_pumpswap_activity_processor(
                                 quote_amount,
                             } => ("withdraw", timestamp, pool, user, base_amount, quote_amount),
                         };
+                        let pool_details = if let Some(cached) = resolved_pools.get(&pool) {
+                            Some(cached.clone())
+                        } else if let Some(rpc_client) = rpc.as_ref() {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            let retry_allowed = pool_retry_after
+                                .get(&pool)
+                                .is_none_or(|retry_at| now >= *retry_at);
+                            if retry_allowed {
+                                pool_retry_after.insert(pool.clone(), now.saturating_add(10_000));
+                                match rpc_client.get_account_data(&pool).await {
+                                    Ok(Some((owner, raw, _))) if owner == PUMPSWAP_PROGRAM_ID => {
+                                        match decode_pump_swap_pool_account(&raw) {
+                                            Ok(decoded) => match derive_pump_swap_pool_address(&decoded) {
+                                                Ok(derived) if derived == pool => {
+                                                    resolved_pools.insert(pool.clone(), decoded.clone());
+                                                    pool_retry_after.remove(&pool);
+                                                    Some(decoded)
+                                                }
+                                                _ => None,
+                                            },
+                                            Err(_) => None,
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let pair_status = if pool_details.is_some() { "resolved" } else { "unresolved" };
+                        let quote_mint = pool_details.as_ref().map(|details| details.quote_mint.as_str());
+                        let quote_unit = if quote_mint == Some(WRAPPED_SOL_MINT) {
+                            "lamports"
+                        } else {
+                            "raw_quote_asset_units"
+                        };
                         let _ = events.send(json!({"type":"pumpswap_activity","data":{
                             "venue":"pump_swap",
                             "event_type":kind,
@@ -172,11 +215,14 @@ fn start_pumpswap_activity_processor(
                             "slot":slot,
                             "timestamp":timestamp,
                             "pool_address":pool,
+                            "pool_pair_status":pair_status,
+                            "base_mint":pool_details.as_ref().map(|details| details.base_mint.clone()),
+                            "quote_mint":pool_details.as_ref().map(|details| details.quote_mint.clone()),
+                            "pool_creator":pool_details.as_ref().map(|details| details.creator.clone()),
                             "user_address":user,
                             "base_amount_raw":base_amount.to_string(),
                             "quote_amount_raw":quote_amount.to_string(),
-                            "quote_amount_unit":"raw_quote_asset_units",
-                            "quote_asset":"unknown_until_pool_pair_is_resolved",
+                            "quote_amount_unit":quote_unit,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
                     }
@@ -628,7 +674,12 @@ async fn main() -> anyhow::Result<()> {
 
     // PumpSwap activity uses its own program-level subscription. The provider's
     // mentions filter accepts one program address per subscription.
-    start_pumpswap_activity_processor(events.subscribe(), events.clone(), control.clone());
+    start_pumpswap_activity_processor(
+        events.subscribe(),
+        events.clone(),
+        control.clone(),
+        rpc.clone(),
+    );
 
     if let Some(ws_url) = config.solana_ws_url.clone() {
         let sender = events.clone();
