@@ -292,3 +292,72 @@ async fn connect_and_subscribe(
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":false,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())
 }
+
+
+#[cfg(test)]
+mod transaction_decoder_tests {
+    use super::*;
+
+    fn borsh_string(value: &str, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn create_instruction(discriminator: [u8; 8], creator: [u8; 32]) -> String {
+        let mut data = discriminator.to_vec();
+        borsh_string("Example Token", &mut data);
+        borsh_string("EX", &mut data);
+        borsh_string("https://example.invalid/token.json", &mut data);
+        data.extend_from_slice(&creator);
+        bs58::encode(data).into_string()
+    }
+
+    #[test]
+    fn decodes_legacy_pump_create_instruction() {
+        let creator = [7u8; 32];
+        let tx = json!({
+            "slot": 123,
+            "transaction": {"message": {
+                "accountKeys": ["Mint111", "PumpProgram"],
+                "instructions": [{
+                    "programIdIndex": 1, "accounts": [0], 
+                    "data": create_instruction(PUMP_CREATE_DISCRIMINATOR, creator)
+                }]
+            }},
+            "meta": {"err": null, "loadedAddresses": {"writable": [], "readonly": []}}
+        });
+        let decoded = decode_pump_fun_create(&tx, "signature", "PumpProgram")
+            .expect("decode should succeed").expect("create should be found");
+        assert_eq!(decoded.mint_address, "Mint111");
+        assert_eq!(decoded.creator_address, bs58::encode(creator).into_string());
+        assert_eq!(decoded.slot, 123);
+    }
+
+    #[test]
+    fn decodes_pump_create_v2_instruction() {
+        let creator = [9u8; 32];
+        let tx = json!({
+            "slot": 456,
+            "transaction": {"message": {
+                "accountKeys": ["Mint222", "PumpProgram"],
+                "instructions": [{
+                    "programIdIndex": 1, "accounts": [0],
+                    "data": create_instruction(PUMP_CREATE_V2_DISCRIMINATOR, creator)
+                }]
+            }},
+            "meta": {"err": null}
+        });
+        let decoded = decode_pump_fun_create(&tx, "signature", "PumpProgram")
+            .expect("decode should succeed").expect("create_v2 should be found");
+        assert_eq!(decoded.mint_address, "Mint222");
+        assert_eq!(decoded.creator_address, bs58::encode(creator).into_string());
+    }
+
+    #[test]
+    fn ignores_failed_transactions() {
+        let tx = json!({"meta":{"err":{"InstructionError":[0,"Custom"]}}});
+        assert!(decode_pump_fun_create(&tx, "signature", "PumpProgram")
+            .expect("failed transaction is not a decoder error").is_none());
+    }
+}
+
