@@ -101,7 +101,85 @@ impl SolanaRpc {
         };
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .context("decoding mint account base64 data")?;
-        parse_mint_security_report(mint, &owner, &bytes, context_slot)
+        let mut report = parse_mint_security_report(mint, &owner, &bytes, context_slot)?;
+        match self.get_holder_distribution(mint, report.supply_raw.as_deref().unwrap_or("0")).await {
+            Ok(Some(distribution)) => {
+                report.holder_distribution = Some(distribution.clone());
+                if let Some(check) = report.checks.iter_mut().find(|check| check.name == "holder_distribution") {
+                    check.status = "partial".into();
+                    check.severity = "medium".into();
+                    check.detail = format!(
+                        "Sampled {} largest token accounts and resolved {} owners. The top 10 observed owners represent {:.2}% of supply. Pool vaults and linked wallets have not been classified or excluded.",
+                        distribution.sampled_token_accounts,
+                        distribution.resolved_accounts,
+                        distribution.top_10_observed_owner_share_percent
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if let Some(check) = report.checks.iter_mut().find(|check| check.name == "holder_distribution") {
+                    check.detail = format!("Holder distribution is UNVERIFIED because RPC analysis failed: {error}");
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    async fn get_holder_distribution(&self, mint: &str, supply_raw: &str) -> Result<Option<HolderDistribution>> {
+        let largest: Value = self.call(
+            "getTokenLargestAccounts",
+            json!([mint, {"commitment":"confirmed"}]),
+        ).await?;
+        let entries = largest.pointer("/value").and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("getTokenLargestAccounts returned no value array"))?;
+        if entries.is_empty() {
+            return Ok(Some(HolderDistribution::default()));
+        }
+        let addresses: Vec<String> = entries.iter()
+            .filter_map(|entry| entry.get("address").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let account_data: Value = self.call(
+            "getMultipleAccounts",
+            json!([addresses, {"encoding":"base64","commitment":"confirmed"}]),
+        ).await?;
+        let values = account_data.pointer("/value").and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("getMultipleAccounts returned no value array"))?;
+        let expected_mint = bs58::decode(mint).into_vec()
+            .context("decoding mint address for holder account validation")?;
+        let supply = supply_raw.parse::<u128>()
+            .context("parsing raw mint supply for holder distribution")?;
+        let mut owners: HashMap<String, u128> = HashMap::new();
+        let mut top_account_total = 0u128;
+        let mut resolved_accounts = 0usize;
+        for value in values {
+            let Some(value) = value.as_object() else { continue };
+            let Some(encoded) = value.get("data").and_then(|data| data.get(0)).and_then(Value::as_str) else { continue };
+            let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                .context("decoding token account data")?;
+            if data.len() < 72 || data.get(0..32) != Some(expected_mint.as_slice()) {
+                continue;
+            }
+            let owner = bs58::encode(&data[32..64]).into_string();
+            let amount = u64::from_le_bytes(data[64..72].try_into().expect("eight-byte token amount")) as u128;
+            top_account_total = top_account_total.saturating_add(amount);
+            *owners.entry(owner).or_default() += amount;
+            resolved_accounts += 1;
+        }
+        let mut owner_amounts: Vec<u128> = owners.into_values().collect();
+        owner_amounts.sort_unstable_by(|a, b| b.cmp(a));
+        let top_10_owner_total = owner_amounts.iter().take(10).copied().sum::<u128>();
+        let percent = |amount: u128| -> f64 {
+            if supply == 0 { 0.0 } else { (amount as f64 / supply as f64) * 100.0 }
+        };
+        Ok(Some(HolderDistribution {
+            sampled_token_accounts: entries.len(),
+            resolved_accounts,
+            top_20_account_share_percent: percent(top_account_total),
+            top_10_observed_owner_share_percent: percent(top_10_owner_total),
+            sample_is_partial: true,
+            caveat: "Only the largest RPC-returned token accounts are sampled. Pool vaults, burn addresses, exchange wallets and linked-wallet clusters are not yet classified or excluded.".into(),
+        }))
     }
 
     /// Fetches a confirmed transaction in raw JSON form, including version-0 transactions.
@@ -129,6 +207,16 @@ impl SolanaRpc {
 pub const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HolderDistribution {
+    pub sampled_token_accounts: usize,
+    pub resolved_accounts: usize,
+    pub top_20_account_share_percent: f64,
+    pub top_10_observed_owner_share_percent: f64,
+    pub sample_is_partial: bool,
+    pub caveat: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityCheck {
     pub name: String,
@@ -148,6 +236,7 @@ pub struct TokenSecurityReport {
     pub mint_authority: Option<String>,
     pub freeze_authority: Option<String>,
     pub extensions: Vec<String>,
+    pub holder_distribution: Option<HolderDistribution>,
     pub checks: Vec<SecurityCheck>,
     pub decision: String,
     pub decision_reason: String,
@@ -165,6 +254,7 @@ impl TokenSecurityReport {
             mint_authority: None,
             freeze_authority: None,
             extensions: vec![],
+            holder_distribution: None,
             checks: vec![SecurityCheck {
                 name: "mint_account".into(),
                 status: "unverified".into(),
@@ -388,6 +478,7 @@ pub fn parse_mint_security_report(
         mint_authority,
         freeze_authority,
         extensions,
+        holder_distribution: None,
         checks,
         decision: decision.into(),
         decision_reason,
