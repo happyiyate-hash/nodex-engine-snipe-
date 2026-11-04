@@ -181,13 +181,16 @@ fn start_pumpswap_activity_processor(
                                 match rpc_client.get_account_data(&pool).await {
                                     Ok(Some((owner, raw, _))) if owner == PUMPSWAP_PROGRAM_ID => {
                                         match decode_pump_swap_pool_account(&raw) {
-                                            Ok(decoded) => match derive_pump_swap_pool_address(&decoded) {
-                                                Ok(derived) if derived == pool => {
-                                                    resolved_pools.insert(pool.clone(), decoded.clone());
-                                                    pool_retry_after.remove(&pool);
-                                                    Some(decoded)
+                                            Ok(decoded) => {
+                                                match derive_pump_swap_pool_address(&decoded) {
+                                                    Ok(derived) if derived == pool => {
+                                                        resolved_pools
+                                                            .insert(pool.clone(), decoded.clone());
+                                                        pool_retry_after.remove(&pool);
+                                                        Some(decoded)
+                                                    }
+                                                    _ => None,
                                                 }
-                                                _ => None,
                                             },
                                             Err(_) => None,
                                         }
@@ -200,8 +203,14 @@ fn start_pumpswap_activity_processor(
                         } else {
                             None
                         };
-                        let pair_status = if pool_details.is_some() { "resolved" } else { "unresolved" };
-                        let quote_mint = pool_details.as_ref().map(|details| details.quote_mint.as_str());
+                        let pair_status = if pool_details.is_some() {
+                            "resolved"
+                        } else {
+                            "unresolved"
+                        };
+                        let quote_mint = pool_details
+                            .as_ref()
+                            .map(|details| details.quote_mint.as_str());
                         let quote_unit = if quote_mint == Some(WRAPPED_SOL_MINT) {
                             "lamports"
                         } else {

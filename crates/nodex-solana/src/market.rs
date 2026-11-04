@@ -258,14 +258,19 @@ pub struct PumpSwapPoolAccount {
 /// Re-derive a pool PDA from the identity stored inside its account.
 /// This prevents treating arbitrary accounts with a Pool-shaped layout as real pools.
 pub fn derive_pump_swap_pool_address(pool: &PumpSwapPoolAccount) -> Result<String> {
-    let program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID)
-        .context("invalid PumpSwap program id")?;
+    let program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID).context("invalid PumpSwap program id")?;
     let creator = Pubkey::from_str(&pool.creator).context("invalid pool creator pubkey")?;
     let base_mint = Pubkey::from_str(&pool.base_mint).context("invalid pool base mint")?;
     let quote_mint = Pubkey::from_str(&pool.quote_mint).context("invalid pool quote mint")?;
     let index = pool.index.to_le_bytes();
     let (address, _) = Pubkey::try_find_program_address(
-        &[b"pool", &index, creator.as_ref(), base_mint.as_ref(), quote_mint.as_ref()],
+        &[
+            b"pool",
+            &index,
+            creator.as_ref(),
+            base_mint.as_ref(),
+            quote_mint.as_ref(),
+        ],
         &program,
     )
     .ok_or_else(|| anyhow!("could not derive PumpSwap pool PDA from decoded pair"))?;
@@ -1264,7 +1269,13 @@ mod market_monitor_tests {
         let quote = Pubkey::from_str(&pool.quote_mint).unwrap();
         let index = pool.index.to_le_bytes();
         let expected = Pubkey::try_find_program_address(
-            &[b"pool", &index, creator.as_ref(), base.as_ref(), quote.as_ref()],
+            &[
+                b"pool",
+                &index,
+                creator.as_ref(),
+                base.as_ref(),
+                quote.as_ref(),
+            ],
             &program,
         )
         .unwrap()

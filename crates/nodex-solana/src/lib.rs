@@ -1,9 +1,9 @@
 pub mod market;
 pub use market::{
     decode_pump_swap_activity_event, decode_pump_swap_activity_log_line,
-    decode_pump_swap_pool_account, derive_pump_fun_bonding_curve,
-    derive_pump_swap_pool_address, start_market_monitor, MarketMonitor,
-    PumpSwapActivityEvent, PumpSwapPoolAccount, WRAPPED_SOL_MINT,
+    decode_pump_swap_pool_account, derive_pump_fun_bonding_curve, derive_pump_swap_pool_address,
+    start_market_monitor, MarketMonitor, PumpSwapActivityEvent, PumpSwapPoolAccount,
+    WRAPPED_SOL_MINT,
 };
 
 pub const PUMPSWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -142,11 +142,8 @@ impl SolanaRpc {
             .pointer("/data/0")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("getAccountInfo response omitted base64 account data"))?;
-        let bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            encoded,
-        )
-        .context("decoding account data returned by getAccountInfo")?;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .context("decoding account data returned by getAccountInfo")?;
         Ok(Some((owner, bytes, slot)))
     }
 
