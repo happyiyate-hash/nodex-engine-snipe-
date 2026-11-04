@@ -1,8 +1,7 @@
 pub mod market;
 pub use market::{
     decode_pump_swap_activity_event, decode_pump_swap_activity_log_line,
-    derive_pump_fun_bonding_curve, start_market_monitor, MarketMonitor,
-    PumpSwapActivityEvent,
+    derive_pump_fun_bonding_curve, start_market_monitor, MarketMonitor, PumpSwapActivityEvent,
 };
 
 pub const PUMPSWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -81,7 +80,6 @@ pub fn decode_pump_swap_activity_logs(
 
     Ok(decoded)
 }
-
 
 #[derive(Debug, Clone)]
 pub struct SolanaRpc {
@@ -1035,7 +1033,10 @@ async fn connect_and_subscribe(
                 if value.get("method").and_then(Value::as_str) == Some("logsNotification") {
                     let mut tagged = value;
                     if let Some(object) = tagged.as_object_mut() {
-                        object.insert("nodex_program_id".into(), Value::String(program_id.to_owned()));
+                        object.insert(
+                            "nodex_program_id".into(),
+                            Value::String(program_id.to_owned()),
+                        );
                     }
                     let _ = sender.send(tagged);
                 }

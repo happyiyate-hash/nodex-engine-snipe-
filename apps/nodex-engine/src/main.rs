@@ -84,7 +84,9 @@ fn start_pumpswap_activity_processor(
 
             if notification.get("method").and_then(serde_json::Value::as_str)
                 != Some("logsNotification")
-                || notification.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                || notification
+                    .get("nodex_program_id")
+                    .and_then(serde_json::Value::as_str)
                     != Some(PUMPSWAP_PROGRAM_ID)
                 || control.read().await.paused
             {
@@ -97,7 +99,8 @@ fn start_pumpswap_activity_processor(
             if !value.get("err").is_some_and(serde_json::Value::is_null) {
                 continue;
             }
-            let Some(signature) = value.get("signature")
+            let Some(signature) = value
+                .get("signature")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
             else {
@@ -117,11 +120,13 @@ fn start_pumpswap_activity_processor(
             let Some(logs) = value.get("logs").and_then(serde_json::Value::as_array) else {
                 continue;
             };
-            let logs: Vec<String> = logs.iter()
+            let logs: Vec<String> = logs
+                .iter()
                 .filter_map(serde_json::Value::as_str)
                 .map(str::to_owned)
                 .collect();
-            let slot = notification.pointer("/params/result/context/slot")
+            let slot = notification
+                .pointer("/params/result/context/slot")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or_default();
 
@@ -129,13 +134,37 @@ fn start_pumpswap_activity_processor(
                 Ok(decoded) => {
                     for (event_index, event) in decoded.into_iter().enumerate() {
                         let (kind, timestamp, pool, user, base_amount, quote_amount) = match event {
-                            PumpSwapActivityEvent::Buy { timestamp, pool, user, base_amount, quote_amount } =>
+                            PumpSwapActivityEvent::Buy {
+                                timestamp,
+                                pool,
+                                user,
+                                base_amount,
+                                quote_amount,
+                            } =>
                                 ("buy", timestamp, pool, user, base_amount, quote_amount),
-                            PumpSwapActivityEvent::Sell { timestamp, pool, user, base_amount, quote_amount } =>
+                            PumpSwapActivityEvent::Sell {
+                                timestamp,
+                                pool,
+                                user,
+                                base_amount,
+                                quote_amount,
+                            } =>
                                 ("sell", timestamp, pool, user, base_amount, quote_amount),
-                            PumpSwapActivityEvent::Deposit { timestamp, pool, user, base_amount, quote_amount } =>
+                            PumpSwapActivityEvent::Deposit {
+                                timestamp,
+                                pool,
+                                user,
+                                base_amount,
+                                quote_amount,
+                            } =>
                                 ("deposit", timestamp, pool, user, base_amount, quote_amount),
-                            PumpSwapActivityEvent::Withdraw { timestamp, pool, user, base_amount, quote_amount } =>
+                            PumpSwapActivityEvent::Withdraw {
+                                timestamp,
+                                pool,
+                                user,
+                                base_amount,
+                                quote_amount,
+                            } =>
                                 ("withdraw", timestamp, pool, user, base_amount, quote_amount),
                         };
                         let _ = events.send(json!({"type":"pumpswap_activity","data":{
@@ -193,7 +222,9 @@ fn start_launch_processor(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
-                || event.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                || event
+                    .get("nodex_program_id")
+                    .and_then(serde_json::Value::as_str)
                     != Some(pump_fun_program_id.as_str())
             {
                 continue;
