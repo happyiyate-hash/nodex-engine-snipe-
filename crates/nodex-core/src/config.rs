@@ -24,16 +24,24 @@ impl EngineConfig {
         let api_key = std::env::var("HELIUS_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let http_url = std::env::var("SOLANA_RPC_HTTP_URL").ok().or_else(|| {
-            api_key
-                .as_ref()
-                .map(|key| format!("https://mainnet.helius-rpc.com/?api-key={key}"))
-        });
-        let ws_url = std::env::var("SOLANA_RPC_WS_URL").ok().or_else(|| {
-            api_key
-                .as_ref()
-                .map(|key| format!("wss://mainnet.helius-rpc.com/?api-key={key}"))
-        });
+        // Treat blank optional URL variables as unset so the Helius API-key
+        // fallback is used when .env contains empty placeholders.
+        let http_url = std::env::var("SOLANA_RPC_HTTP_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                api_key
+                    .as_ref()
+                    .map(|key| format!("https://mainnet.helius-rpc.com/?api-key={key}"))
+            });
+        let ws_url = std::env::var("SOLANA_RPC_WS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                api_key
+                    .as_ref()
+                    .map(|key| format!("wss://mainnet.helius-rpc.com/?api-key={key}"))
+            });
         Self {
             bind_addr: std::env::var("NODEX_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into()),
             database_url: std::env::var("NODEX_DATABASE_URL")
