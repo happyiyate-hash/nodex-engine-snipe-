@@ -142,9 +142,19 @@ impl SolanaRpc {
 
     /// Samples a bounded number of recent creator transactions and counts prior Pump.fun launches.
     /// This is partial and does not establish wallet clusters or detect token sales.
-    pub async fn scan_creator_history(\n        &self,\n        creator: &str,\n        current_signature: &str,\n        pump_fun_program_id: &str,\n    ) -> Result<CreatorHistoryReport> {
+    pub async fn scan_creator_history(
+        &self,
+        creator: &str,
+        current_signature: &str,
+        pump_fun_program_id: &str,
+    ) -> Result<CreatorHistoryReport> {
         const SAMPLE_LIMIT: usize = 12;
-        let signatures: Vec<Value> = self\n            .call(\n                "getSignaturesForAddress",\n                json!([creator, {"limit": SAMPLE_LIMIT, "commitment":"confirmed"}]),\n            )\n            .await?;
+        let signatures: Vec<Value> = self
+            .call(
+                "getSignaturesForAddress",
+                json!([creator, {"limit": SAMPLE_LIMIT, "commitment":"confirmed"}]),
+            )
+            .await?;
         let mut report = CreatorHistoryReport {
             creator_address: creator.to_owned(), signatures_sampled: signatures.len(), transactions_resolved: 0,
             prior_pump_fun_launches: 0, sample_is_partial: true, early_selling: "UNVERIFIED".into(),
@@ -152,9 +162,15 @@ impl SolanaRpc {
             caveat: "Only a bounded sample of recent creator-address transactions is inspected. Linked wallets are not identified and creator token sales are not detected.".into(),
         };
         for entry in signatures {
-            let Some(signature) = entry.get("signature").and_then(Value::as_str) else {\n                continue;\n            };
-            if signature == current_signature {\n                continue;\n            }
-            let Some(transaction) = self.get_transaction(signature).await? else {\n                continue;\n            };
+            let Some(signature) = entry.get("signature").and_then(Value::as_str) else {
+                continue;
+            };
+            if signature == current_signature {
+                continue;
+            }
+            let Some(transaction) = self.get_transaction(signature).await? else {
+                continue;
+            };
             report.transactions_resolved += 1;
             if let Some(launch) = decode_pump_fun_create(&transaction, signature, pump_fun_program_id)? {
                 if launch.creator_address == creator { report.prior_pump_fun_launches += 1; }
