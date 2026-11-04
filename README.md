@@ -1,12 +1,14 @@
 # NodeX Engine
 
-NodeX is a modular Solana launch-analysis and paper-trading engine. The current implementation adds a persistent paper-wallet foundation and a raw Pump.fun program log stream using a Helius-compatible Solana RPC endpoint.
+NodeX is a modular Solana launch-analysis and paper-trading engine. The current implementation adds a persistent paper-wallet foundation, a Pump.fun program log stream, confirmed transaction retrieval, and instruction decoding for Pump.fun create and create_v2 launches.
 
 ## Safety status
 
 - Paper mode is the only supported mode.
 - No wallet signer, private key handling, transaction builder, or live transaction submission exists.
-- The upstream stream only forwards raw Solana logs notifications. It does not yet decode Pump.fun create/buy/sell instructions or derive token prices.
+- New Pump.fun create and create_v2 instructions are decoded from confirmed transaction JSON and newly discovered launches are persisted before being broadcast.
+- Transaction decoding supports legacy, version-0 and version-1 responses where the RPC provider supports them.
+- Yellowstone gRPC is not integrated yet; the current live feed uses standard Solana WebSocket logsSubscribe plus HTTP getTransaction.
 - Do not connect a funded wallet to this milestone.
 
 ## Workspace
@@ -15,7 +17,7 @@ NodeX is a modular Solana launch-analysis and paper-trading engine. The current 
 - `launch-detector`: launch classification boundary for decoded instruction facts.
 - `nodex-persistence`: SQLite storage for launches, paper wallet snapshots, ledger entries and raw Solana events.
 - `nodex-trading`: integer-lamport paper wallet accounting and strategy foundation.
-- `nodex-solana`: Helius-compatible HTTP RPC helpers, rent/fee quote methods and reconnecting WebSocket logs subscription.
+- `nodex-solana`: Helius-compatible HTTP RPC helpers, transaction retrieval/decoding, rent/fee quote methods and reconnecting WebSocket logs subscription.
 - `nodex-engine`: Axum HTTP/WebSocket API.
 
 ## Configure and run
@@ -40,6 +42,7 @@ The engine listens on `http://127.0.0.1:8080` by default.
 - `GET /health` — health status.
 - `GET /api/v1/engine/status` — paper mode and upstream stream status.
 - `GET /api/v1/paper-wallet` — persisted paper wallet snapshot.
+- `GET /api/v1/tokens/recent?limit=100` — most recently persisted decoded Pump.fun launches (limit is clamped to 1–500).
 - `GET /api/v1/fees/token-account-rent` — live rent-exempt minimum for a standard 165-byte SPL token account.
 - `WS /api/v1/ws` — upstream logs, provider status, diagnostics, and engine control messages.
 
@@ -59,7 +62,7 @@ The server acknowledges state changes with `engine_state`. A request for `set_mo
 
 ### Safety and current implementation boundary
 
-The engine remains paper-only. Token discovery currently forwards raw Pump.fun program log notifications; it does not yet decode verified create instructions or perform token risk analysis. No real signing, swap construction, transaction submission, position tracking, or automatic sell path is implemented. Do not configure a funded private key. Live mode is explicitly rejected by the backend, regardless of UI state. Provider connection failures are emitted as `diagnostic` events with a component, message, retry flag and timestamp. Reconnect uses bounded backoff.
+The engine remains paper-only. The launch processor watches Pump.fun logs, fetches each confirmed transaction, decodes the documented create/create_v2 instruction discriminator and Borsh creator field, then persists and emits `launch_detected` and `token_scan_started`. This is launch identification, not a security approval: token security checks, prices, liquidity, sellability, paper order execution, positions, real signing and transaction submission are not implemented. No funded private key should be configured. Live mode is explicitly rejected by the backend, regardless of UI state. The transaction processor uses a bounded concurrency limit of four and a bounded in-memory duplicate-signature set; provider/decoder/persistence failures are emitted as diagnostic events. Do not configure a funded private key. Live mode is explicitly rejected by the backend, regardless of UI state. Provider connection failures are emitted as `diagnostic` events with a component, message, retry flag and timestamp. Reconnect uses bounded backoff.
 
 ## Paper wallet defaults
 
@@ -74,4 +77,4 @@ The paper-wallet module has unit tests for default balances, cost aggregation, i
 
 ## Important next work
 
-The WebSocket currently subscribes to Pump.fun program logs and persists the raw JSON notifications. Next implementation work is transaction retrieval and verified instruction decoding, launch persistence from decoded events, bonding-curve/PumpSwap state tracking and executable-price calculations. Paper order execution and ledger posting must then be connected to strategy decisions. Live execution remains out of scope and disabled.
+The next backend phase is token security analysis: SPL Token and Token-2022 mint/account inspection, authority and extension checks, holder distribution, creator history, metadata, liquidity depth and executable sell-path evidence. Then add real market-state tracking and quote/simulation adapters, followed by a fully persisted paper order/position engine. Yellowstone gRPC can be added as a higher-throughput provider adapter after its endpoint and subscription schema are configured. Live execution remains out of scope and disabled until all safeguards and tests exist.
