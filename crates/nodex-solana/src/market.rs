@@ -84,20 +84,40 @@ async fn run_market_monitor(
         match connect_market_stream(&ws_url, &events, &mut commands, &mut desired).await {
             Ok(()) => {
                 reconnect_count = reconnect_count.saturating_add(1);
+                let message = "Market account WebSocket closed by the upstream provider; reconnecting.".to_owned();
+                warn!(reconnect_count, "Market account stream closed; reconnecting");
                 let _ = events.send(json!({
                     "type":"market_monitor_status",
-                    "data":{"connected":false,"reason":"websocket_closed","reconnect_count":reconnect_count}
+                    "data":{
+                        "connected":false,
+                        "reason":"websocket_closed",
+                        "reconnect_count":reconnect_count,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
                 }));
-            }
-            Err(error) => {
-                reconnect_count = reconnect_count.saturating_add(1);
-                warn!(%error, reconnect_count, "Market account stream disconnected; reconnecting");
                 let _ = events.send(json!({
                     "type":"diagnostic",
                     "data":{
                         "severity":"warning",
                         "component":"market_monitor",
-                        "message":error.to_string(),
+                        "message":message,
+                        "error_kind":"upstream_closed",
+                        "retrying":true,
+                        "reconnect_count":reconnect_count,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
+                }));
+            }
+            Err(error) => {
+                reconnect_count = reconnect_count.saturating_add(1);
+                let error_message = format!("{error:#}");
+                warn!(error = %error_message, reconnect_count, "Market account stream disconnected; reconnecting");
+                let _ = events.send(json!({
+                    "type":"diagnostic",
+                    "data":{
+                        "severity":"error",
+                        "component":"market_monitor",
+                        "message":error_message,
                         "retrying":true,
                         "reconnect_count":reconnect_count,
                         "received_at":chrono::Utc::now().to_rfc3339()
