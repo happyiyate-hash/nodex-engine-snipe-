@@ -58,6 +58,7 @@ fn start_launch_processor(
     rpc: SolanaRpc,
     database: sqlx::SqlitePool,
     pump_fun_program_id: String,
+    control: Arc<RwLock<EngineControl>>,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     let concurrency = Arc::new(Semaphore::new(4));
@@ -76,6 +77,9 @@ fn start_launch_processor(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification") {
+                continue;
+            }
+            if control.read().await.paused {
                 continue;
             }
             let Some(value) = event.pointer("/params/result/value") else { continue };
@@ -98,7 +102,11 @@ fn start_launch_processor(
             let events = events.clone();
             let database = database.clone();
             let program_id = pump_fun_program_id.clone();
+            let control = control.clone();
             tokio::spawn(async move {
+                if control.read().await.paused {
+                    return;
+                }
                 let _permit = permit;
                 let mut transaction = None;
                 let mut last_error = None;
@@ -310,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(2048);
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
+    let control = Arc::new(RwLock::new(EngineControl { paused: false, mode: "paper".into() }));
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
     if let Some(launch_rpc) = rpc.clone() {
@@ -319,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
             launch_rpc,
             db.clone(),
             config.pump_fun_program_id.clone(),
+            control.clone(),
         );
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
@@ -357,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
         stream_status,
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
-        control: Arc::new(RwLock::new(EngineControl { paused: false, mode: "paper".into() })),
+        control,
     };
     let app = Router::new()
         .route("/health", get(health))
