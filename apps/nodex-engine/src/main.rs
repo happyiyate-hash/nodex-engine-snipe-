@@ -20,13 +20,13 @@ use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use nodex_trading::volume::{RollingTradeVolume, TradeSide, WindowVolumeMetrics};
 use serde::Serialize;
 use serde_json::json;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
 };
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
-use std::sync::atomic::{AtomicU64, Ordering};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
