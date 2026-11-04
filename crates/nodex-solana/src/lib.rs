@@ -140,6 +140,33 @@ impl SolanaRpc {
         Ok(report)
     }
 
+    /// Samples a bounded number of recent creator transactions and counts prior Pump.fun launches.
+    /// This is partial and does not establish wallet clusters or detect token sales.
+    pub async fn scan_creator_history(&self, creator: &str, current_signature: &str, pump_fun_program_id: &str) -> Result<CreatorHistoryReport> {
+        const SAMPLE_LIMIT: usize = 12;
+        let signatures: Vec<Value> = self.call("getSignaturesForAddress", json!([creator, {"limit": SAMPLE_LIMIT, "commitment":"confirmed"}])).await?;
+        let mut report = CreatorHistoryReport {
+            creator_address: creator.to_owned(), signatures_sampled: signatures.len(), transactions_resolved: 0,
+            prior_pump_fun_launches: 0, sample_is_partial: true, early_selling: "UNVERIFIED".into(),
+            status: "partial".into(),
+            caveat: "Only a bounded sample of recent creator-address transactions is inspected. Linked wallets are not identified and creator token sales are not detected.".into(),
+        };
+        for entry in signatures {
+            let Some(signature) = entry.get("signature").and_then(Value::as_str) else { continue; };
+            if signature == current_signature { continue; }
+            let Some(transaction) = self.get_transaction(signature).await? else { continue; };
+            report.transactions_resolved += 1;
+            if let Some(launch) = decode_pump_fun_create(&transaction, signature, pump_fun_program_id)? {
+                if launch.creator_address == creator { report.prior_pump_fun_launches += 1; }
+            }
+        }
+        if report.transactions_resolved == 0 {
+            report.status = "unverified".into();
+            report.caveat = "No sampled creator transactions could be resolved. Creator history and early selling remain UNVERIFIED.".into();
+        }
+        Ok(report)
+    }
+
     async fn get_holder_distribution(
         &self,
         mint: &str,
@@ -262,6 +289,18 @@ pub struct HolderDistribution {
     pub top_20_account_share_percent: f64,
     pub top_10_observed_owner_share_percent: f64,
     pub sample_is_partial: bool,
+    pub caveat: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatorHistoryReport {
+    pub creator_address: String,
+    pub signatures_sampled: usize,
+    pub transactions_resolved: usize,
+    pub prior_pump_fun_launches: usize,
+    pub sample_is_partial: bool,
+    pub early_selling: String,
+    pub status: String,
     pub caveat: String,
 }
 
