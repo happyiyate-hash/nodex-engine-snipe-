@@ -68,6 +68,29 @@ impl SolanaRpc {
         self.call("getRecentPrioritizationFees", json!([])).await
     }
 
+
+    /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
+    /// This is the first scanner stage; it deliberately cannot approve a token by itself.
+    pub async fn scan_token_security(&self, mint: &str) -> Result<TokenSecurityReport> {
+        let account: Value = self.call(
+            "getAccountInfo",
+            json!([mint, {"encoding":"base64","commitment":"confirmed"}]),
+        ).await?;
+        let context_slot = account.pointer("/context/slot").and_then(Value::as_u64);
+        let value = account.get("value").filter(|v| !v.is_null());
+        let Some(value) = value else {
+            return Ok(TokenSecurityReport::unverified(mint, "Mint account was not found by RPC", context_slot));
+        };
+        let owner = value.get("owner").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let encoded = value.pointer("/data/0").and_then(Value::as_str);
+        let Some(encoded) = encoded else {
+            return Ok(TokenSecurityReport::unverified(mint, "Mint account data was not returned in base64 form", context_slot));
+        };
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .context("decoding mint account base64 data")?;
+        parse_mint_security_report(mint, &owner, &bytes, context_slot)
+    }
+
     /// Fetches a confirmed transaction in raw JSON form, including version-0 transactions.
     /// A null result is returned as None because RPC nodes may not have indexed it yet.
     pub async fn get_transaction(&self, signature: &str) -> Result<Option<Value>> {
@@ -89,6 +112,234 @@ impl SolanaRpc {
         Ok(response.result.filter(|value| !value.is_null()))
     }
 }
+
+
+pub const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityCheck {
+    pub name: String,
+    pub status: String,
+    pub severity: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenSecurityReport {
+    pub mint_address: String,
+    pub scanned_at: String,
+    pub context_slot: Option<u64>,
+    pub token_program: String,
+    pub supply_raw: Option<String>,
+    pub decimals: Option<u8>,
+    pub mint_authority: Option<String>,
+    pub freeze_authority: Option<String>,
+    pub extensions: Vec<String>,
+    pub checks: Vec<SecurityCheck>,
+    pub decision: String,
+    pub decision_reason: String,
+}
+
+impl TokenSecurityReport {
+    fn unverified(mint: &str, reason: &str, context_slot: Option<u64>) -> Self {
+        Self {
+            mint_address: mint.to_owned(),
+            scanned_at: chrono::Utc::now().to_rfc3339(),
+            context_slot,
+            token_program: "unknown".into(),
+            supply_raw: None,
+            decimals: None,
+            mint_authority: None,
+            freeze_authority: None,
+            extensions: vec![],
+            checks: vec![SecurityCheck {
+                name: "mint_account".into(),
+                status: "unverified".into(),
+                severity: "critical".into(),
+                detail: reason.into(),
+            }],
+            decision: "UNVERIFIED".into(),
+            decision_reason: "The mint account could not be verified; automatic buying is blocked.".into(),
+        }
+    }
+}
+
+fn read_coption_pubkey(data: &[u8], offset: usize) -> Result<Option<String>> {
+    let tag = data.get(offset..offset + 4)
+        .ok_or_else(|| anyhow!("mint account is shorter than the SPL mint layout"))?;
+    let tag = u32::from_le_bytes(tag.try_into().expect("four-byte slice"));
+    match tag {
+        0 => Ok(None),
+        1 => {
+            let key = data.get(offset + 4..offset + 36)
+                .ok_or_else(|| anyhow!("mint authority public key is truncated"))?;
+            Ok(Some(bs58::encode(key).into_string()))
+        }
+        other => Err(anyhow!("invalid COption public-key tag {other} in mint account")),
+    }
+}
+
+fn token_2022_extension_name(kind: u16) -> &'static str {
+    match kind {
+        1 => "transfer_fee_config",
+        2 => "transfer_fee_amount",
+        3 => "mint_close_authority",
+        4 => "confidential_transfer_mint",
+        5 => "confidential_transfer_account",
+        6 => "default_account_state",
+        7 => "immutable_owner",
+        8 => "memo_transfer",
+        9 => "non_transferable",
+        10 => "interest_bearing_config",
+        11 => "cpi_guard",
+        12 => "permanent_delegate",
+        13 => "non_transferable_account",
+        14 => "transfer_hook",
+        15 => "transfer_hook_account",
+        16 => "confidential_transfer_fee_config",
+        17 => "confidential_transfer_fee_amount",
+        18 => "metadata_pointer",
+        19 => "token_metadata",
+        20 => "group_pointer",
+        21 => "token_group",
+        22 => "group_member_pointer",
+        23 => "token_group_member",
+        24 => "confidential_mint_burn",
+        25 => "scaled_ui_amount",
+        26 => "pausable",
+        _ => "unknown_extension",
+    }
+}
+
+fn parse_token_2022_extensions(data: &[u8]) -> Result<Vec<String>> {
+    if data.len() <= 82 {
+        return Ok(vec![]);
+    }
+    // Token-2022 extended mint accounts contain an account-type byte after the
+    // 82-byte base Mint layout, followed by little-endian type/length TLV records.
+    if data.len() < 83 {
+        return Err(anyhow!("Token-2022 mint extension header is truncated"));
+    }
+    let mut offset = 83usize;
+    let mut extensions = Vec::new();
+    while offset < data.len() {
+        if data[offset..].iter().all(|byte| *byte == 0) {
+            break;
+        }
+        let header = data.get(offset..offset + 4)
+            .ok_or_else(|| anyhow!("Token-2022 extension TLV header is truncated"))?;
+        let kind = u16::from_le_bytes([header[0], header[1]]);
+        let length = u16::from_le_bytes([header[2], header[3]]) as usize;
+        offset += 4;
+        let end = offset.checked_add(length).ok_or_else(|| anyhow!("Token-2022 extension length overflow"))?;
+        if end > data.len() {
+            return Err(anyhow!("Token-2022 extension value is truncated"));
+        }
+        extensions.push(token_2022_extension_name(kind).to_owned());
+        offset = end;
+    }
+    Ok(extensions)
+}
+
+pub fn parse_mint_security_report(
+    mint: &str,
+    owner: &str,
+    data: &[u8],
+    context_slot: Option<u64>,
+) -> Result<TokenSecurityReport> {
+    if data.len() < 82 {
+        return Err(anyhow!("mint account data is shorter than the 82-byte SPL Mint layout"));
+    }
+    let token_program = match owner {
+        SPL_TOKEN_PROGRAM_ID => "spl_token",
+        TOKEN_2022_PROGRAM_ID => "token_2022",
+        _ => return Ok(TokenSecurityReport::unverified(mint, "Mint account is owned by an unrecognized token program", context_slot)),
+    };
+    let mint_authority = read_coption_pubkey(data, 0)?;
+    let supply = u64::from_le_bytes(data[36..44].try_into().expect("eight-byte supply"));
+    let decimals = data[44];
+    let freeze_authority = read_coption_pubkey(data, 46)?;
+    let extensions = if token_program == "token_2022" {
+        parse_token_2022_extensions(data)?
+    } else {
+        vec![]
+    };
+    let mut checks = Vec::new();
+    checks.push(SecurityCheck {
+        name: "mint_authority".into(),
+        status: if mint_authority.is_none() { "passed" } else { "failed" }.into(),
+        severity: if mint_authority.is_none() { "info" } else { "critical" }.into(),
+        detail: mint_authority.as_ref().map(|key| format!("Mint authority remains active: {key}")).unwrap_or_else(|| "Mint authority is disabled; additional supply cannot be minted through this authority.".into()),
+    });
+    checks.push(SecurityCheck {
+        name: "freeze_authority".into(),
+        status: if freeze_authority.is_none() { "passed" } else { "failed" }.into(),
+        severity: if freeze_authority.is_none() { "info" } else { "critical" }.into(),
+        detail: freeze_authority.as_ref().map(|key| format!("Freeze authority remains active: {key}")).unwrap_or_else(|| "Freeze authority is disabled.".into()),
+    });
+    for extension in &extensions {
+        let high_risk = matches!(extension.as_str(), "permanent_delegate" | "transfer_hook" | "default_account_state" | "non_transferable" | "pausable" | "mint_close_authority");
+        checks.push(SecurityCheck {
+            name: format!("token_2022_{extension}"),
+            status: if high_risk { "warning" } else { "info" }.into(),
+            severity: if high_risk { "high" } else { "info" }.into(),
+            detail: format!("Token-2022 extension detected: {extension}. Its configuration and authority require extension-specific analysis."),
+        });
+    }
+    checks.push(SecurityCheck {
+        name: "holder_distribution".into(),
+        status: "unverified".into(),
+        severity: "high".into(),
+        detail: "Top holder ownership and wallet clustering have not yet been analyzed.".into(),
+    });
+    checks.push(SecurityCheck {
+        name: "creator_history".into(),
+        status: "unverified".into(),
+        severity: "high".into(),
+        detail: "Creator wallet history and previous launch behaviour have not yet been analyzed.".into(),
+    });
+    checks.push(SecurityCheck {
+        name: "metadata".into(),
+        status: "unverified".into(),
+        severity: "medium".into(),
+        detail: "Metadata update authority, mutability and impersonation checks are not yet implemented.".into(),
+    });
+    checks.push(SecurityCheck {
+        name: "liquidity".into(),
+        status: "unverified".into(),
+        severity: "critical".into(),
+        detail: "Pool reserves, LP ownership and liquidity depth are not yet verified.".into(),
+    });
+    checks.push(SecurityCheck {
+        name: "sellability".into(),
+        status: "unverified".into(),
+        severity: "critical".into(),
+        detail: "A live sell quote and transaction simulation have not yet been performed.".into(),
+    });
+    let hard_blocker = mint_authority.is_some() || freeze_authority.is_some();
+    let decision = if hard_blocker { "REJECTED" } else { "UNVERIFIED" };
+    let decision_reason = if hard_blocker {
+        "A mint or freeze authority is still active. This token fails the current mandatory authority policy.".into()
+    } else {
+        "Authority checks passed, but holder, creator, metadata, liquidity and sellability checks remain incomplete. Automatic buying is blocked.".into()
+    };
+    Ok(TokenSecurityReport {
+        mint_address: mint.to_owned(),
+        scanned_at: chrono::Utc::now().to_rfc3339(),
+        context_slot,
+        token_program: token_program.into(),
+        supply_raw: Some(supply.to_string()),
+        decimals: Some(decimals),
+        mint_authority,
+        freeze_authority,
+        extensions,
+        checks,
+        decision: decision.into(),
+        decision_reason,
+    })
+}
+
 
 /// A Pump.fun create/create_v2 instruction decoded from a confirmed transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
