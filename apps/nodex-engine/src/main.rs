@@ -555,6 +555,25 @@ async fn recent_launches(
     Ok(Json(launches))
 }
 
+async fn recent_events(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(200);
+    let events = nodex_persistence::list_recent_events(&state.database, limit)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+    Ok(Json(events))
+}
+
 async fn scan_token(
     State(state): State<AppState>,
     Path(mint): Path<String>,
@@ -789,6 +808,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/engine/status", get(engine_status))
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/tokens/recent", get(recent_launches))
+        .route("/api/v1/events/recent", get(recent_events))
         .route("/api/v1/tokens/:mint/scan", get(scan_token))
         .route("/api/v1/fees/token-account-rent", get(token_account_rent))
         .route("/api/v1/ws", get(ws_handler))
