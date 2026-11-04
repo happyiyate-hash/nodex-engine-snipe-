@@ -17,6 +17,7 @@ use nodex_solana::{
     WRAPPED_SOL_MINT,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
+use nodex_trading::volume::{RollingTradeVolume, TradeSide, WindowVolumeMetrics};
 use serde::Serialize;
 use serde_json::json;
 use std::{
@@ -61,6 +62,17 @@ struct Health {
     service: &'static str,
 }
 
+fn volume_window_json(metrics: WindowVolumeMetrics) -> serde_json::Value {
+    json!({
+        "buy_volume_raw": metrics.buy_volume_raw.to_string(),
+        "sell_volume_raw": metrics.sell_volume_raw.to_string(),
+        "total_volume_raw": metrics.total_volume_raw.to_string(),
+        "buy_pressure_pct": metrics.buy_pressure_pct,
+        "buy_trade_count": metrics.buy_trade_count,
+        "sell_trade_count": metrics.sell_trade_count
+    })
+}
+
 fn start_pumpswap_activity_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -71,6 +83,7 @@ fn start_pumpswap_activity_processor(
     tokio::spawn(async move {
         let mut resolved_pools = HashMap::<String, PumpSwapPoolAccount>::new();
         let mut pool_retry_after = HashMap::<String, i64>::new();
+        let mut pool_volumes = HashMap::<String, RollingTradeVolume>::new();
         loop {
             let notification = match receiver.recv().await {
                 Ok(value) => value,
@@ -234,6 +247,38 @@ fn start_pumpswap_activity_processor(
                             "quote_amount_unit":quote_unit,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
+                        if pool_details.is_some() {
+                            let side = match kind {
+                                "buy" => Some(TradeSide::Buy),
+                                "sell" => Some(TradeSide::Sell),
+                                _ => None,
+                            };
+                            if let Some(side) = side {
+                                let now_ms = chrono::Utc::now().timestamp_millis();
+                                let event_time_ms = timestamp.saturating_mul(1_000);
+                                let volume = pool_volumes.entry(pool.clone()).or_default();
+                                if volume.record(event_time_ms, side, quote_amount, now_ms) {
+                                    let window_30s = volume.metrics(now_ms, 30);
+                                    let window_1m = volume.metrics(now_ms, 60);
+                                    let window_5m = volume.metrics(now_ms, 300);
+                                    let _ = events.send(json!({
+                                        "type":"pumpswap_volume_update",
+                                        "data":{
+                                            "venue":"pump_swap",
+                                            "pool_address":pool,
+                                            "base_mint":pool_details.as_ref().map(|details| details.base_mint.clone()),
+                                            "quote_mint":pool_details.as_ref().map(|details| details.quote_mint.clone()),
+                                            "quote_amount_unit":quote_unit,
+                                            "window_30s":volume_window_json(window_30s),
+                                            "window_1m":volume_window_json(window_1m),
+                                            "window_5m":volume_window_json(window_5m),
+                                            "calculation":"quote-volume-weighted-buy-pressure",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }
+                                    }));
+                                }
+                            }
+                        }
                     }
                 }
                 Err(error) => {
