@@ -966,6 +966,59 @@ mod market_monitor_tests {
     }
 
     #[test]
+    fn decodes_spl_mint_supply_and_decimals() {
+        let mut data = vec![0_u8; 82];
+        data[36..44].copy_from_slice(&1_000_000_000_u64.to_le_bytes());
+        data[44] = 6;
+        data[45] = 1;
+        assert_eq!(
+            decode_spl_mint_account(&data).unwrap(),
+            SplMintState { supply: 1_000_000_000, decimals: 6 }
+        );
+        data[45] = 0;
+        assert!(decode_spl_mint_account(&data).is_err());
+    }
+
+    #[test]
+    fn decodes_spl_token_account_amount_and_rejects_uninitialized() {
+        let mut data = vec![0_u8; 165];
+        data[64..72].copy_from_slice(&987_654_u64.to_le_bytes());
+        data[108] = 1;
+        assert_eq!(decode_spl_token_account(&data).unwrap().amount, 987_654);
+        data[108] = 0;
+        assert!(decode_spl_token_account(&data).is_err());
+    }
+
+    #[test]
+    fn pumpswap_price_uses_signed_virtual_quote_reserves() {
+        let state = PumpSwapLiveState {
+            virtual_quote_reserves: -500_000_000,
+            base_decimals: Some(6),
+            base_total_supply: Some(1_000_000_000),
+            base_reserves: Some(10_000_000),
+            quote_reserves: Some(1_500_000_000),
+            ..PumpSwapLiveState::default()
+        };
+        let (price, cap, effective) = pump_swap_price(&state).unwrap();
+        assert_eq!(effective, 1_000_000_000);
+        assert!((price - 0.1).abs() < 1e-12);
+        assert!((cap - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pumpswap_price_rejects_negative_effective_quote_reserves() {
+        let state = PumpSwapLiveState {
+            virtual_quote_reserves: -2_000_000_000,
+            base_decimals: Some(6),
+            base_total_supply: Some(1_000_000_000),
+            base_reserves: Some(10_000_000),
+            quote_reserves: Some(1_000_000_000),
+            ..PumpSwapLiveState::default()
+        };
+        assert!(pump_swap_price(&state).is_err());
+    }
+
+    #[test]
     fn decodes_documented_bonding_curve_layout_and_price() {
         let curve = decode_pump_bonding_curve_account(&encoded_curve(0)).unwrap();
         assert_eq!(curve.virtual_token_reserves, 1_000_000_000);
