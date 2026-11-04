@@ -255,6 +255,28 @@ pub struct PumpSwapPoolAccount {
     pub virtual_quote_reserves: i128,
 }
 
+/// Re-derive a pool PDA from the identity stored inside its account.
+/// This prevents treating arbitrary accounts with a Pool-shaped layout as real pools.
+pub fn derive_pump_swap_pool_address(pool: &PumpSwapPoolAccount) -> Result<String> {
+    let program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID).context("invalid PumpSwap program id")?;
+    let creator = Pubkey::from_str(&pool.creator).context("invalid pool creator pubkey")?;
+    let base_mint = Pubkey::from_str(&pool.base_mint).context("invalid pool base mint")?;
+    let quote_mint = Pubkey::from_str(&pool.quote_mint).context("invalid pool quote mint")?;
+    let index = pool.index.to_le_bytes();
+    let (address, _) = Pubkey::try_find_program_address(
+        &[
+            b"pool",
+            &index,
+            creator.as_ref(),
+            base_mint.as_ref(),
+            quote_mint.as_ref(),
+        ],
+        &program,
+    )
+    .ok_or_else(|| anyhow!("could not derive PumpSwap pool PDA from decoded pair"))?;
+    Ok(address.to_string())
+}
+
 /// Decode the current official PumpSwap Pool layout; absent appended fields default to zero.
 pub fn decode_pump_swap_pool_account(data: &[u8]) -> Result<PumpSwapPoolAccount> {
     const DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
@@ -1227,6 +1249,39 @@ mod market_monitor_tests {
         let mut invalid = encoded_pool();
         invalid[0] = 0;
         assert!(decode_pump_swap_pool_account(&invalid).is_err());
+    }
+
+    #[test]
+    fn derives_pool_address_from_the_decoded_pair_identity() {
+        let pool = PumpSwapPoolAccount {
+            index: 7,
+            creator: bs58::encode([1_u8; 32]).into_string(),
+            base_mint: bs58::encode([2_u8; 32]).into_string(),
+            quote_mint: bs58::encode([3_u8; 32]).into_string(),
+            pool_base_token_account: bs58::encode([4_u8; 32]).into_string(),
+            pool_quote_token_account: bs58::encode([5_u8; 32]).into_string(),
+            lp_supply: 10,
+            virtual_quote_reserves: 0,
+        };
+        let program = Pubkey::from_str(PUMP_SWAP_PROGRAM_ID).unwrap();
+        let creator = Pubkey::from_str(&pool.creator).unwrap();
+        let base = Pubkey::from_str(&pool.base_mint).unwrap();
+        let quote = Pubkey::from_str(&pool.quote_mint).unwrap();
+        let index = pool.index.to_le_bytes();
+        let expected = Pubkey::try_find_program_address(
+            &[
+                b"pool",
+                &index,
+                creator.as_ref(),
+                base.as_ref(),
+                quote.as_ref(),
+            ],
+            &program,
+        )
+        .unwrap()
+        .0
+        .to_string();
+        assert_eq!(derive_pump_swap_pool_address(&pool).unwrap(), expected);
     }
 
     #[test]

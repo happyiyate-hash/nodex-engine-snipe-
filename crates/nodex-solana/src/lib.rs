@@ -1,7 +1,9 @@
 pub mod market;
 pub use market::{
     decode_pump_swap_activity_event, decode_pump_swap_activity_log_line,
-    derive_pump_fun_bonding_curve, start_market_monitor, MarketMonitor, PumpSwapActivityEvent,
+    decode_pump_swap_pool_account, derive_pump_fun_bonding_curve, derive_pump_swap_pool_address,
+    start_market_monitor, MarketMonitor, PumpSwapActivityEvent, PumpSwapPoolAccount,
+    WRAPPED_SOL_MINT,
 };
 
 pub const PUMPSWAP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -114,6 +116,35 @@ impl SolanaRpc {
         response
             .result
             .ok_or_else(|| anyhow!("Solana RPC {method} returned no result"))
+    }
+
+    /// Fetch one confirmed account's owner and raw bytes for verified program-account decoding.
+    pub async fn get_account_data(
+        &self,
+        address: &str,
+    ) -> Result<Option<(String, Vec<u8>, Option<u64>)>> {
+        let account: Value = self
+            .call(
+                "getAccountInfo",
+                json!([address, {"encoding":"base64","commitment":"confirmed"}]),
+            )
+            .await?;
+        let slot = account.pointer("/context/slot").and_then(Value::as_u64);
+        let Some(value) = account.get("value").filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        let owner = value
+            .get("owner")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("getAccountInfo response omitted account owner"))?
+            .to_owned();
+        let encoded = value
+            .pointer("/data/0")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("getAccountInfo response omitted base64 account data"))?;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .context("decoding account data returned by getAccountInfo")?;
+        Ok(Some((owner, bytes, slot)))
     }
 
     /// Current rent-exempt minimum for a standard 165-byte SPL token account.
