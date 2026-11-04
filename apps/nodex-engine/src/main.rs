@@ -11,9 +11,8 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::config::EngineConfig;
 use nodex_solana::{
-    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream,
-    start_market_monitor, MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus,
-    PUMPSWAP_PROGRAM_ID,
+    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream, start_market_monitor,
+    MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
@@ -82,7 +81,9 @@ fn start_pumpswap_activity_processor(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
 
-            if notification.get("method").and_then(serde_json::Value::as_str)
+            if notification
+                .get("method")
+                .and_then(serde_json::Value::as_str)
                 != Some("logsNotification")
                 || notification
                     .get("nodex_program_id")
@@ -140,32 +141,28 @@ fn start_pumpswap_activity_processor(
                                 user,
                                 base_amount,
                                 quote_amount,
-                            } =>
-                                ("buy", timestamp, pool, user, base_amount, quote_amount),
+                            } => ("buy", timestamp, pool, user, base_amount, quote_amount),
                             PumpSwapActivityEvent::Sell {
                                 timestamp,
                                 pool,
                                 user,
                                 base_amount,
                                 quote_amount,
-                            } =>
-                                ("sell", timestamp, pool, user, base_amount, quote_amount),
+                            } => ("sell", timestamp, pool, user, base_amount, quote_amount),
                             PumpSwapActivityEvent::Deposit {
                                 timestamp,
                                 pool,
                                 user,
                                 base_amount,
                                 quote_amount,
-                            } =>
-                                ("deposit", timestamp, pool, user, base_amount, quote_amount),
+                            } => ("deposit", timestamp, pool, user, base_amount, quote_amount),
                             PumpSwapActivityEvent::Withdraw {
                                 timestamp,
                                 pool,
                                 user,
                                 base_amount,
                                 quote_amount,
-                            } =>
-                                ("withdraw", timestamp, pool, user, base_amount, quote_amount),
+                            } => ("withdraw", timestamp, pool, user, base_amount, quote_amount),
                         };
                         let _ = events.send(json!({"type":"pumpswap_activity","data":{
                             "venue":"pump_swap",
