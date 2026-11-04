@@ -1,20 +1,24 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State, Query,
+        Query, State,
     },
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
+use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::config::EngineConfig;
 use nodex_solana::{decode_pump_fun_create, run_logs_stream, SolanaRpc, StreamStatus};
-use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::Serialize;
 use serde_json::json;
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -52,7 +56,6 @@ struct Health {
     service: &'static str,
 }
 
-
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -83,18 +86,30 @@ fn start_launch_processor(
             if control.read().await.paused {
                 continue;
             }
-            let Some(value) = event.pointer("/params/result/value") else { continue };
-            let Some(signature) = value.get("signature").and_then(serde_json::Value::as_str).map(str::to_owned) else { continue };
+            let Some(value) = event.pointer("/params/result/value") else {
+                continue;
+            };
+            let Some(signature) = value
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
             {
                 let mut seen = seen_signatures.lock().await;
-                if !seen.insert(signature.clone()) { continue; }
+                if !seen.insert(signature.clone()) {
+                    continue;
+                }
                 if seen.len() > 20_000 {
                     seen.clear();
                     seen.insert(signature.clone());
                 }
             }
-            let slot_hint = event.pointer("/params/result/context/slot")
-                .and_then(serde_json::Value::as_u64).unwrap_or_default();
+            let slot_hint = event
+                .pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
             let permit = match concurrency.clone().acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => break,
@@ -113,22 +128,33 @@ fn start_launch_processor(
                 let mut last_error = None;
                 for attempt in 0..4 {
                     match rpc.get_transaction(&signature).await {
-                        Ok(Some(value)) => { transaction = Some(value); break; }
+                        Ok(Some(value)) => {
+                            transaction = Some(value);
+                            break;
+                        }
                         Ok(None) => {
                             if attempt < 3 {
-                                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt + 1))).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    300 * (attempt + 1),
+                                ))
+                                .await;
                             }
                         }
                         Err(error) => {
                             last_error = Some(error.to_string());
                             if attempt < 3 {
-                                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt + 1))).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    300 * (attempt + 1),
+                                ))
+                                .await;
                             }
                         }
                     }
                 }
                 let Some(transaction) = transaction else {
-                    let message = last_error.unwrap_or_else(|| "RPC returned null for this confirmed transaction after retries".to_string());
+                    let message = last_error.unwrap_or_else(|| {
+                        "RPC returned null for this confirmed transaction after retries".to_string()
+                    });
                     let _ = events.send(json!({"type":"diagnostic","data":{
                         "severity":"warning","component":"solana_get_transaction",
                         "message":message,"signature":signature,"slot_hint":slot_hint,
@@ -154,7 +180,11 @@ fn start_launch_processor(
                     mint_address: decoded.mint_address,
                     creator_address: Some(decoded.creator_address),
                     signature: signature.clone(),
-                    slot: if decoded.slot == 0 { slot_hint } else { decoded.slot },
+                    slot: if decoded.slot == 0 {
+                        slot_hint
+                    } else {
+                        decoded.slot
+                    },
                 });
                 let Some(launch) = launch else { return };
                 match nodex_persistence::save_launch(&database, &launch).await {
@@ -204,15 +234,22 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
     }))
 }
 
-
 async fn recent_launches(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
-    let limit = query.get("limit").and_then(|value| value.parse::<u32>().ok()).unwrap_or(100);
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(100);
     let launches = nodex_persistence::list_recent_launches(&state.database, limit)
         .await
-        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
     Ok(Json(launches))
 }
 
@@ -239,10 +276,7 @@ async fn token_account_rent(
     })))
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| client_socket(socket, state))
 }
 
@@ -340,7 +374,10 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(2048);
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
-    let control = Arc::new(RwLock::new(EngineControl { paused: false, mode: "paper".into() }));
+    let control = Arc::new(RwLock::new(EngineControl {
+        paused: false,
+        mode: "paper".into(),
+    }));
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
     if let Some(launch_rpc) = rpc.clone() {
