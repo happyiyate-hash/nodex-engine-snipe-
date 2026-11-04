@@ -1059,9 +1059,7 @@ async fn backfill_logs_gap(
     let mut before: Option<String> = None;
     let mut reached_checkpoint = false;
     let mut newest: Option<(u64, String)> = None;
-    let checkpoint_available = rpc
-        .signature_status_available(checkpoint_signature)
-        .await?;
+    let checkpoint_available = rpc.signature_status_available(checkpoint_signature).await?;
 
     for _ in 0..MAX_BACKFILL_PAGES {
         let page = rpc
