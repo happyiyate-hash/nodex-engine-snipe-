@@ -168,10 +168,7 @@ pub async fn list_recent_launches(pool: &SqlitePool, limit: u32) -> Result<Vec<s
 }
 
 /// Returns the newest persisted backend events, newest first.
-pub async fn list_recent_events(
-    pool: &SqlitePool,
-    limit: u32,
-) -> Result<Vec<serde_json::Value>> {
+pub async fn list_recent_events(pool: &SqlitePool, limit: u32) -> Result<Vec<serde_json::Value>> {
     let safe_limit = limit.clamp(1, 500) as i64;
     let rows = sqlx::query(
         "SELECT id, signature, slot, event_json, received_at FROM solana_raw_events ORDER BY id DESC LIMIT ?",
