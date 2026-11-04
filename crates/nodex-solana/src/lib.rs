@@ -106,8 +106,17 @@ pub fn decode_pump_fun_create(
     signature: &str,
     configured_program_id: &str,
 ) -> Result<Option<DecodedPumpFunCreate>> {
-    if transaction.pointer("/meta/err").is_some_and(|error| !error.is_null()) {
+    let meta = transaction.get("meta").filter(|value| !value.is_null())
+        .ok_or_else(|| anyhow!("getTransaction response is missing transaction metadata"))?;
+    let execution_error = meta.get("err")
+        .ok_or_else(|| anyhow!("getTransaction response is missing execution status"))?;
+    if !execution_error.is_null() {
         return Ok(None);
+    }
+    let signatures = transaction.pointer("/transaction/signatures").and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("getTransaction response has no transaction signatures"))?;
+    if !signatures.iter().any(|value| value.as_str() == Some(signature)) {
+        return Err(anyhow!("requested signature does not match the returned transaction"));
     }
     let message = transaction.pointer("/transaction/message")
         .ok_or_else(|| anyhow!("getTransaction response has no transaction.message"))?;
@@ -316,7 +325,7 @@ mod transaction_decoder_tests {
         let creator = [7u8; 32];
         let tx = json!({
             "slot": 123,
-            "transaction": {"message": {
+            "transaction": {"signatures": ["signature"], "message": {
                 "accountKeys": ["Mint111", "PumpProgram"],
                 "instructions": [{
                     "programIdIndex": 1, "accounts": [0], 
