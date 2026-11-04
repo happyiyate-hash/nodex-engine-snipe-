@@ -27,7 +27,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
-use tower_http::trace::TraceLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
@@ -878,6 +878,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/fees/token-account-rent", get(token_account_rent))
         .route("/api/v1/ws", get(ws_handler))
         .with_state(state)
+        // The personal dashboard is hosted on a different origin. The REST API
+        // currently exposes read-only GET routes, so permit browser reads without
+        // enabling credentialed cross-origin access.
+        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
     let address: SocketAddr = config.bind_addr.parse()?;
