@@ -27,7 +27,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
-use tower_http::trace::TraceLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
