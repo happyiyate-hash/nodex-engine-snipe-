@@ -123,6 +123,7 @@ fn start_launch_processor(
             let database = database.clone();
             let program_id = pump_fun_program_id.clone();
             let control = control.clone();
+            let market_monitor = market_monitor.clone();
             tokio::spawn(async move {
                 if control.read().await.paused {
                     return;
