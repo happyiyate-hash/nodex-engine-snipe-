@@ -1125,6 +1125,8 @@ pub struct StreamStatus {
     pub subscription_id: Option<u64>,
     pub reconnect_count: u64,
     pub last_error: Option<String>,
+    pub program_id: Option<String>,
+    pub last_message_at: Option<String>,
 }
 
 const MAX_BACKFILL_PAGES: usize = 10;
@@ -1342,6 +1344,7 @@ pub async fn run_logs_stream(
             current.connected = false;
             current.subscription_id = None;
             current.reconnect_count = reconnect_count;
+            current.program_id = Some(program_id.clone());
         }
         let delay = 2_u64
             .saturating_mul(1_u64 << reconnect_count.min(4))
@@ -1388,6 +1391,8 @@ async fn connect_and_subscribe(
         current.connected = true;
         current.subscription_id = Some(subscription_id);
         current.last_error = None;
+        current.program_id = Some(program_id.to_owned());
+        current.last_message_at = Some(chrono::Utc::now().to_rfc3339());
     }
     info!(
         subscription_id,
@@ -1466,6 +1471,10 @@ async fn connect_and_subscribe(
                             }
                         }
                     }
+                    {
+                        let mut current = status.write().await;
+                        current.last_message_at = Some(chrono::Utc::now().to_rfc3339());
+                    }
                     let _ = sender.send(tagged);
                 }
             }
@@ -1474,7 +1483,12 @@ async fn connect_and_subscribe(
             _ => {}
         }
     }
-    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":false,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
+    {
+        let mut current = status.write().await;
+        current.connected = false;
+        current.subscription_id = None;
+    }
+    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","connected":false,"program_id":program_id,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())
 }
 
