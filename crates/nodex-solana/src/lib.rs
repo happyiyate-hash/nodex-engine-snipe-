@@ -1326,6 +1326,19 @@ pub async fn run_logs_stream(
             let error_message = format!("{error:#}");
             warn!(error = %error_message, reconnect_count, "Solana WebSocket stream ended; reconnecting");
             status.write().await.last_error = Some(error_message.clone());
+            let stream_name = if program_id == PUMPSWAP_PROGRAM_ID { "pumpswap" } else { "pump_fun" };
+            let _ = sender.send(json!({
+                "type":"provider_status",
+                "data":{
+                    "provider":"solana_websocket",
+                    "stream_name":stream_name,
+                    "connected":false,
+                    "reconnect_count":reconnect_count,
+                    "program_id":program_id,
+                    "reason":error_message,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }
+            }));
             let _ = sender.send(json!({
                 "type":"diagnostic",
                 "data":{
@@ -1399,7 +1412,8 @@ async fn connect_and_subscribe(
         program_id, "Subscribed to Solana program logs"
     );
     let stream_name = if program_id == PUMPSWAP_PROGRAM_ID { "pumpswap" } else { "pump_fun" };
-    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":true,"subscription_id":subscription_id,"program_id":program_id,"received_at":chrono::Utc::now().to_rfc3339()}}));
+    let reconnect_count = status.read().await.reconnect_count;
+    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":true,"subscription_id":subscription_id,"reconnect_count":reconnect_count,"program_id":program_id,"received_at":chrono::Utc::now().to_rfc3339()}}));
 
     if let Some((_, checkpoint)) = last_seen_signature.clone() {
         if let Some(rpc) = rpc {
@@ -1490,7 +1504,8 @@ async fn connect_and_subscribe(
         current.subscription_id = None;
     }
     let stream_name = if program_id == PUMPSWAP_PROGRAM_ID { "pumpswap" } else { "pump_fun" };
-    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":false,"program_id":program_id,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
+    let reconnect_count = status.read().await.reconnect_count;
+    let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":false,"reconnect_count":reconnect_count,"program_id":program_id,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())
 }
 
