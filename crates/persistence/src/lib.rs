@@ -192,7 +192,6 @@ pub async fn list_recent_events(pool: &SqlitePool, limit: u32) -> Result<Vec<ser
         .collect()
 }
 
-
 /// Clears only historical launch and raw upstream notification rows.
 /// It does not alter wallets, ledger entries, schema, or live monitor state.
 pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u64)> {
