@@ -981,7 +981,7 @@ async fn main() -> anyhow::Result<()> {
                             == Some("logsNotification")
                         {
                             pending.push(event);
-                            if pending.len() >= 100 {
+                            if pending.len() == 100 {
                                 match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
                                     Ok(()) => pending.clear(),
                                     Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
