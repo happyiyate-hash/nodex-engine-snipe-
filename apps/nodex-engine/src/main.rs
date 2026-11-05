@@ -475,7 +475,8 @@ fn start_launch_processor(
                         tokio::spawn(async move {
                             match scan_rpc.scan_token_security(&scan_mint).await {
                                 Ok(report) => {
-                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report}));
+                                    let _ = scan_events
+                                        .send(json!({"type":"token_scan_update","data":report}));
                                 }
                                 Err(error) => {
                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
@@ -499,22 +500,30 @@ fn start_launch_processor(
                             let history_signature = signature.clone();
                             let history_program = program_id.clone();
                             tokio::spawn(async move {
-                                let _ = history_events.send(json!({"type":"creator_history_started","data":{
-                                    "mint_address":history_mint,
-                                    "creator_address":creator,
-                                    "status":"scanning",
-                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                }}));
+                                let _ = history_events.send(
+                                    json!({"type":"creator_history_started","data":{
+                                        "mint_address":history_mint,
+                                        "creator_address":creator,
+                                        "status":"scanning",
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}),
+                                );
                                 match history_rpc
-                                    .scan_creator_history(&creator, &history_signature, &history_program)
+                                    .scan_creator_history(
+                                        &creator,
+                                        &history_signature,
+                                        &history_program,
+                                    )
                                     .await
                                 {
                                     Ok(history) => {
-                                        let _ = history_events.send(json!({"type":"creator_history_update","data":{
-                                            "mint_address":history_mint,
-                                            "history":history,
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }}));
+                                        let _ = history_events.send(
+                                            json!({"type":"creator_history_update","data":{
+                                                "mint_address":history_mint,
+                                                "history":history,
+                                                "received_at":chrono::Utc::now().to_rfc3339()
+                                            }}),
+                                        );
                                     }
                                     Err(error) => {
                                         let _ = history_events.send(json!({"type":"diagnostic","data":{
