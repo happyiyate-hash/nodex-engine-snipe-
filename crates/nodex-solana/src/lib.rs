@@ -942,6 +942,11 @@ pub fn parse_mint_security_report(
         checks,
         decision: decision.into(),
         decision_reason,
+        rugcheck: RugCheckSummary {
+            provider: "rugcheck".into(),
+            status: "not_run".into(),
+            ..Default::default()
+        },
     })
 }
 
