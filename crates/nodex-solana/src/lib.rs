@@ -172,6 +172,18 @@ impl SolanaRpc {
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
     /// This is the first scanner stage; it deliberately cannot approve a token by itself.
     pub async fn scan_token_security(&self, mint: &str) -> Result<TokenSecurityReport> {
+        self.scan_token_security_with_progress(mint, |_, _, _| {}).await
+    }
+
+    /// Runs the security scan while reporting genuine stage transitions to the caller.
+    pub async fn scan_token_security_with_progress<F>(
+        &self,
+        mint: &str,
+        mut on_progress: F,
+    ) -> Result<TokenSecurityReport>
+    where
+        F: FnMut(&str, u8, &str),
+    {
         let account: Value = self
             .call(
                 "getAccountInfo",
@@ -237,7 +249,7 @@ impl SolanaRpc {
                 }
             }
         }
-        report.rugcheck = self.get_rugcheck_summary(mint).await;
+        on_progress("holder_distribution", 68, "Checking holder distribution");\n        report.rugcheck = self.get_rugcheck_summary(mint).await;\n        on_progress("rugcheck", 90, "Reviewing external risk signals");
         if report.rugcheck.status == "available" {
             let detail = format!(
                 "RugCheck summary received: normalized score {:?}, liquidity locked {:?}%, {} reported risks. This provider score is advisory and does not independently approve a token.",
