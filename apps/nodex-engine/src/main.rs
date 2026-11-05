@@ -590,10 +590,15 @@ async fn clear_token_and_event_history(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let configured_key = state.admin_api_key.as_deref().filter(|key| !key.is_empty()).ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Maintenance endpoint is disabled: set NODEX_ADMIN_API_KEY on the backend first.".to_string(),
-    ))?;
+    let configured_key = state
+        .admin_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .ok_or((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance endpoint is disabled: set NODEX_ADMIN_API_KEY on the backend first."
+                .to_string(),
+        ))?;
     let supplied_key = headers
         .get("x-nodex-admin-key")
         .and_then(|value| value.to_str().ok())
@@ -608,10 +613,12 @@ async fn clear_token_and_event_history(
     let (deleted_token_records, deleted_raw_event_records) =
         nodex_persistence::clear_token_and_event_history(&state.database)
             .await
-            .map_err(|error| (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("History cleanup failed: {error}"),
-            ))?;
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("History cleanup failed: {error}"),
+                )
+            })?;
 
     tracing::warn!(
         deleted_token_records,
@@ -962,7 +969,9 @@ async fn main() -> anyhow::Result<()> {
         rpc,
         database: db.clone(),
         control,
-        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok().filter(|value| !value.trim().is_empty()),
+        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -970,7 +979,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/events/recent", get(recent_events))
-        .route("/api/v1/admin/maintenance/clear-history", post(clear_token_and_event_history))
+        .route(
+            "/api/v1/admin/maintenance/clear-history",
+            post(clear_token_and_event_history),
+        )
         .route("/api/v1/tokens/:mint/scan", get(scan_token))
         .route("/api/v1/fees/token-account-rent", get(token_account_rent))
         .route("/api/v1/ws", get(ws_handler))
