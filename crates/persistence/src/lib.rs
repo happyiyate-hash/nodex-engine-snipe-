@@ -70,21 +70,37 @@ pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool
 }
 
 pub async fn save_raw_solana_event(pool: &SqlitePool, event: &serde_json::Value) -> Result<()> {
-    let signature = event
-        .pointer("/params/result/value/signature")
-        .and_then(|value| value.as_str());
-    let slot = event
-        .pointer("/params/result/context/slot")
-        .and_then(|value| value.as_i64());
-    sqlx::query(
-        "INSERT INTO solana_raw_events (signature, slot, event_json, received_at) VALUES (?, ?, ?, ?)",
-    )
-    .bind(signature)
-    .bind(slot)
-    .bind(serde_json::to_string(event)?)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool)
-    .await?;
+    save_raw_solana_events(pool, std::slice::from_ref(event)).await
+}
+
+/// Persist a bounded batch in one SQLite transaction to reduce per-notification
+/// commit overhead when Solana launch and activity streams are busy.
+pub async fn save_raw_solana_events(
+    pool: &SqlitePool,
+    events: &[serde_json::Value],
+) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = pool.begin().await?;
+    for event in events {
+        let signature = event
+            .pointer("/params/result/value/signature")
+            .and_then(|value| value.as_str());
+        let slot = event
+            .pointer("/params/result/context/slot")
+            .and_then(|value| value.as_i64());
+        sqlx::query(
+            "INSERT INTO solana_raw_events (signature, slot, event_json, received_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(signature)
+        .bind(slot)
+        .bind(serde_json::to_string(event)?)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 
