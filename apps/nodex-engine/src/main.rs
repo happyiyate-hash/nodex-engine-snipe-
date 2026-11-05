@@ -3,7 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -26,6 +26,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -41,6 +42,7 @@ struct AppState {
     database: sqlx::SqlitePool,
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
+    ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -757,8 +759,46 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
     )
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| client_socket(socket, state))
+async fn issue_ws_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let expected = state.admin_api_key.as_deref().filter(|key| !key.is_empty())
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebSocket ticket authentication is not configured.".to_string()))?;
+    let provided = headers.get("x-nodex-admin-key")
+        .and_then(|value| value.to_str().ok()).unwrap_or_default();
+    if provided.is_empty() || provided != expected {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid or missing NodeX operator key.".to_string()));
+    }
+
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let expires_at = Instant::now() + Duration::from_secs(30);
+    let mut tickets = state.ws_tickets.lock().await;
+    tickets.retain(|_, expiry| *expiry > Instant::now());
+    tickets.insert(ticket.clone(), expires_at);
+    Ok(Json(json!({
+        "ticket": ticket,
+        "expires_in_seconds": 30,
+        "single_use": true
+    })))
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(ticket) = query.get("ticket").filter(|value| !value.is_empty()) else {
+        return (StatusCode::UNAUTHORIZED, "Missing WebSocket ticket.".to_string()).into_response();
+    };
+    let valid = {
+        let mut tickets = state.ws_tickets.lock().await;
+        tickets.remove(ticket).is_some_and(|expiry| expiry > Instant::now())
+    };
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, "Invalid, expired, or already-used WebSocket ticket.".to_string()).into_response();
+    }
+    ws.on_upgrade(move |socket| client_socket(socket, state)).into_response()
 }
 
 async fn client_socket(socket: WebSocket, state: AppState) {
@@ -1033,6 +1073,7 @@ async fn main() -> anyhow::Result<()> {
         admin_api_key: std::env::var("NODEX_ADMIN_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty()),
+        ws_tickets: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -1046,6 +1087,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/tokens/:mint/scan", get(scan_token))
         .route("/api/v1/fees/token-account-rent", get(token_account_rent))
+        .route("/api/v1/ws-ticket", post(issue_ws_ticket))
         .route("/api/v1/ws", get(ws_handler))
         .with_state(state)
         // The personal dashboard is hosted on a different origin. The REST API
