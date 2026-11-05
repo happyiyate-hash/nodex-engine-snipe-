@@ -478,7 +478,17 @@ fn start_launch_processor(
                         let scan_events = events.clone();
                         let scan_mint = mint_address.clone();
                         tokio::spawn(async move {
-                            match scan_rpc.scan_token_security(&scan_mint).await {
+                            let progress_events = scan_events.clone();
+                            let progress_mint = scan_mint.clone();
+                            match scan_rpc.scan_token_security_with_progress(&scan_mint, move |stage, progress, message| {
+                                let _ = progress_events.send(json!({"type":"token_scan_progress","data":{
+                                    "mint_address":progress_mint,
+                                    "stage":stage,
+                                    "progress":progress,
+                                    "message":message,
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
+                            }).await {
                                 Ok(report) => {
                                     let _ = scan_events
                                         .send(json!({"type":"token_scan_update","data":report}));
