@@ -965,34 +965,47 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Persist raw upstream log notifications independently of browser subscribers.
+    // Batch writes avoid one SQLite transaction/fsync per Solana notification.
     let mut persistence_receiver = events.subscribe();
     let persistence_db = db.clone();
     tokio::spawn(async move {
+        let mut pending = Vec::<serde_json::Value>::with_capacity(100);
+        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        flush_tick.tick().await;
         loop {
-            match persistence_receiver.recv().await {
-                Ok(event) => {
-                    // This table is an upstream-notification history, not a copy of
-                    // every derived diagnostic and market event on the broadcast bus.
-                    if event.get("method").and_then(serde_json::Value::as_str)
-                        != Some("logsNotification")
-                    {
-                        continue;
+            tokio::select! {
+                event = persistence_receiver.recv() => match event {
+                    Ok(event) => {
+                        if event.get("method").and_then(serde_json::Value::as_str)
+                            == Some("logsNotification")
+                        {
+                            pending.push(event);
+                            if pending.len() >= 100 {
+                                match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
+                                    Ok(()) => pending.clear(),
+                                    Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
+                                }
+                            }
+                        }
                     }
-                    if let Err(error) =
-                        nodex_persistence::save_raw_solana_event(&persistence_db, &event).await
-                    {
-                        tracing::error!(%error, "Could not persist raw Solana event");
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(
+                            dropped_notifications = count,
+                            pending_notifications = pending.len(),
+                            "Raw Solana event persistence subscriber lagged; recovered notifications may be backfilled after reconnect"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                _ = flush_tick.tick() => {
+                    if !pending.is_empty() {
+                        match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
+                            Ok(()) => pending.clear(),
+                            Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
+                        }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    // Keep the persistence worker alive. The gap is explicit in logs;
-                    // a later reconnect can use the upstream signature checkpoint.
-                    tracing::warn!(
-                        dropped_notifications = count,
-                        "Raw Solana event persistence consumer lagged; continuing"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
