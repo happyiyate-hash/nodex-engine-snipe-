@@ -191,3 +191,20 @@ pub async fn list_recent_events(pool: &SqlitePool, limit: u32) -> Result<Vec<ser
         })
         .collect()
 }
+
+
+/// Clears only historical launch and raw upstream notification rows.
+/// It does not alter wallets, ledger entries, schema, or live monitor state.
+pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u64)> {
+    let mut transaction = pool.begin().await?;
+    let launches = sqlx::query("DELETE FROM token_launches")
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+    let events = sqlx::query("DELETE FROM solana_raw_events")
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+    transaction.commit().await?;
+    Ok((launches, events))
+}
