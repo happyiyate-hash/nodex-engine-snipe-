@@ -249,7 +249,7 @@ impl SolanaRpc {
                 }
             }
         }
-        on_progress("holder_distribution", 68, "Checking holder distribution");\n        report.rugcheck = self.get_rugcheck_summary(mint).await;\n        on_progress("rugcheck", 90, "Reviewing external risk signals");
+        on_progress("holder_distribution", 68, "Checking holder distribution");\n        report.rugcheck = self.get_rugcheck_summary(mint).await;\n        on_progress("rugcheck", 88, "Reviewing external risk signals");
         if report.rugcheck.status == "available" {
             let detail = format!(
                 "RugCheck summary received: normalized score {:?}, liquidity locked {:?}%, {} reported risks. This provider score is advisory and does not independently approve a token.",
