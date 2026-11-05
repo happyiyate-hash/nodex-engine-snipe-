@@ -123,6 +123,7 @@ impl SolanaRpc {
         &self,
         address: &str,
     ) -> Result<Option<(String, Vec<u8>, Option<u64>)>> {
+        on_progress("mint_account", 8, "Checking mint account");
         let account: Value = self
             .call(
                 "getAccountInfo",
@@ -215,6 +216,8 @@ impl SolanaRpc {
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .context("decoding mint account base64 data")?;
         let mut report = parse_mint_security_report(mint, &owner, &bytes, context_slot)?;
+        on_progress("authorities", 32, "Checking mint and freeze authorities");
+        on_progress("holder_distribution", 52, "Checking holder distribution");
         match self
             .get_holder_distribution(mint, report.supply_raw.as_deref().unwrap_or("0"))
             .await
@@ -249,6 +252,7 @@ impl SolanaRpc {
                 }
             }
         }
+        on_progress("rugcheck", 88, "Reviewing external risk signals");
         on_progress("holder_distribution", 68, "Checking holder distribution");\n        report.rugcheck = self.get_rugcheck_summary(mint).await;\n        on_progress("rugcheck", 88, "Reviewing external risk signals");
         if report.rugcheck.status == "available" {
             let detail = format!(
@@ -273,6 +277,7 @@ impl SolanaRpc {
                 }),
             });
         }
+        on_progress("complete", 100, "Security scan completed");
         Ok(report)
     }
 
