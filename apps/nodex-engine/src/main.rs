@@ -464,43 +464,79 @@ fn start_launch_processor(
                             }
                         }
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
+                        let scan_rpc = rpc.clone();
+                        let scan_events = events.clone();
+                        let scan_mint = mint_address.clone();
+                        tokio::spawn(async move {
+                            match scan_rpc.scan_token_security(&scan_mint).await {
+                                Ok(report) => {
+                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report}));
+                                }
+                                Err(error) => {
+                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"error","component":"token_security_scanner",
+                                        "message":error.to_string(),"mint_address":scan_mint,
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
+                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":{
+                                        "mint_address":scan_mint,"decision":"UNVERIFIED",
+                                        "decision_reason":"Scanner failed; no automatic paper buy is permitted.",
+                                        "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
+                                }
+                            }
+                        });
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
+
                         if let Some(creator) = creator_address {
-                            let _ = events.send(json!({"type":"creator_history_started","data":{"mint_address":mint_address,"creator_address":creator,"status":"scanning","received_at":chrono::Utc::now().to_rfc3339()}}));
-                            match rpc
-                                .scan_creator_history(&creator, &signature, &program_id)
-                                .await
-                            {
-                                Ok(history) => {
-                                    let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":history,"received_at":chrono::Utc::now().to_rfc3339()}}));
-                                }
-                                Err(error) => {
-                                    let _ = events.send(json!({"type":"diagnostic","data":{"severity":"warning","component":"creator_history_scanner","message":error.to_string(),"mint_address":mint_address,"creator_address":creator,"received_at":chrono::Utc::now().to_rfc3339()}}));
-                                    let _ = events.send(json!({"type":"creator_history_update","data":{"mint_address":mint_address,"history":{"creator_address":creator,"status":"unverified","early_selling":"UNVERIFIED","sample_is_partial":true,"caveat":"Creator history RPC failed; no conclusion can be drawn."},"received_at":chrono::Utc::now().to_rfc3339()}}));
-                                }
-                            }
-                        }
-                        match rpc.scan_token_security(&mint_address).await {
-                            Ok(report) => {
-                                let _ =
-                                    events.send(json!({"type":"token_scan_update","data":report}));
-                            }
-                            Err(error) => {
-                                let _ = events.send(json!({"type":"diagnostic","data":{
-                                    "severity":"error","component":"token_security_scanner",
-                                    "message":error.to_string(),"mint_address":mint_address,
+                            let history_rpc = rpc.clone();
+                            let history_events = events.clone();
+                            let history_mint = mint_address.clone();
+                            let history_signature = signature.clone();
+                            let history_program = program_id.clone();
+                            tokio::spawn(async move {
+                                let _ = history_events.send(json!({"type":"creator_history_started","data":{
+                                    "mint_address":history_mint,
+                                    "creator_address":creator,
+                                    "status":"scanning",
                                     "received_at":chrono::Utc::now().to_rfc3339()
                                 }}));
-                                let _ = events.send(json!({"type":"token_scan_update","data":{
-                                    "mint_address":mint_address,"decision":"UNVERIFIED",
-                                    "decision_reason":"Scanner RPC failed; no automatic buy is permitted.",
-                                    "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
-                                }}));
-                            }
+                                match history_rpc
+                                    .scan_creator_history(&creator, &history_signature, &history_program)
+                                    .await
+                                {
+                                    Ok(history) => {
+                                        let _ = history_events.send(json!({"type":"creator_history_update","data":{
+                                            "mint_address":history_mint,
+                                            "history":history,
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                    }
+                                    Err(error) => {
+                                        let _ = history_events.send(json!({"type":"diagnostic","data":{
+                                            "severity":"warning","component":"creator_history_scanner",
+                                            "message":error.to_string(),"mint_address":history_mint,
+                                            "creator_address":creator,
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                        let _ = history_events.send(json!({"type":"creator_history_update","data":{
+                                            "mint_address":history_mint,
+                                            "history":{
+                                                "creator_address":creator,
+                                                "status":"unverified",
+                                                "early_selling":"UNVERIFIED",
+                                                "sample_is_partial":true,
+                                                "caveat":"Creator history RPC failed; no conclusion can be drawn."
+                                            },
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                    }
+                                }
+                            });
                         }
                     }
                     Ok(false) => {}
@@ -645,7 +681,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
     let control = state.control.read().await.clone();
-    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":state.rpc.is_some() && status.connected,"token_security_scanning":false,"transaction_decoding":"pump_fun_create_and_create_v2","transaction_decoding_enabled":state.rpc.is_some() && status.connected}}}).to_string();
+    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":state.rpc.is_some() && status.connected,"token_security_scanning":state.rpc.is_some() && status.connected,"transaction_decoding":"pump_fun_create_and_create_v2","transaction_decoding_enabled":state.rpc.is_some() && status.connected}}}).to_string();
     if sender.send(Message::Text(initial)).await.is_err() {
         return;
     }
