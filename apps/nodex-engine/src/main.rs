@@ -464,6 +464,11 @@ fn start_launch_processor(
                             }
                         }
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
+                        let _ = events.send(json!({"type":"token_scan_started","data":{
+                            "mint_address":mint_address,
+                            "status":"scanning",
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
                         let scan_rpc = rpc.clone();
                         let scan_events = events.clone();
                         let scan_mint = mint_address.clone();
@@ -486,11 +491,6 @@ fn start_launch_processor(
                                 }
                             }
                         });
-                        let _ = events.send(json!({"type":"token_scan_started","data":{
-                            "mint_address":mint_address,
-                            "status":"scanning",
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }}));
 
                         if let Some(creator) = creator_address {
                             let history_rpc = rpc.clone();
