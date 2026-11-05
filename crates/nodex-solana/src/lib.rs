@@ -186,6 +186,7 @@ impl SolanaRpc {
     where
         F: FnMut(&str, u8, &str),
     {
+        on_progress("mint_account", 8, "Checking mint account");
         let account: Value = self
             .call(
                 "getAccountInfo",
@@ -253,7 +254,6 @@ impl SolanaRpc {
                 }
             }
         }
-        on_progress("rugcheck", 88, "Reviewing external risk signals");
         on_progress("rugcheck", 88, "Reviewing external risk signals");
         report.rugcheck = self.get_rugcheck_summary(mint).await;
         if report.rugcheck.status == "available" {
