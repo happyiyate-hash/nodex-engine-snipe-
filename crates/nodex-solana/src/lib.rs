@@ -124,6 +124,7 @@ impl SolanaRpc {
         address: &str,
     ) -> Result<Option<(String, Vec<u8>, Option<u64>)>> {
         on_progress("mint_account", 8, "Checking mint account");
+        on_progress("mint_account", 8, "Checking mint account");
         let account: Value = self
             .call(
                 "getAccountInfo",
@@ -253,7 +254,8 @@ impl SolanaRpc {
             }
         }
         on_progress("rugcheck", 88, "Reviewing external risk signals");
-        on_progress("holder_distribution", 68, "Checking holder distribution");\n        report.rugcheck = self.get_rugcheck_summary(mint).await;\n        on_progress("rugcheck", 88, "Reviewing external risk signals");
+        on_progress("rugcheck", 88, "Reviewing external risk signals");
+        report.rugcheck = self.get_rugcheck_summary(mint).await;
         if report.rugcheck.status == "available" {
             let detail = format!(
                 "RugCheck summary received: normalized score {:?}, liquidity locked {:?}%, {} reported risks. This provider score is advisory and does not independently approve a token.",
