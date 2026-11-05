@@ -123,8 +123,6 @@ impl SolanaRpc {
         &self,
         address: &str,
     ) -> Result<Option<(String, Vec<u8>, Option<u64>)>> {
-        on_progress("mint_account", 8, "Checking mint account");
-        on_progress("mint_account", 8, "Checking mint account");
         let account: Value = self
             .call(
                 "getAccountInfo",
