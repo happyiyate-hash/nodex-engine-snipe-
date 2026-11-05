@@ -313,7 +313,11 @@ impl SolanaRpc {
             score: value.get("score").and_then(Value::as_u64),
             score_normalised: value.get("score_normalised").and_then(Value::as_u64),
             lp_locked_pct: value.get("lpLockedPct").and_then(Value::as_f64),
-            risks: value.get("risks").and_then(Value::as_array).cloned().unwrap_or_default(),
+            risks: value
+                .get("risks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
             error: None,
         }
     }
