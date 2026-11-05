@@ -237,7 +237,85 @@ impl SolanaRpc {
                 }
             }
         }
+        report.rugcheck = self.get_rugcheck_summary(mint).await;
+        if report.rugcheck.status == "available" {
+            let detail = format!(
+                "RugCheck summary received: normalized score {:?}, liquidity locked {:?}%, {} reported risks. This provider score is advisory and does not independently approve a token.",
+                report.rugcheck.score_normalised,
+                report.rugcheck.lp_locked_pct,
+                report.rugcheck.risks.len()
+            );
+            report.checks.push(SecurityCheck {
+                name: "rugcheck_summary".into(),
+                status: "info".into(),
+                severity: "info".into(),
+                detail,
+            });
+        } else {
+            report.checks.push(SecurityCheck {
+                name: "rugcheck_summary".into(),
+                status: "unverified".into(),
+                severity: "warning".into(),
+                detail: report.rugcheck.error.clone().unwrap_or_else(|| {
+                    "RugCheck did not return a usable report. This is not evidence that the token is safe.".into()
+                }),
+            });
+        }
         Ok(report)
+    }
+
+    async fn get_rugcheck_summary(&self, mint: &str) -> RugCheckSummary {
+        let url = format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary");
+        let mut request = self
+            .client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .timeout(std::time::Duration::from_secs(8));
+        if let Ok(api_key) = std::env::var("RUGCHECK_API_KEY") {
+            if !api_key.trim().is_empty() {
+                request = request.header("X-API-KEY", api_key);
+            }
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return RugCheckSummary {
+                    provider: "rugcheck".into(),
+                    status: "unavailable".into(),
+                    error: Some(format!("RugCheck request failed: {error}")),
+                    ..Default::default()
+                };
+            }
+        };
+        let status_code = response.status();
+        if !status_code.is_success() {
+            return RugCheckSummary {
+                provider: "rugcheck".into(),
+                status: "unavailable".into(),
+                error: Some(format!("RugCheck returned HTTP {status_code}")),
+                ..Default::default()
+            };
+        }
+        let value = match response.json::<Value>().await {
+            Ok(value) => value,
+            Err(error) => {
+                return RugCheckSummary {
+                    provider: "rugcheck".into(),
+                    status: "unavailable".into(),
+                    error: Some(format!("Could not decode RugCheck response: {error}")),
+                    ..Default::default()
+                };
+            }
+        };
+        RugCheckSummary {
+            provider: "rugcheck".into(),
+            status: "available".into(),
+            score: value.get("score").and_then(Value::as_u64),
+            score_normalised: value.get("score_normalised").and_then(Value::as_u64),
+            lp_locked_pct: value.get("lpLockedPct").and_then(Value::as_f64),
+            risks: value.get("risks").and_then(Value::as_array).cloned().unwrap_or_default(),
+            error: None,
+        }
     }
 
     /// Samples a bounded number of recent creator transactions and counts prior Pump.fun launches.
@@ -482,6 +560,17 @@ pub struct TokenMetadataReport {
     pub caveat: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RugCheckSummary {
+    pub provider: String,
+    pub status: String,
+    pub score: Option<u64>,
+    pub score_normalised: Option<u64>,
+    pub lp_locked_pct: Option<f64>,
+    pub risks: Vec<Value>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSecurityReport {
     pub mint_address: String,
@@ -498,6 +587,7 @@ pub struct TokenSecurityReport {
     pub checks: Vec<SecurityCheck>,
     pub decision: String,
     pub decision_reason: String,
+    pub rugcheck: RugCheckSummary,
 }
 
 impl TokenSecurityReport {
@@ -527,6 +617,11 @@ impl TokenSecurityReport {
             decision: "UNVERIFIED".into(),
             decision_reason: "The mint account could not be verified; automatic buying is blocked."
                 .into(),
+            rugcheck: RugCheckSummary {
+                provider: "rugcheck".into(),
+                status: "not_run".into(),
+                ..Default::default()
+            },
         }
     }
 }
