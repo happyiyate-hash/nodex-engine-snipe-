@@ -35,6 +35,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState {
     events: broadcast::Sender<serde_json::Value>,
     stream_status: Arc<RwLock<StreamStatus>>,
+    pumpswap_status: Arc<RwLock<StreamStatus>>,
     wallet: Arc<RwLock<PaperWallet>>,
     rpc: Option<SolanaRpc>,
     database: sqlx::SqlitePool,
@@ -574,6 +575,7 @@ async fn health() -> Json<Health> {
 
 async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let stream = state.stream_status.read().await.clone();
+    let pumpswap_stream = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
     Json(json!({
         "mode": control.mode,
@@ -581,6 +583,10 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
         "live_execution_enabled": false,
         "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
         "solana_stream": stream,
+        "solana_streams": {
+            "pump_fun": stream,
+            "pumpswap": pumpswap_stream
+        }
     }))
 }
 
@@ -734,6 +740,20 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
             | Some("strategy_rejected_token")
+            | Some("diagnostic")
+            | Some("provider_status")
+            | Some("market_account_update")
+            | Some("market_curve_completed")
+            | Some("market_monitor_status")
+            | Some("market_subscription_requested")
+            | Some("market_subscription_active")
+            | Some("creator_history_started")
+            | Some("creator_history_update")
+            | Some("stream_warning")
+            | Some("reconnect_recovery_status")
+            | Some("pumpswap_activity")
+            | Some("pumpswap_volume_update")
+            | Some("command_rejected")
     )
 }
 
@@ -746,15 +766,41 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver_socket) = socket.split();
     let mut receiver = state.events.subscribe();
     let status = state.stream_status.read().await.clone();
+    let pumpswap_status = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
-    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":state.rpc.is_some() && status.connected,"token_security_scanning":state.rpc.is_some() && status.connected,"transaction_decoding":"pump_fun_create_and_create_v2","transaction_decoding_enabled":state.rpc.is_some() && status.connected}}}).to_string();
+    let initial = json!({"type":"connection_status","data":{"solana_stream":status,"solana_streams":{"pump_fun":status,"pumpswap":pumpswap_status},"engine":control,"capabilities":{"paper_trading":true,"live_trading":false,"token_scanning":state.rpc.is_some() && status.connected,"token_security_scanning":state.rpc.is_some() && status.connected,"transaction_decoding":"pump_fun_create_and_create_v2","transaction_decoding_enabled":state.rpc.is_some() && status.connected}}}).to_string();
     if sender.send(Message::Text(initial)).await.is_err() {
         return;
     }
+    // Replay a bounded launch snapshot so a browser reconnect does not start empty.
+    match nodex_persistence::list_recent_launches(&state.database, 100).await {
+        Ok(launches) => {
+            let snapshot = json!({"type":"launch_snapshot","data":{
+                "launches":launches,
+                "received_at":chrono::Utc::now().to_rfc3339()
+            }}).to_string();
+            if sender.send(Message::Text(snapshot)).await.is_err() {
+                return;
+            }
+        }
+        Err(error) => tracing::warn!(%error, "Could not load recent launches for WebSocket snapshot"),
+    }
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
     let mut pending_dropped_events = 0_u64;
     let mut last_lag_warning = std::time::Instant::now() - std::time::Duration::from_secs(5);
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                let heartbeat_message = json!({
+                    "type":"heartbeat",
+                    "data":{"server_timestamp":chrono::Utc::now().to_rfc3339()}
+                }).to_string();
+                if sender.send(Message::Text(heartbeat_message)).await.is_err() {
+                    break;
+                }
+            }
             event = receiver.recv() => match event {
                 Ok(mut value) => {
                     if !is_frontend_event(&value) {
@@ -901,9 +947,10 @@ async fn main() -> anyhow::Result<()> {
         rpc.clone(),
     );
 
+    let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
     if let Some(ws_url) = config.solana_ws_url.clone() {
         let sender = events.clone();
-        let status = Arc::new(RwLock::new(StreamStatus::default()));
+        let status = pumpswap_status.clone();
         let recovery_rpc = rpc.clone();
         tokio::spawn(async move {
             run_logs_stream(
@@ -965,6 +1012,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         events,
         stream_status,
+        pumpswap_status,
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
         database: db.clone(),
