@@ -107,6 +107,11 @@ impl TokenRegistry {
         Ok(())
     }
 
+    /// Remove a token from the in-memory registry after a terminal rejection.
+    pub fn remove(&self, mint: &str) -> Option<TokenState> {
+        self.records.write().ok()?.remove(mint)
+    }
+
     pub fn snapshot(&self) -> Vec<TokenState> {
         self.records
             .read()
