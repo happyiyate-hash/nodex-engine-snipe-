@@ -22,7 +22,7 @@ use nodex_solana::{
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use nodex_trading::volume::{RollingTradeVolume, TradeSide, WindowVolumeMetrics};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -47,15 +47,115 @@ struct AppState {
     database: sqlx::SqlitePool,
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
+    trading_settings: Arc<RwLock<TradingSettings>>,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct TradingSettings {
+    mode: String,
+    stop_loss_enabled: bool,
+    stop_loss_pct: f64,
+    take_profit_enabled: bool,
+    take_profit_pct: f64,
+    advanced_exit_enabled: bool,
+    trailing_stop_enabled: bool,
+    trailing_stop_pct: f64,
+    min_liquidity_usd: f64,
+    max_entry_price_usd: f64,
+    paper_position_size_sol: f64,
+    max_open_positions: u32,
+    min_safety_score: u8,
+    max_slippage_pct: f64,
+    min_5m_buy_volume_usd: f64,
+    max_top10_concentration_pct: f64,
+    automated_paper_buys: bool,
+    blacklist_known_rug_creators: bool,
+}
+
+impl Default for TradingSettings {
+    fn default() -> Self {
+        Self {
+            mode: "paper".into(),
+            stop_loss_enabled: true,
+            stop_loss_pct: 20.0,
+            take_profit_enabled: true,
+            take_profit_pct: 50.0,
+            advanced_exit_enabled: false,
+            trailing_stop_enabled: false,
+            trailing_stop_pct: 10.0,
+            min_liquidity_usd: 5_000.0,
+            max_entry_price_usd: 0.0,
+            paper_position_size_sol: 0.1,
+            max_open_positions: 3,
+            min_safety_score: 80,
+            max_slippage_pct: 10.0,
+            min_5m_buy_volume_usd: 1_000.0,
+            max_top10_concentration_pct: 35.0,
+            automated_paper_buys: false,
+            blacklist_known_rug_creators: true,
+        }
+    }
+}
+
+impl TradingSettings {
+    fn validate(&self) -> Result<(), String> {
+        let finite_non_negative = [
+            ("stop_loss_pct", self.stop_loss_pct),
+            ("take_profit_pct", self.take_profit_pct),
+            ("trailing_stop_pct", self.trailing_stop_pct),
+            ("min_liquidity_usd", self.min_liquidity_usd),
+            ("max_entry_price_usd", self.max_entry_price_usd),
+            ("paper_position_size_sol", self.paper_position_size_sol),
+            ("max_slippage_pct", self.max_slippage_pct),
+            ("min_5m_buy_volume_usd", self.min_5m_buy_volume_usd),
+            ("max_top10_concentration_pct", self.max_top10_concentration_pct),
+        ];
+        for (name, value) in finite_non_negative {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} must be a finite, non-negative number."));
+            }
+        }
+        if self.mode != "paper" {
+            return Err("Real trading is not implemented or enabled. Only paper mode is accepted.".into());
+        }
+        if self.stop_loss_pct > 100.0 || self.take_profit_pct > 1_000.0 || self.trailing_stop_pct > 100.0 {
+            return Err("Exit percentages are outside the supported range.".into());
+        }
+        if self.max_slippage_pct > 100.0 || self.max_top10_concentration_pct > 100.0 {
+            return Err("Slippage and top-10 concentration must be between 0 and 100.".into());
+        }
+        if self.min_safety_score > 100 {
+            return Err("min_safety_score must be between 0 and 100.".into());
+        }
+        if self.paper_position_size_sol <= 0.0 {
+            return Err("paper_position_size_sol must be greater than zero.".into());
+        }
+        if self.max_open_positions == 0 || self.max_open_positions > 1_000 {
+            return Err("max_open_positions must be between 1 and 1000.".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct EngineControl {
     paused: bool,
     mode: String,
+    token_discovery_enabled: bool,
+    new_entries_enabled: bool,
+    position_monitoring_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineControlRequest {
+    command: String,
+    token_discovery_enabled: Option<bool>,
+    new_entries_enabled: Option<bool>,
+    position_monitoring_enabled: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -987,13 +1087,95 @@ async fn health() -> Json<Health> {
     })
 }
 
+fn verify_operator_key(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let expected = state.admin_api_key.as_deref().filter(|key| !key.is_empty()).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Operator API is disabled: set NODEX_ADMIN_API_KEY on the backend.".to_string(),
+    ))?;
+    let provided = headers.get("x-nodex-admin-key").and_then(|value| value.to_str().ok()).unwrap_or_default();
+    if provided.is_empty() || provided != expected {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid or missing NodeX operator key.".into()));
+    }
+    Ok(())
+}
+
+async fn get_trading_config(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let settings = state.trading_settings.read().await.clone();
+    Json(json!({
+        "config": settings,
+        "mode": "paper",
+        "real_trading_available": false,
+        "updated_at": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+async fn update_trading_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(settings): Json<TradingSettings>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    settings.validate().map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let serialized = serde_json::to_string(&settings).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    sqlx::query(
+        "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at"
+    )
+    .bind(serialized)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&state.database)
+    .await
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist trading configuration: {error}")))?;
+    *state.trading_settings.write().await = settings.clone();
+    let _ = state.events.send(json!({"type":"trading_config_updated","data":settings}));
+    Ok(Json(json!({"status":"ok","config":settings})))
+}
+
+async fn get_engine_control(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!(state.control.read().await.clone()))
+}
+
+async fn update_engine_control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EngineControlRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let mut control = state.control.write().await;
+    match request.command.as_str() {
+        "start" | "resume" => control.paused = false,
+        "pause" | "stop" => control.paused = true,
+        other => return Err((StatusCode::BAD_REQUEST, format!("Unsupported engine command: {other}"))),
+    }
+    if let Some(enabled) = request.token_discovery_enabled {
+        control.token_discovery_enabled = enabled;
+    }
+    if let Some(enabled) = request.new_entries_enabled {
+        control.new_entries_enabled = enabled;
+    }
+    if let Some(enabled) = request.position_monitoring_enabled {
+        control.position_monitoring_enabled = enabled;
+    }
+    let snapshot = control.clone();
+    drop(control);
+    let _ = state.events.send(json!({"type":"engine_state","data":snapshot}));
+    Ok(Json(json!({"status":"ok","engine":snapshot})))
+}
+
 async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let stream = state.stream_status.read().await.clone();
     let pumpswap_stream = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
+    let trading_settings = state.trading_settings.read().await.clone();
     Json(json!({
         "mode": control.mode,
         "paused": control.paused,
+        "token_discovery_enabled": control.token_discovery_enabled,
+        "new_entries_enabled": control.new_entries_enabled,
+        "position_monitoring_enabled": control.position_monitoring_enabled,
+        "trading_config": trading_settings,
         "live_execution_enabled": false,
         "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
         "solana_stream": stream,
@@ -1615,6 +1797,31 @@ async fn main() -> anyhow::Result<()> {
 
     let config = EngineConfig::from_env();
     let db = nodex_persistence::connect(&config.database_url).await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS nodex_runtime_config (config_key TEXT PRIMARY KEY, config_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    .execute(&db)
+    .await?;
+    let stored_trading_config: Option<String> = sqlx::query_scalar(
+        "SELECT config_json FROM nodex_runtime_config WHERE config_key = 'trading'"
+    )
+    .fetch_optional(&db)
+    .await?;
+    let trading_settings = match stored_trading_config {
+        Some(raw) => serde_json::from_str::<TradingSettings>(&raw)
+            .ok()
+            .filter(|settings| settings.validate().is_ok())
+            .unwrap_or_default(),
+        None => TradingSettings::default(),
+    };
+    let trading_settings_json = serde_json::to_string(&trading_settings)?;
+    sqlx::query(
+        "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO NOTHING"
+    )
+    .bind(trading_settings_json)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&db)
+    .await?;
     let token_registry = TokenRegistry::new();
     for snapshot in nodex_persistence::load_token_states(&db).await? {
         token_registry
@@ -1746,9 +1953,14 @@ async fn main() -> anyhow::Result<()> {
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
+    // The process starts online but idle. An explicit operator Start/Resume command
+    // is required before launch processors accept discovery work.
     let control = Arc::new(RwLock::new(EngineControl {
-        paused: false,
+        paused: true,
         mode: "paper".into(),
+        token_discovery_enabled: false,
+        new_entries_enabled: false,
+        position_monitoring_enabled: true,
     }));
 
     // Keep launch detection and market monitoring on separate subscriptions.
@@ -1874,6 +2086,7 @@ async fn main() -> anyhow::Result<()> {
         admin_api_key: std::env::var("NODEX_ADMIN_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty()),
+        trading_settings: Arc::new(RwLock::new(trading_settings)),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
         profile: profile_state,
@@ -1881,6 +2094,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
+        .route("/api/v1/engine/control", get(get_engine_control).post(update_engine_control))
+        .route("/api/v1/config/trading", get(get_trading_config).put(update_trading_config))
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
