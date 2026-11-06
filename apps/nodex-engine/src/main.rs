@@ -447,13 +447,13 @@ fn start_launch_processor(
                         // Register the token immediately. Scanner and market workers
                         // can now update independent domains of the same canonical record.
                         let initial_state = token_registry.upsert_patch(&mint_address, json!({
-                            "identity": {"mint_address": mint_address},
+                            "identity": {"mint_address": mint_address.clone()},
                             "discovery": {
                                 "source": "pump_fun",
-                                "creator_address": creator_address,
-                                "signature": launch.signature,
+                                "creator_address": creator_address.clone(),
+                                "signature": launch.signature.clone(),
                                 "slot": launch.slot,
-                                "detected_at": launch.detected_at
+                                "detected_at": launch.detected_at.clone()
                             },
                             "security": {"status": "pending"},
                             "market": {"status": "starting"}
