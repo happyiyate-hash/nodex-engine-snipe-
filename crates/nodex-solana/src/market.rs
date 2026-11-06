@@ -583,7 +583,7 @@ async fn connect_market_stream(
                 let subscription = match command {
                     MarketCommand::UnsubscribeMint(mint) => {
                         let (pending_ids, active_ids) = remove_mint_subscriptions(
-                            &mint, &mut desired, &mut pending, &mut active,
+                            &mint, desired, &mut pending, &mut active,
                         );
                         let cancelled_count = pending_ids.len();
                         for request_id in pending_ids {
