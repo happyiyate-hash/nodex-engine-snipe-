@@ -517,8 +517,12 @@ fn start_launch_processor(
         tokio::spawn(async move {
             loop {
                 let work = { work_rx.lock().await.recv().await };
-                let Some((signature, slot_hint)) = work else { break };
-                if control.read().await.paused { continue; }
+                let Some((signature, slot_hint)) = work else {
+                    break;
+                };
+                if control.read().await.paused {
+                    continue;
+                }
                 let mut transaction = None;
                 let mut last_error = None;
                 for attempt in 0..4 {
@@ -766,7 +770,6 @@ fn start_launch_processor(
                         }}));
                     }
                 }
-
             }
         });
     }
@@ -786,30 +789,48 @@ fn start_launch_processor(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
-                || event.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                || event
+                    .get("nodex_program_id")
+                    .and_then(serde_json::Value::as_str)
                     != Some(pump_fun_program_id.as_str())
-            { continue; }
-            if control.read().await.paused { continue; }
-            let Some(value) = event.pointer("/params/result/value") else { continue; };
-            let Some(signature) = value.get("signature")
-                .and_then(serde_json::Value::as_str).map(str::to_owned)
-            else { continue; };
+            {
+                continue;
+            }
+            if control.read().await.paused {
+                continue;
+            }
+            let Some(value) = event.pointer("/params/result/value") else {
+                continue;
+            };
+            let Some(signature) = value
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
             {
                 let mut seen = seen_signatures.lock().await;
-                if !seen.insert(signature.clone()) { continue; }
+                if !seen.insert(signature.clone()) {
+                    continue;
+                }
                 if seen.len() > 20_000 {
                     seen.clear();
                     seen.insert(signature.clone());
                 }
             }
-            let slot_hint = event.pointer("/params/result/context/slot")
-                .and_then(serde_json::Value::as_u64).unwrap_or_default();
+            let slot_hint = event
+                .pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
             if let Err(error) = work_tx.try_send((signature.clone(), slot_hint)) {
                 let (reason, retryable) = match error {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => ("queue_full", true),
                     tokio::sync::mpsc::error::TrySendError::Closed(_) => ("queue_closed", true),
                 };
-                if retryable { seen_signatures.lock().await.remove(&signature); }
+                if retryable {
+                    seen_signatures.lock().await.remove(&signature);
+                }
                 let _ = events.send(json!({"type":"diagnostic","data":{
                     "severity":"warning","component":"launch_processor_queue",
                     "message":"Launch transaction was not admitted to the bounded worker queue; it remains eligible for a later backfill/re-delivery.",
@@ -817,7 +838,9 @@ fn start_launch_processor(
                     "queue_capacity":LAUNCH_QUEUE_CAPACITY,
                     "received_at":chrono::Utc::now().to_rfc3339()
                 }}));
-                if reason == "queue_closed" { break; }
+                if reason == "queue_closed" {
+                    break;
+                }
             }
         }
     });
