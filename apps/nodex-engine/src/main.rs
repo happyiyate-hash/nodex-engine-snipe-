@@ -910,9 +910,13 @@ fn start_launch_processor(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
 
-            if notification.get("method").and_then(serde_json::Value::as_str)
+            if notification
+                .get("method")
+                .and_then(serde_json::Value::as_str)
                 != Some("logsNotification")
-                || notification.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                || notification
+                    .get("nodex_program_id")
+                    .and_then(serde_json::Value::as_str)
                     != Some(pump_fun_program_id.as_str())
                 || control.read().await.paused
             {
@@ -925,14 +929,16 @@ fn start_launch_processor(
             if !value.get("err").is_some_and(serde_json::Value::is_null) {
                 continue;
             }
-            let Some(signature) = value.get("signature")
+            let Some(signature) = value
+                .get("signature")
                 .and_then(serde_json::Value::as_str)
                 .filter(|signature| !signature.is_empty())
                 .map(str::to_owned)
             else {
                 continue;
             };
-            let slot = notification.pointer("/params/result/context/slot")
+            let slot = notification
+                .pointer("/params/result/context/slot")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or_default();
 
