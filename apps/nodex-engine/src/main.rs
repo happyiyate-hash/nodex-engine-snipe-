@@ -224,7 +224,10 @@ fn start_pumpswap_activity_processor(
                     .get("nodex_program_id")
                     .and_then(serde_json::Value::as_str)
                     != Some(PUMPSWAP_PROGRAM_ID)
-                || control.read().await.paused
+                || {
+                    let current = control.read().await;
+                    current.paused || !current.token_discovery_enabled
+                }
             {
                 continue;
             }
@@ -1027,7 +1030,10 @@ fn start_launch_processor(
                     .get("nodex_program_id")
                     .and_then(serde_json::Value::as_str)
                     != Some(pump_fun_program_id.as_str())
-                || control.read().await.paused
+                || {
+                    let current = control.read().await;
+                    current.paused || !current.token_discovery_enabled
+                }
             {
                 continue;
             }
@@ -1145,8 +1151,14 @@ async fn update_engine_control(
     verify_operator_key(&state, &headers)?;
     let mut control = state.control.write().await;
     match request.command.as_str() {
-        "start" | "resume" => control.paused = false,
-        "pause" | "stop" => control.paused = true,
+        "start" | "resume" => {
+            control.paused = false;
+            control.token_discovery_enabled = true;
+        }
+        "pause" | "stop" => {
+            control.paused = true;
+            control.token_discovery_enabled = false;
+        },
         other => return Err((StatusCode::BAD_REQUEST, format!("Unsupported engine command: {other}"))),
     }
     if let Some(enabled) = request.token_discovery_enabled {
@@ -1439,6 +1451,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
         value.get("type").and_then(serde_json::Value::as_str),
         Some("connection_status")
             | Some("engine_state")
+            | Some("trading_config_updated")
             | Some("launch_detected")
             | Some("token_removed")
             | Some("token_approval_pending")
@@ -1677,12 +1690,16 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                 Some(Ok(Message::Text(text))) => {
                     let result = match serde_json::from_str::<ClientCommand>(&text) {
                         Ok(ClientCommand::Pause) => {
-                            state.control.write().await.paused = true;
-                            Some(json!({"type":"engine_state","data":{"paused":true,"mode":"paper"}}))
+                            let mut control = state.control.write().await;
+                            control.paused = true;
+                            control.token_discovery_enabled = false;
+                            Some(json!({"type":"engine_state","data":control.clone()}))
                         }
                         Ok(ClientCommand::Resume) | Ok(ClientCommand::Start) => {
-                            state.control.write().await.paused = false;
-                            Some(json!({"type":"engine_state","data":{"paused":false,"mode":"paper"}}))
+                            let mut control = state.control.write().await;
+                            control.paused = false;
+                            control.token_discovery_enabled = true;
+                            Some(json!({"type":"engine_state","data":control.clone()}))
                         }
                         Ok(ClientCommand::SetMode { mode }) if mode == "paper" => {
                             state.control.write().await.mode = "paper".into();
