@@ -67,6 +67,7 @@ enum ClientCommand {
     SetMode { mode: String },
     Status,
     SubscribeToken { mint: String },
+    SetChartTimeframe { mint: String, timeframe: String },
     UnsubscribeToken { mint: String },
 }
 
@@ -1099,6 +1100,8 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_market_update")
             | Some("chart_candle_update")
             | Some("chart_candle_closed")
+            | Some("token_chart_snapshot")
+            | Some("token_detail_status")
             | Some("token_statistics_update")
             | Some("profile_updated")
             | Some("wallet_balance_updated")
@@ -1392,6 +1395,31 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                                     None => {
                                         subscribed_tokens.remove(&mint);
                                         Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"Token state was not found."}}))
+                                    }
+                                }
+                            }
+                        }
+                        Ok(ClientCommand::SetChartTimeframe { mint, timeframe }) => {
+                            let mint = mint.trim().to_owned();
+                            let allowed = ["1m", "5m", "15m", "1h", "24h"];
+                            if !subscribed_tokens.contains(&mint) || !allowed.contains(&timeframe.as_str()) {
+                                Some(json!({"type":"command_rejected","data":{
+                                    "command":"set_chart_timeframe","mint_address":mint,
+                                    "timeframe":timeframe,
+                                    "reason":"Subscribe to the token first and use one of: 1m, 5m, 15m, 1h, 24h."
+                                }}))
+                            } else {
+                                match nodex_persistence::load_chart_candles(&state.database, &mint, &timeframe, 500).await {
+                                    Ok(candles) => Some(json!({"type":"token_chart_snapshot","data":{
+                                        "mint_address":mint,"timeframe":timeframe,"candles":candles,
+                                        "status":if candles.is_empty() {"warming_up"} else {"ready"}
+                                    }})),
+                                    Err(error) => {
+                                        tracing::warn!(%error, mint_address=mint, timeframe, "Could not load requested chart timeframe");
+                                        Some(json!({"type":"token_detail_status","data":{
+                                            "mint_address":mint,"domain":"chart","status":"unavailable",
+                                            "timeframe":timeframe
+                                        }}))
                                     }
                                 }
                             }
