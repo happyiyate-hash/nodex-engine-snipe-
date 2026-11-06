@@ -136,7 +136,12 @@ pub fn start_chart_service(
                         .and_then(Value::as_i64)
                         .map(|seconds| seconds.saturating_mul(1_000))
                         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                    (timestamp, None, raw as f64 / 1_000_000_000.0, Some(event_type))
+                    (
+                        timestamp,
+                        None,
+                        raw as f64 / 1_000_000_000.0,
+                        Some(event_type),
+                    )
                 }
                 _ => continue,
             };
@@ -210,9 +215,20 @@ pub fn start_chart_service(
                             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5));
                     if should_persist {
                         if let Err(error) = nodex_persistence::save_chart_candle(
-                            &database, mint, timeframe, open_time, &payload,
-                        ).await {
-                            tracing::warn!(%error, mint_address=mint, timeframe, "Could not persist chart candle update");
+                            &database,
+                            mint,
+                            timeframe,
+                            open_time,
+                            &payload,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                mint_address = mint,
+                                timeframe,
+                                "Could not persist chart candle update"
+                            );
                         } else {
                             last_persisted.insert(key.clone(), std::time::Instant::now());
                         }
