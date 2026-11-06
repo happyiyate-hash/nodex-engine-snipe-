@@ -1059,7 +1059,6 @@ async fn clear_token_and_event_history(
     })))
 }
 
-
 async fn build_approved_token_detail_snapshot(
     state: &AppState,
     mint: &str,
