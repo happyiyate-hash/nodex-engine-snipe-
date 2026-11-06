@@ -123,12 +123,18 @@ pub async fn save_portfolio_position(
 }
 
 pub async fn load_portfolio_positions(pool: &SqlitePool) -> Result<Vec<serde_json::Value>> {
-    let rows = sqlx::query_scalar::<_, String>(
-        "SELECT payload_json FROM portfolio_positions ORDER BY updated_at DESC",
+    let rows = sqlx::query(
+        "SELECT status, payload_json FROM portfolio_positions ORDER BY updated_at DESC",
     ).fetch_all(pool).await?;
-    rows.into_iter()
-        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
-        .collect()
+    rows.into_iter().map(|row| {
+        let status: String = row.get("status");
+        let payload: String = row.get("payload_json");
+        let mut value: serde_json::Value = serde_json::from_str(&payload)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("status".into(), serde_json::Value::String(status));
+        }
+        Ok(value)
+    }).collect()
 }
 
 pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool> {
