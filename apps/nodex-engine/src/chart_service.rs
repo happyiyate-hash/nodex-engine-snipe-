@@ -1,3 +1,4 @@
+use nodex_core::TokenRegistry;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
@@ -72,6 +73,7 @@ pub fn start_chart_service(
     mut receiver: broadcast::Receiver<Value>,
     events: broadcast::Sender<Value>,
     database: sqlx::SqlitePool,
+    registry: TokenRegistry,
 ) {
     tokio::spawn(async move {
         let mut candles = HashMap::<(String, String, i64), Candle>::new();
@@ -98,6 +100,13 @@ pub fn start_chart_service(
             let Some(mint) = data.get("mint_address").and_then(Value::as_str) else {
                 continue;
             };
+            let approved = registry.get(mint).is_some_and(|state| {
+                state.data.pointer("/security/decision")
+                    .and_then(Value::as_str) == Some("APPROVED")
+            });
+            if !approved {
+                continue;
+            }
             let (timestamp_ms, price, volume_sol, side) = match kind {
                 "market_price_update" => {
                     let Some(price) = data
