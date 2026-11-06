@@ -845,6 +845,186 @@ fn start_launch_processor(
         }
     });
 }
+async fn health() -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        mode: "paper",
+        service: "nodex-engine",
+    })
+}
+
+async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let stream = state.stream_status.read().await.clone();
+    let pumpswap_stream = state.pumpswap_status.read().await.clone();
+    let control = state.control.read().await.clone();
+    Json(json!({
+        "mode": control.mode,
+        "paused": control.paused,
+        "live_execution_enabled": false,
+        "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
+        "solana_stream": stream,
+        "solana_streams": {
+            "pump_fun": stream,
+            "pumpswap": pumpswap_stream
+        }
+    }))
+}
+
+/// Temporary maintenance endpoint. Deletes historical launch rows and raw
+/// upstream notification history only; live subscriptions and monitor state stay running.
+async fn clear_token_and_event_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let configured_key = state
+        .admin_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .ok_or((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance endpoint is disabled: set NODEX_ADMIN_API_KEY on the backend first."
+                .to_string(),
+        ))?;
+    let supplied_key = headers
+        .get("x-nodex-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if supplied_key.is_empty() || supplied_key != configured_key {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Invalid or missing NodeX admin key.".to_string(),
+        ));
+    }
+
+    let (deleted_token_records, deleted_raw_event_records) =
+        nodex_persistence::clear_token_and_event_history(&state.database)
+            .await
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("History cleanup failed: {error}"),
+                )
+            })?;
+
+    tracing::warn!(
+        deleted_token_records,
+        deleted_raw_event_records,
+        "NodeX historical token and raw event records cleared through maintenance API"
+    );
+
+    Ok(Json(json!({
+        "status": "ok",
+        "deleted_token_records": deleted_token_records,
+        "deleted_raw_event_records": deleted_raw_event_records,
+        "preserved": [
+            "live token discovery and market subscriptions",
+            "paper wallet and ledger",
+            "database schema and configuration",
+            "source code, API keys, and environment configuration"
+        ]
+    })))
+}
+
+async fn token_state(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if let Some(snapshot) = state.token_registry.get(&mint) {
+        return Ok(Json(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}))));
+    }
+    match nodex_persistence::get_token_state(&state.database, &mint).await {
+        Ok(Some(snapshot)) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})))),
+        Ok(None) => Err((axum::http::StatusCode::NOT_FOUND, "Token state not found".to_string())),
+        Err(error) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string())),
+    }
+}
+
+async fn recent_launches(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(100);
+    let launches = nodex_persistence::list_recent_launches(&state.database, limit)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+    Ok(Json(launches))
+}
+
+async fn recent_events(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(200);
+    let events = nodex_persistence::list_recent_events(&state.database, limit)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+    Ok(Json(events))
+}
+
+async fn scan_token(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let rpc = state.rpc.ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Solana HTTP RPC is not configured".to_string(),
+    ))?;
+    let report = rpc.scan_token_security(&mint).await.map_err(|error| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Token security scan failed: {error}"),
+        )
+    })?;
+    Ok(Json(
+        serde_json::to_value(report).unwrap_or_else(|_| json!({})),
+    ))
+}
+
+async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
+    Json(state.wallet.read().await.clone())
+}
+
+/// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
+/// paper-trading funds and positions remain separate accounting domains.
+async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.profile.read().await.clone())
+}
+
+async fn token_account_rent(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let rpc = state.rpc.ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Solana HTTP RPC is not configured".to_string(),
+    ))?;
+    let rent = rpc
+        .token_account_rent_lamports()
+        .await
+        .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(Json(json!({
+        "account_size_bytes": 165,
+        "rent_lamports": rent,
+        "rent_sol": rent as f64 / LAMPORTS_PER_SOL as f64,
+        "source": "solana_getMinimumBalanceForRentExemption"
+    })))
+}
+
 fn is_frontend_event(value: &serde_json::Value) -> bool {
     matches!(
         value.get("type").and_then(serde_json::Value::as_str),
