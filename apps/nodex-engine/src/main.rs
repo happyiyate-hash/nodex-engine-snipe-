@@ -154,9 +154,17 @@ impl TradingSettings {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct TradingModeAvailability {
+    paper: bool,
+    real: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct EngineControl {
     paused: bool,
     mode: String,
+    available_modes: TradingModeAvailability,
+    real_trading_available: bool,
     token_discovery_enabled: bool,
     new_entries_enabled: bool,
     position_monitoring_enabled: bool,
@@ -165,6 +173,7 @@ struct EngineControl {
 #[derive(Debug, Deserialize)]
 struct EngineControlRequest {
     command: String,
+    mode: Option<String>,
     token_discovery_enabled: Option<bool>,
     new_entries_enabled: Option<bool>,
     position_monitoring_enabled: Option<bool>,
@@ -1137,6 +1146,7 @@ async fn get_trading_config(State(state): State<AppState>) -> Json<serde_json::V
     Json(json!({
         "config": settings,
         "mode": "paper",
+        "available_modes": { "paper": true, "real": false },
         "real_trading_available": false,
         "updated_at": chrono::Utc::now().to_rfc3339()
     }))
@@ -1194,6 +1204,21 @@ async fn update_engine_control(
             control.token_discovery_enabled = false;
         }
         "configure" => {}
+        "set_mode" => match request.mode.as_deref() {
+            Some("paper") => control.mode = "paper".into(),
+            Some("real") => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Real trading is not available. Paper mode remains active.".into(),
+                ));
+            }
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "set_mode requires mode to be either 'paper' or 'real'.".into(),
+                ));
+            }
+        },
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -2058,6 +2083,8 @@ async fn main() -> anyhow::Result<()> {
     let control = Arc::new(RwLock::new(EngineControl {
         paused: true,
         mode: "paper".into(),
+        available_modes: TradingModeAvailability { paper: true, real: false },
+        real_trading_available: false,
         token_discovery_enabled: false,
         new_entries_enabled: false,
         position_monitoring_enabled: true,
