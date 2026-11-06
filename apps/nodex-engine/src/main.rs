@@ -1,3 +1,5 @@
+mod token_details;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -1317,10 +1319,28 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                                     }
                                 };
                                 match snapshot {
-                                    Some(snapshot) => Some(json!({
-                                        "type":"token_detail_snapshot",
-                                        "data":{"subscription":"active","mint_address":mint,"snapshot":snapshot}
-                                    })),
+                                    Some(snapshot) => {
+                                        let positions = match nodex_persistence::load_portfolio_positions(&state.database).await {
+                                            Ok(items) => items,
+                                            Err(error) => {
+                                                tracing::warn!(%error, mint_address = mint, "Could not load positions for token detail snapshot");
+                                                Vec::new()
+                                            }
+                                        };
+                                        let details = token_details::build_token_detail_snapshot(
+                                            &mint,
+                                            Some(&snapshot),
+                                            &positions,
+                                        );
+                                        Some(json!({
+                                            "type":"token_detail_snapshot",
+                                            "data":{
+                                                "subscription":"active",
+                                                "mint_address":mint,
+                                                "snapshot":details
+                                            }
+                                        }))
+                                    }
                                     None => {
                                         subscribed_tokens.remove(&mint);
                                         Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"Token state was not found."}}))
