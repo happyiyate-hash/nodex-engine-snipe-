@@ -347,7 +347,8 @@ fn start_token_state_projector(
                 if let Err(error) = nodex_persistence::delete_token_state(&database, mint).await {
                     tracing::error!(%error, mint_address=mint, "Could not remove rejected token state");
                 }
-                if let Err(error) = nodex_persistence::delete_token_launches(&database, mint).await {
+                if let Err(error) = nodex_persistence::delete_token_launches(&database, mint).await
+                {
                     tracing::error!(%error, mint_address=mint, "Could not remove rejected token launch records");
                 }
                 registry.remove(mint);
@@ -360,8 +361,11 @@ fn start_token_state_projector(
             }
             if matches!(kind, "market_price_update" | "pumpswap_volume_update") {
                 let approved = registry.get(mint).is_some_and(|state| {
-                    state.data.pointer("/security/decision")
-                        .and_then(serde_json::Value::as_str) == Some("APPROVED")
+                    state
+                        .data
+                        .pointer("/security/decision")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("APPROVED")
                 });
                 if !approved {
                     continue;
@@ -775,7 +779,13 @@ fn start_launch_processor(
                                             };
                                             if approval_persisted {
                                             if let Some(monitor) = approved_monitor.as_ref() {
-                                                match monitor.subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id).await {
+                                                match monitor
+                                                    .subscribe_pump_fun_bonding_curve(
+                                                        &scan_mint,
+                                                        &approved_program_id,
+                                                    )
+                                                    .await
+                                                {
                                                     Ok(account_address) => {
                                                         let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
                                                             "mint_address":scan_mint,
