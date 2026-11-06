@@ -487,6 +487,7 @@ fn start_token_state_projector(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
