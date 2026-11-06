@@ -572,31 +572,34 @@ async fn connect_market_stream(
                 let Some(command) = command else {
                     return Err(anyhow!("market monitor command channel closed"));
                 };
-                if let MarketCommand::UnsubscribeMint(mint) = command {
-                    let (pending_ids, active_ids) = remove_mint_subscriptions(
-                        &mint, &mut desired, &mut pending, &mut active,
-                    );
-                    for request_id in pending_ids {
-                        cancelled_pending.insert(request_id);
+                let subscription = match command {
+                    MarketCommand::UnsubscribeMint(mint) => {
+                        let (pending_ids, active_ids) = remove_mint_subscriptions(
+                            &mint, &mut desired, &mut pending, &mut active,
+                        );
+                        let cancelled_count = pending_ids.len();
+                        for request_id in pending_ids {
+                            cancelled_pending.insert(request_id);
+                        }
+                        let removed_active = active_ids.len();
+                        for subscription_id in active_ids {
+                            let request_id = next_request_id;
+                            next_request_id = next_request_id.saturating_add(1);
+                            send_account_unsubscribe(&mut sink, request_id, subscription_id).await?;
+                        }
+                        price_history.remove(&mint);
+                        pumpswap_states.remove(&mint);
+                        let _ = events.send(json!({
+                            "type":"market_subscriptions_removed",
+                            "data":{"mint_address":mint,"removed_active":removed_active,
+                                "cancelled_pending":cancelled_count,
+                                "desired_accounts":desired.len(),
+                                "received_at":chrono::Utc::now().to_rfc3339()}
+                        }));
+                        continue;
                     }
-                    let removed_active = active_ids.len();
-                    for subscription_id in active_ids {
-                        let request_id = next_request_id;
-                        next_request_id = next_request_id.saturating_add(1);
-                        send_account_unsubscribe(&mut sink, request_id, subscription_id).await?;
-                    }
-                    price_history.remove(&mint);
-                    pumpswap_states.remove(&mint);
-                    let _ = events.send(json!({
-                        "type":"market_subscriptions_removed",
-                        "data":{"mint_address":mint,"removed_active":removed_active,
-                            "cancelled_pending":cancelled_pending.len(),
-                            "desired_accounts":desired.len(),
-                            "received_at":chrono::Utc::now().to_rfc3339()}
-                    }));
-                    continue;
-                }
-                let MarketCommand::Subscribe(subscription) = command else { unreachable!() };
+                    MarketCommand::Subscribe(subscription) => subscription,
+                };
                 if desired.contains_key(&subscription.account) {
                     continue;
                 }
