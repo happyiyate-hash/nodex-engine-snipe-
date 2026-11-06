@@ -56,47 +56,41 @@ struct AppState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct TradingSettings {
-    mode: String,
-    stop_loss_enabled: bool,
-    stop_loss_pct: f64,
-    take_profit_enabled: bool,
-    take_profit_pct: f64,
-    advanced_exit_enabled: bool,
-    trailing_stop_enabled: bool,
-    trailing_stop_pct: f64,
     min_liquidity_usd: f64,
     max_entry_price_usd: f64,
-    paper_position_size_sol: f64,
-    max_open_positions: u32,
+    max_investment_per_token_sol: f64,
+    max_investment_per_token_usd: f64,
+    max_simultaneous_positions: u32,
     min_safety_score: u8,
     max_slippage_pct: f64,
+    stop_loss_pct: f64,
+    take_profit_pct: f64,
     min_5m_buy_volume_usd: f64,
-    max_top10_concentration_pct: f64,
-    automated_paper_buys: bool,
-    blacklist_known_rug_creators: bool,
+    max_top10_holder_concentration_pct: f64,
+    auto_buy_enabled: bool,
+    trailing_stop_enabled: bool,
+    trailing_stop_callback_pct: f64,
+    blacklist_creators_with_prior_rugs: bool,
 }
 
 impl Default for TradingSettings {
     fn default() -> Self {
         Self {
-            mode: "paper".into(),
-            stop_loss_enabled: true,
-            stop_loss_pct: 20.0,
-            take_profit_enabled: true,
-            take_profit_pct: 50.0,
-            advanced_exit_enabled: false,
-            trailing_stop_enabled: false,
-            trailing_stop_pct: 10.0,
             min_liquidity_usd: 5_000.0,
             max_entry_price_usd: 0.0,
-            paper_position_size_sol: 0.1,
-            max_open_positions: 3,
+            max_investment_per_token_sol: 0.1,
+            max_investment_per_token_usd: 0.0,
+            max_simultaneous_positions: 3,
             min_safety_score: 80,
             max_slippage_pct: 10.0,
+            stop_loss_pct: 20.0,
+            take_profit_pct: 50.0,
             min_5m_buy_volume_usd: 1_000.0,
-            max_top10_concentration_pct: 35.0,
-            automated_paper_buys: false,
-            blacklist_known_rug_creators: true,
+            max_top10_holder_concentration_pct: 35.0,
+            auto_buy_enabled: false,
+            trailing_stop_enabled: false,
+            trailing_stop_callback_pct: 10.0,
+            blacklist_creators_with_prior_rugs: true,
         }
     }
 }
@@ -104,38 +98,39 @@ impl Default for TradingSettings {
 impl TradingSettings {
     fn validate(&self) -> Result<(), String> {
         let finite_non_negative = [
-            ("stop_loss_pct", self.stop_loss_pct),
-            ("take_profit_pct", self.take_profit_pct),
-            ("trailing_stop_pct", self.trailing_stop_pct),
             ("min_liquidity_usd", self.min_liquidity_usd),
             ("max_entry_price_usd", self.max_entry_price_usd),
-            ("paper_position_size_sol", self.paper_position_size_sol),
+            ("max_investment_per_token_sol", self.max_investment_per_token_sol),
+            ("max_investment_per_token_usd", self.max_investment_per_token_usd),
             ("max_slippage_pct", self.max_slippage_pct),
+            ("stop_loss_pct", self.stop_loss_pct),
+            ("take_profit_pct", self.take_profit_pct),
             ("min_5m_buy_volume_usd", self.min_5m_buy_volume_usd),
-            ("max_top10_concentration_pct", self.max_top10_concentration_pct),
+            ("max_top10_holder_concentration_pct", self.max_top10_holder_concentration_pct),
+            ("trailing_stop_callback_pct", self.trailing_stop_callback_pct),
         ];
         for (name, value) in finite_non_negative {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!("{name} must be a finite, non-negative number."));
             }
         }
-        if self.mode != "paper" {
-            return Err("Real trading is not implemented or enabled. Only paper mode is accepted.".into());
+        if self.stop_loss_pct > 100.0 || self.trailing_stop_callback_pct > 100.0 {
+            return Err("Stop-loss and trailing-stop percentages must be between 0 and 100.".into());
         }
-        if self.stop_loss_pct > 100.0 || self.take_profit_pct > 1_000.0 || self.trailing_stop_pct > 100.0 {
-            return Err("Exit percentages are outside the supported range.".into());
+        if self.take_profit_pct > 1_000.0 {
+            return Err("take_profit_pct must not exceed 1000.".into());
         }
-        if self.max_slippage_pct > 100.0 || self.max_top10_concentration_pct > 100.0 {
+        if self.max_slippage_pct > 100.0 || self.max_top10_holder_concentration_pct > 100.0 {
             return Err("Slippage and top-10 concentration must be between 0 and 100.".into());
         }
         if self.min_safety_score > 100 {
             return Err("min_safety_score must be between 0 and 100.".into());
         }
-        if self.paper_position_size_sol <= 0.0 {
-            return Err("paper_position_size_sol must be greater than zero.".into());
+        if self.max_investment_per_token_sol <= 0.0 && self.max_investment_per_token_usd <= 0.0 {
+            return Err("Set a positive per-token paper position size in SOL or USD.".into());
         }
-        if self.max_open_positions == 0 || self.max_open_positions > 1_000 {
-            return Err("max_open_positions must be between 1 and 1000.".into());
+        if self.max_simultaneous_positions == 0 || self.max_simultaneous_positions > 1_000 {
+            return Err("max_simultaneous_positions must be between 1 and 1000.".into());
         }
         Ok(())
     }
