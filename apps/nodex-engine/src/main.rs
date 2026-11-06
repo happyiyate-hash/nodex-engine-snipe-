@@ -766,7 +766,9 @@ fn start_launch_processor(
                             {
                                 Ok(report) => {
                                     let decision = report.decision.clone();
-                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                    let _ = scan_events.send(
+                                        json!({"type":"token_scan_update","data":report.clone()}),
+                                    );
                                     match decision.as_str() {
                                         "APPROVED" => {
                                             let approved_state = approved_registry.upsert_patch(
@@ -774,16 +776,23 @@ fn start_launch_processor(
                                                 json!({"security":report}),
                                             );
                                             let approval_persisted = match approved_state {
-                                                Ok(snapshot) => match nodex_persistence::save_token_state(&approved_database, &snapshot).await {
-                                                    Ok(()) => true,
-                                                    Err(error) => {
-                                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                            "severity":"error","component":"token_approval_persistence",
-                                                            "message":error.to_string(),"mint_address":scan_mint
-                                                        }}));
-                                                        false
+                                                Ok(snapshot) => {
+                                                    match nodex_persistence::save_token_state(
+                                                        &approved_database,
+                                                        &snapshot,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(()) => true,
+                                                        Err(error) => {
+                                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                                "severity":"error","component":"token_approval_persistence",
+                                                                "message":error.to_string(),"mint_address":scan_mint
+                                                            }}));
+                                                            false
+                                                        }
                                                     }
-                                                },
+                                                }
                                                 Err(error) => {
                                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                                         "severity":"error","component":"token_approval_registry",
@@ -793,32 +802,32 @@ fn start_launch_processor(
                                                 }
                                             };
                                             if approval_persisted {
-                                            if let Some(monitor) = approved_monitor.as_ref() {
-                                                match monitor
-                                                    .subscribe_pump_fun_bonding_curve(
-                                                        &scan_mint,
-                                                        &approved_program_id,
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(account_address) => {
-                                                        let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
-                                                            "mint_address":scan_mint,
-                                                            "account_address":account_address,
-                                                            "venue":"pump_fun_bonding_curve",
-                                                            "status":"pending",
-                                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                                        }}));
-                                                    }
-                                                    Err(error) => {
-                                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                            "severity":"warning","component":"market_monitor_registration",
-                                                            "message":error.to_string(),"mint_address":scan_mint,
-                                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                                        }}));
+                                                if let Some(monitor) = approved_monitor.as_ref() {
+                                                    match monitor
+                                                        .subscribe_pump_fun_bonding_curve(
+                                                            &scan_mint,
+                                                            &approved_program_id,
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(account_address) => {
+                                                            let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
+                                                                "mint_address":scan_mint,
+                                                                "account_address":account_address,
+                                                                "venue":"pump_fun_bonding_curve",
+                                                                "status":"pending",
+                                                                "received_at":chrono::Utc::now().to_rfc3339()
+                                                            }}));
+                                                        }
+                                                        Err(error) => {
+                                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                                "severity":"warning","component":"market_monitor_registration",
+                                                                "message":error.to_string(),"mint_address":scan_mint,
+                                                                "received_at":chrono::Utc::now().to_rfc3339()
+                                                            }}));
+                                                        }
                                                     }
                                                 }
-                                            }
                                             }
                                         }
                                         "REJECTED" => {
@@ -851,7 +860,6 @@ fn start_launch_processor(
                                 }
                             }
                         });
-
 
                     }
                     Err(error) => {
