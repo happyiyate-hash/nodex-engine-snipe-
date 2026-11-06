@@ -824,7 +824,32 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
 /// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
 /// paper-trading funds and positions remain separate accounting domains.
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(state.profile.read().await.clone())
+    let mut profile = state.profile.read().await.clone();
+    let positions = match nodex_persistence::load_portfolio_positions(&state.database).await {
+        Ok(positions) => positions,
+        Err(error) => {
+            tracing::error!(%error, "Could not load portfolio positions for profile response");
+            Vec::new()
+        }
+    };
+    let open_positions: Vec<serde_json::Value> = positions.iter()
+        .filter(|position| position.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+        .cloned()
+        .collect();
+    let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
+        items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
+    };
+    let portfolio = json!({
+        "total_value_sol": sum_field(&open_positions, "current_value_sol"),
+        "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
+        "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
+        "positions": open_positions,
+        "position_count": open_positions.len()
+    });
+    if let Some(object) = profile.as_object_mut() {
+        object.insert("portfolio".into(), portfolio);
+    }
+    Json(profile)
 }
 
 async fn token_account_rent(
