@@ -97,6 +97,17 @@ impl SolanaRpc {
         }
     }
 
+    /// Read the confirmed native SOL balance for a public wallet address.
+    pub async fn get_balance_lamports(&self, address: &str) -> Result<u64> {
+        let response: Value = self
+            .call("getBalance", json!([address, {"commitment":"confirmed"}]))
+            .await?;
+        response
+            .get("value")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("getBalance response omitted lamport value"))
+    }
+
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
         let response = self
             .client
@@ -172,7 +183,8 @@ impl SolanaRpc {
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
     /// This is the first scanner stage; it deliberately cannot approve a token by itself.
     pub async fn scan_token_security(&self, mint: &str) -> Result<TokenSecurityReport> {
-        self.scan_token_security_with_progress(mint, |_, _, _| {}).await
+        self.scan_token_security_with_progress(mint, |_, _, _| {})
+            .await
     }
 
     /// Runs the security scan while reporting genuine stage transitions to the caller.
@@ -1343,7 +1355,11 @@ pub async fn run_logs_stream(
             let error_message = format!("{error:#}");
             warn!(error = %error_message, reconnect_count, "Solana WebSocket stream ended; reconnecting");
             status.write().await.last_error = Some(error_message.clone());
-            let stream_name = if program_id == PUMPSWAP_PROGRAM_ID { "pumpswap" } else { "pump_fun" };
+            let stream_name = if program_id == PUMPSWAP_PROGRAM_ID {
+                "pumpswap"
+            } else {
+                "pump_fun"
+            };
             let _ = sender.send(json!({
                 "type":"provider_status",
                 "data":{
@@ -1428,7 +1444,11 @@ async fn connect_and_subscribe(
         subscription_id,
         program_id, "Subscribed to Solana program logs"
     );
-    let stream_name = if program_id == PUMPSWAP_PROGRAM_ID { "pumpswap" } else { "pump_fun" };
+    let stream_name = if program_id == PUMPSWAP_PROGRAM_ID {
+        "pumpswap"
+    } else {
+        "pump_fun"
+    };
     let reconnect_count = status.read().await.reconnect_count;
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":true,"subscription_id":subscription_id,"reconnect_count":reconnect_count,"program_id":program_id,"received_at":chrono::Utc::now().to_rfc3339()}}));
 
@@ -1520,7 +1540,11 @@ async fn connect_and_subscribe(
         current.connected = false;
         current.subscription_id = None;
     }
-    let stream_name = if program_id == PUMPSWAP_PROGRAM_ID { "pumpswap" } else { "pump_fun" };
+    let stream_name = if program_id == PUMPSWAP_PROGRAM_ID {
+        "pumpswap"
+    } else {
+        "pump_fun"
+    };
     let reconnect_count = status.read().await.reconnect_count;
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":false,"reconnect_count":reconnect_count,"program_id":program_id,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())

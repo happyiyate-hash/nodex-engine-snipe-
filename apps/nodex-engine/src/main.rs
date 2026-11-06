@@ -10,7 +10,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
-use nodex_core::config::EngineConfig;
+use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
     decode_pump_fun_create, decode_pump_swap_activity_logs, decode_pump_swap_pool_account,
     derive_pump_swap_pool_address, run_logs_stream, start_market_monitor, MarketMonitor,
@@ -21,6 +21,8 @@ use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use nodex_trading::volume::{RollingTradeVolume, TradeSide, WindowVolumeMetrics};
 use serde::Serialize;
 use serde_json::json;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -43,6 +45,8 @@ struct AppState {
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
+    token_registry: TokenRegistry,
+    profile: Arc<RwLock<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +63,8 @@ enum ClientCommand {
     Start,
     SetMode { mode: String },
     Status,
+    SubscribeToken { mint: String },
+    UnsubscribeToken { mint: String },
 }
 
 #[derive(Serialize)]
@@ -299,6 +305,189 @@ fn start_pumpswap_activity_processor(
     });
 }
 
+/// Projects independent worker events into the canonical shared token state.
+/// Workers remain decoupled: they publish domain events and this projector updates
+/// only the matching domain of the token record.
+fn start_token_state_projector(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    database: sqlx::SqlitePool,
+    registry: TokenRegistry,
+    profile: Arc<RwLock<serde_json::Value>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(
+                        dropped_events = count,
+                        "Token state projector lagged; latest state may need reconciliation"
+                    );
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let Some(kind) = event.get("type").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(data) = event.get("data").cloned() else {
+                continue;
+            };
+            let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let domain_patch = match kind {
+                "token_scan_started" => json!({"security":{"status":"scanning"}}),
+                "token_scan_progress" => json!({"security":{
+                    "status":"scanning",
+                    "progress":data.get("progress").cloned().unwrap_or(serde_json::Value::Null),
+                    "stage":data.get("stage").cloned().unwrap_or(serde_json::Value::Null),
+                    "message":data.get("message").cloned().unwrap_or(serde_json::Value::Null)
+                }}),
+                "token_scan_update" => json!({"security":data}),
+                "creator_history_update" => {
+                    json!({"security":{"creator_history":data.get("history").cloned().unwrap_or(serde_json::Value::Null)}})
+                }
+                "market_price_update" => json!({"market":data}),
+                _ => continue,
+            };
+            match registry.upsert_patch(mint, domain_patch) {
+                Ok(snapshot) => {
+                    if let Err(error) =
+                        nodex_persistence::save_token_state(&database, &snapshot).await
+                    {
+                        tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
+                        continue;
+                    }
+                    let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                    if kind == "market_price_update" {
+                        if let Some(price_sol) =
+                            data.get("price_sol").and_then(serde_json::Value::as_f64)
+                        {
+                            match nodex_persistence::load_portfolio_positions(&database).await {
+                                Ok(mut positions) => {
+                                    for position in positions.iter_mut().filter(|position| {
+                                        position
+                                            .get("mint_address")
+                                            .and_then(serde_json::Value::as_str)
+                                            == Some(mint)
+                                            && position
+                                                .get("status")
+                                                .and_then(serde_json::Value::as_str)
+                                                == Some("open")
+                                    }) {
+                                        let quantity = position
+                                            .get("token_quantity")
+                                            .or_else(|| position.get("quantity"))
+                                            .and_then(serde_json::Value::as_f64)
+                                            .unwrap_or(0.0);
+                                        let cost_basis = position
+                                            .get("cost_basis_sol")
+                                            .or_else(|| position.get("invested_sol"))
+                                            .and_then(serde_json::Value::as_f64)
+                                            .unwrap_or(0.0);
+                                        let current_value = quantity * price_sol;
+                                        let pnl = current_value - cost_basis;
+                                        if let Some(object) = position.as_object_mut() {
+                                            object.insert(
+                                                "current_price_sol".into(),
+                                                json!(price_sol),
+                                            );
+                                            object.insert(
+                                                "current_value_sol".into(),
+                                                json!(current_value),
+                                            );
+                                            object.insert("unrealized_pnl_sol".into(), json!(pnl));
+                                            object.insert(
+                                                "unrealized_pnl_pct".into(),
+                                                json!(if cost_basis > 0.0 {
+                                                    pnl / cost_basis * 100.0
+                                                } else {
+                                                    0.0
+                                                }),
+                                            );
+                                            object.insert(
+                                                "marked_at".into(),
+                                                json!(chrono::Utc::now().to_rfc3339()),
+                                            );
+                                        }
+                                        if let Err(error) =
+                                            nodex_persistence::save_portfolio_position(
+                                                &database, mint, "open", position,
+                                            )
+                                            .await
+                                        {
+                                            tracing::error!(%error, mint_address = mint, "Could not persist marked portfolio position");
+                                        }
+                                    }
+                                    let refreshed =
+                                        match nodex_persistence::load_portfolio_positions(&database)
+                                            .await
+                                        {
+                                            Ok(items) => items,
+                                            Err(error) => {
+                                                tracing::error!(%error, "Could not reload marked portfolio positions");
+                                                Vec::new()
+                                            }
+                                        };
+                                    let open: Vec<serde_json::Value> = refreshed
+                                        .iter()
+                                        .filter(|item| {
+                                            item.get("status").and_then(serde_json::Value::as_str)
+                                                == Some("open")
+                                        })
+                                        .cloned()
+                                        .collect();
+                                    let sum = |items: &[serde_json::Value], field: &str| -> f64 {
+                                        items
+                                            .iter()
+                                            .filter_map(|item| {
+                                                item.get(field).and_then(serde_json::Value::as_f64)
+                                            })
+                                            .sum()
+                                    };
+                                    let position_count = open.len();
+                                    let portfolio = json!({
+                                        "total_value_sol": sum(&open, "current_value_sol"),
+                                        "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
+                                        "realized_pnl_sol": sum(&refreshed, "realized_pnl_sol"),
+                                        "positions": open,
+                                        "position_count": position_count
+                                    });
+                                    let mut current_profile = profile.write().await;
+                                    if let Some(object) = current_profile.as_object_mut() {
+                                        object.insert("portfolio".into(), portfolio);
+                                    }
+                                    let profile_snapshot = current_profile.clone();
+                                    drop(current_profile);
+                                    if let Err(error) = nodex_persistence::save_profile(
+                                        &database,
+                                        &profile_snapshot,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(%error, "Could not persist recalculated profile portfolio");
+                                    } else {
+                                        let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "Could not load portfolio positions for market mark")
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, mint_address = mint, "Could not update canonical token state")
+                }
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -307,6 +496,7 @@ fn start_launch_processor(
     pump_fun_program_id: String,
     control: Arc<RwLock<EngineControl>>,
     market_monitor: Option<MarketMonitor>,
+    token_registry: TokenRegistry,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     let concurrency = Arc::new(Semaphore::new(4));
@@ -366,6 +556,7 @@ fn start_launch_processor(
             let program_id = pump_fun_program_id.clone();
             let control = control.clone();
             let market_monitor = market_monitor.clone();
+            let token_registry = token_registry.clone();
             tokio::spawn(async move {
                 let _permit = match concurrency.acquire_owned().await {
                     Ok(permit) => permit,
@@ -441,6 +632,45 @@ fn start_launch_processor(
                     Ok(true) => {
                         let mint_address = launch.mint_address.clone();
                         let creator_address = launch.creator_address.clone();
+                        // Register the token immediately. Scanner and market workers
+                        // can now update independent domains of the same canonical record.
+                        let initial_state = token_registry.upsert_patch(
+                            &mint_address,
+                            json!({
+                                "identity": {"mint_address": mint_address.clone()},
+                                "discovery": {
+                                    "source": "pump_fun",
+                                    "creator_address": creator_address.clone(),
+                                    "signature": launch.signature.clone(),
+                                    "slot": launch.slot,
+                                    "detected_at": launch.detected_at.clone()
+                                },
+                                "security": {"status": "pending"},
+                                "market": {"status": "starting"}
+                            }),
+                        );
+                        match initial_state {
+                            Ok(snapshot) => {
+                                if let Err(error) =
+                                    nodex_persistence::save_token_state(&database, &snapshot).await
+                                {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"error","component":"token_state_persistence",
+                                        "message":error.to_string(),"mint_address":mint_address.clone(),
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
+                                }
+                                let _ = events
+                                    .send(json!({"type":"token_state_updated","data":snapshot}));
+                            }
+                            Err(error) => {
+                                let _ = events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"error","component":"token_registry",
+                                    "message":error,"mint_address":mint_address.clone(),
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
+                            }
+                        }
                         if let Some(monitor) = market_monitor.as_ref() {
                             match monitor
                                 .subscribe_pump_fun_bonding_curve(&mint_address, &program_id)
@@ -480,15 +710,23 @@ fn start_launch_processor(
                         tokio::spawn(async move {
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
-                            match scan_rpc.scan_token_security_with_progress(&scan_mint, move |stage, progress, message| {
-                                let _ = progress_events.send(json!({"type":"token_scan_progress","data":{
-                                    "mint_address":progress_mint,
-                                    "stage":stage,
-                                    "progress":progress,
-                                    "message":message,
-                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                }}));
-                            }).await {
+                            match scan_rpc
+                                .scan_token_security_with_progress(
+                                    &scan_mint,
+                                    move |stage, progress, message| {
+                                        let _ = progress_events.send(
+                                            json!({"type":"token_scan_progress","data":{
+                                                "mint_address":progress_mint,
+                                                "stage":stage,
+                                                "progress":progress,
+                                                "message":message,
+                                                "received_at":chrono::Utc::now().to_rfc3339()
+                                            }}),
+                                        );
+                                    },
+                                )
+                                .await
+                            {
                                 Ok(report) => {
                                     let _ = scan_events
                                         .send(json!({"type":"token_scan_update","data":report}));
@@ -657,6 +895,30 @@ async fn clear_token_and_event_history(
     })))
 }
 
+async fn token_state(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if let Some(snapshot) = state.token_registry.get(&mint) {
+        return Ok(Json(
+            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+        ));
+    }
+    match nodex_persistence::get_token_state(&state.database, &mint).await {
+        Ok(Some(snapshot)) => Ok(Json(
+            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+        )),
+        Ok(None) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Token state not found".to_string(),
+        )),
+        Err(error) => Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        )),
+    }
+}
+
 async fn recent_launches(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -718,6 +980,44 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
     Json(state.wallet.read().await.clone())
 }
 
+/// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
+/// paper-trading funds and positions remain separate accounting domains.
+async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let mut profile = state.profile.read().await.clone();
+    let positions = match nodex_persistence::load_portfolio_positions(&state.database).await {
+        Ok(positions) => positions,
+        Err(error) => {
+            tracing::error!(%error, "Could not load portfolio positions for profile response");
+            Vec::new()
+        }
+    };
+    let open_positions: Vec<serde_json::Value> = positions
+        .iter()
+        .filter(|position| {
+            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+        })
+        .cloned()
+        .collect();
+    let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
+        items
+            .iter()
+            .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
+            .sum()
+    };
+    let position_count = open_positions.len();
+    let portfolio = json!({
+        "total_value_sol": sum_field(&open_positions, "current_value_sol"),
+        "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
+        "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
+        "positions": open_positions,
+        "position_count": position_count
+    });
+    if let Some(object) = profile.as_object_mut() {
+        object.insert("portfolio".into(), portfolio);
+    }
+    Json(profile)
+}
+
 async fn token_account_rent(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -748,6 +1048,9 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("launch_detected")
             | Some("token_scan_started")
             | Some("token_scan_update")
+            | Some("token_scan_progress")
+            | Some("token_state_updated")
+            | Some("profile_updated")
             | Some("market_price_update")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
@@ -773,12 +1076,23 @@ async fn issue_ws_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let expected = state.admin_api_key.as_deref().filter(|key| !key.is_empty())
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebSocket ticket authentication is not configured.".to_string()))?;
-    let provided = headers.get("x-nodex-admin-key")
-        .and_then(|value| value.to_str().ok()).unwrap_or_default();
+    let expected = state
+        .admin_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebSocket ticket authentication is not configured.".to_string(),
+        ))?;
+    let provided = headers
+        .get("x-nodex-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
     if provided.is_empty() || provided != expected {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid or missing NodeX operator key.".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing NodeX operator key.".to_string(),
+        ));
     }
 
     let ticket = uuid::Uuid::new_v4().to_string();
@@ -799,22 +1113,34 @@ async fn ws_handler(
     Query(query): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let Some(ticket) = query.get("ticket").filter(|value| !value.is_empty()) else {
-        return (StatusCode::UNAUTHORIZED, "Missing WebSocket ticket.".to_string()).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Missing WebSocket ticket.".to_string(),
+        )
+            .into_response();
     };
     let valid = {
         let mut tickets = state.ws_tickets.lock().await;
-        tickets.remove(ticket).is_some_and(|expiry| expiry > Instant::now())
+        tickets
+            .remove(ticket)
+            .is_some_and(|expiry| expiry > Instant::now())
     };
     if !valid {
-        return (StatusCode::UNAUTHORIZED, "Invalid, expired, or already-used WebSocket ticket.".to_string()).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Invalid, expired, or already-used WebSocket ticket.".to_string(),
+        )
+            .into_response();
     }
-    ws.on_upgrade(move |socket| client_socket(socket, state)).into_response()
+    ws.on_upgrade(move |socket| client_socket(socket, state))
+        .into_response()
 }
 
 async fn client_socket(socket: WebSocket, state: AppState) {
     static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
     let (mut sender, mut receiver_socket) = socket.split();
     let mut receiver = state.events.subscribe();
+    let mut subscribed_tokens = HashSet::<String>::new();
     let status = state.stream_status.read().await.clone();
     let pumpswap_status = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
@@ -828,12 +1154,15 @@ async fn client_socket(socket: WebSocket, state: AppState) {
             let snapshot = json!({"type":"launch_snapshot","data":{
                 "launches":launches,
                 "received_at":chrono::Utc::now().to_rfc3339()
-            }}).to_string();
+            }})
+            .to_string();
             if sender.send(Message::Text(snapshot)).await.is_err() {
                 return;
             }
         }
-        Err(error) => tracing::warn!(%error, "Could not load recent launches for WebSocket snapshot"),
+        Err(error) => {
+            tracing::warn!(%error, "Could not load recent launches for WebSocket snapshot")
+        }
     }
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -853,7 +1182,39 @@ async fn client_socket(socket: WebSocket, state: AppState) {
             }
             event = receiver.recv() => match event {
                 Ok(mut value) => {
-                    if !is_frontend_event(&value) {
+                    let event_type = value.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+
+                    // Full token snapshots are delivered only to clients that explicitly
+                    // subscribed to that mint. They are never broadcast to every browser.
+                    if event_type == "token_state_updated" {
+                        let mint = value.pointer("/data/mint_address")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        if !subscribed_tokens.contains(mint) {
+                            continue;
+                        }
+                    } else if event_type == "market_price_update" {
+                        // The global stream receives only a compact market tick.
+                        let Some(data) = value.get("data").cloned() else { continue };
+                        let mint = data.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
+                        if mint.is_empty() { continue; }
+                        let snapshot = state.token_registry.get(mint);
+                        let identity = snapshot.as_ref().and_then(|item| item.data.get("identity"));
+                        value = json!({
+                            "type":"market_tick",
+                            "data":{
+                                "mint_address":mint,
+                                "name":identity.and_then(|v| v.get("name")).cloned().unwrap_or(serde_json::Value::Null),
+                                "symbol":identity.and_then(|v| v.get("symbol")).cloned().unwrap_or(serde_json::Value::Null),
+                                "price_sol":data.get("price_sol").cloned().unwrap_or(serde_json::Value::Null),
+                                "price_change_1m_pct":data.get("price_change_1m_pct").cloned().unwrap_or(serde_json::Value::Null),
+                                "price_change_5m_pct":data.get("price_change_5m_pct").cloned().unwrap_or(serde_json::Value::Null),
+                                "market_cap_sol":data.get("market_cap_sol").cloned().unwrap_or(serde_json::Value::Null),
+                                "timestamp":data.get("received_at").cloned().unwrap_or(serde_json::Value::Null),
+                                "version":snapshot.as_ref().map(|item| item.version)
+                            }
+                        });
+                    } else if !is_frontend_event(&value) {
                         continue;
                     }
                     let paused = state.control.read().await.paused;
@@ -921,6 +1282,39 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                             let control = state.control.read().await.clone();
                             Some(json!({"type":"engine_state","data":control}))
                         }
+                        Ok(ClientCommand::SubscribeToken { mint }) => {
+                            let mint = mint.trim().to_owned();
+                            if mint.is_empty() || mint.len() > 64 {
+                                Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"A valid token mint address is required."}}))
+                            } else {
+                                subscribed_tokens.insert(mint.clone());
+                                let snapshot = match state.token_registry.get(&mint) {
+                                    Some(snapshot) => Some(snapshot),
+                                    None => match nodex_persistence::get_token_state(&state.database, &mint).await {
+                                        Ok(snapshot) => snapshot,
+                                        Err(error) => {
+                                            tracing::warn!(%error, mint_address = mint, "Could not load token snapshot for WebSocket subscription");
+                                            None
+                                        }
+                                    }
+                                };
+                                match snapshot {
+                                    Some(snapshot) => Some(json!({
+                                        "type":"token_detail_snapshot",
+                                        "data":{"subscription":"active","mint_address":mint,"snapshot":snapshot}
+                                    })),
+                                    None => {
+                                        subscribed_tokens.remove(&mint);
+                                        Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"Token state was not found."}}))
+                                    }
+                                }
+                            }
+                        }
+                        Ok(ClientCommand::UnsubscribeToken { mint }) => {
+                            let mint = mint.trim().to_owned();
+                            subscribed_tokens.remove(&mint);
+                            Some(json!({"type":"token_unsubscribed","data":{"mint_address":mint}}))
+                        }
                         Err(error) => Some(json!({"type":"diagnostic","data":{"severity":"error","component":"websocket_command","message":error.to_string(),"received_at":chrono::Utc::now().to_rfc3339()}})),
                     };
                     if let Some(value) = result {
@@ -945,6 +1339,111 @@ async fn main() -> anyhow::Result<()> {
 
     let config = EngineConfig::from_env();
     let db = nodex_persistence::connect(&config.database_url).await?;
+    let token_registry = TokenRegistry::new();
+    for snapshot in nodex_persistence::load_token_states(&db).await? {
+        token_registry
+            .restore(snapshot)
+            .map_err(|error| anyhow::anyhow!(error))?;
+    }
+    tracing::info!(
+        restored_tokens = token_registry.len(),
+        "Restored canonical token state registry"
+    );
+    // The public wallet identity is derived from the configured private key.
+    // The secret is parsed only in memory and is never persisted or returned by the API.
+    let wallet_keypair = std::env::var("NODEX_WALLET_PRIVATE_KEY")
+        .ok()
+        .and_then(|raw| {
+            let trimmed = raw.trim();
+            let bytes = if trimmed.starts_with('[') {
+                serde_json::from_str::<Vec<u8>>(trimmed).ok()
+            } else {
+                bs58::decode(trimmed).into_vec().ok()
+            }?;
+            Keypair::try_from(bytes.as_slice()).ok()
+        });
+    let wallet_address = wallet_keypair
+        .as_ref()
+        .map(|keypair| keypair.pubkey().to_string());
+    if wallet_address.is_none() {
+        tracing::warn!("NODEX_WALLET_PRIVATE_KEY is missing or invalid; profile wallet address and live SOL balance are unavailable");
+    }
+    let mut profile = nodex_persistence::load_profile(&db).await?.unwrap_or_else(|| json!({
+        "profile": {
+            "wallet_address": wallet_address,
+            "name": std::env::var("NODEX_PROFILE_NAME").unwrap_or_else(|_| "NodeX".into()),
+            "symbol": "SOL",
+            "profile_url": "",
+            "profile_picture_url": ""
+        },
+        "wallet": {"sol_balance": 0.0, "last_updated": null},
+        "portfolio": {"total_value_sol": 0.0, "unrealized_pnl_sol": 0.0, "realized_pnl_sol": 0.0, "positions": []},
+        "existing_wallet": {"sol_balance": 0.0, "last_synced": null}
+    }));
+    if let Some(profile_obj) = profile
+        .get_mut("profile")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        profile_obj.insert("wallet_address".into(), json!(wallet_address));
+    }
+    nodex_persistence::save_profile(&db, &profile).await?;
+    let profile_state = Arc::new(RwLock::new(profile));
+    let (events, _) = broadcast::channel(8192);
+    if let (Some(rpc_client), Some(address)) = (
+        config.solana_http_url.clone().map(SolanaRpc::new),
+        wallet_address.clone(),
+    ) {
+        let profile_for_sync = profile_state.clone();
+        let database_for_sync = db.clone();
+        let events_for_sync = events.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match rpc_client.get_balance_lamports(&address).await {
+                    Ok(lamports) => {
+                        let balance_sol = lamports as f64 / LAMPORTS_PER_SOL as f64;
+                        let mut current = profile_for_sync.write().await;
+                        if let Some(wallet) = current
+                            .get_mut("wallet")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            wallet.insert("sol_balance".into(), json!(balance_sol));
+                            wallet.insert(
+                                "last_updated".into(),
+                                json!(chrono::Utc::now().to_rfc3339()),
+                            );
+                        }
+                        if let Some(existing) = current
+                            .get_mut("existing_wallet")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            existing.insert("sol_balance".into(), json!(balance_sol));
+                            existing.insert(
+                                "last_synced".into(),
+                                json!(chrono::Utc::now().to_rfc3339()),
+                            );
+                        }
+                        let snapshot = current.clone();
+                        drop(current);
+                        if let Err(error) =
+                            nodex_persistence::save_profile(&database_for_sync, &snapshot).await
+                        {
+                            tracing::error!(%error, "Could not persist synchronized wallet profile");
+                        } else {
+                            let _ = events_for_sync
+                                .send(json!({"type":"profile_updated","data":snapshot}));
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Could not synchronize Solana wallet balance")
+                    }
+                }
+            }
+        });
+    }
+
     let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
         Some(wallet) => wallet,
         None => {
@@ -954,7 +1453,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let (events, _) = broadcast::channel(8192);
+    // Keep canonical token state synchronized from independent worker events.
+    start_token_state_projector(
+        events.subscribe(),
+        events.clone(),
+        db.clone(),
+        token_registry.clone(),
+        profile_state.clone(),
+    );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
     let control = Arc::new(RwLock::new(EngineControl {
@@ -979,6 +1485,7 @@ async fn main() -> anyhow::Result<()> {
             config.pump_fun_program_id.clone(),
             control.clone(),
             market_monitor.clone(),
+            token_registry.clone(),
         );
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
@@ -1084,12 +1591,16 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|value| !value.trim().is_empty()),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
+        token_registry,
+        profile: profile_state,
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
         .route("/api/v1/paper-wallet", get(paper_wallet))
+        .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
+        .route("/api/v1/tokens/:mint/state", get(token_state))
         .route("/api/v1/events/recent", get(recent_events))
         .route(
             "/api/v1/admin/maintenance/clear-history",
