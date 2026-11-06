@@ -1,3 +1,4 @@
+mod chart_service;
 mod token_details;
 
 use axum::{
@@ -1084,6 +1085,8 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_progress")
             | Some("token_state_updated")
             | Some("token_market_update")
+            | Some("chart_candle_update")
+            | Some("chart_candle_closed")
             | Some("profile_updated")
             | Some("wallet_balance_updated")
             | Some("position_updated")
@@ -1344,11 +1347,25 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                                                 Vec::new()
                                             }
                                         };
-                                        let details = token_details::build_token_detail_snapshot(
+                                        let mut details = token_details::build_token_detail_snapshot(
                                             &mint,
                                             Some(&snapshot),
                                             &positions,
                                         );
+                                        let candles = match nodex_persistence::load_chart_candles(
+                                            &state.database, &mint, "5m", 500,
+                                        ).await {
+                                            Ok(items) => items,
+                                            Err(error) => {
+                                                tracing::warn!(%error, mint_address = mint, "Could not load persisted chart candles");
+                                                Vec::new()
+                                            }
+                                        };
+                                        if let Some(chart) = details.get_mut("chart").and_then(serde_json::Value::as_object_mut) {
+                                            chart.insert("timeframe".into(), json!("5m"));
+                                            chart.insert("candles".into(), json!(candles));
+                                            chart.insert("status".into(), json!(if chart.get("candles").and_then(serde_json::Value::as_array).is_some_and(|items| !items.is_empty()) { "ready" } else { "warming_up" }));
+                                        }
                                         Some(json!({
                                             "type":"token_detail_snapshot",
                                             "data":{
@@ -1444,6 +1461,7 @@ async fn main() -> anyhow::Result<()> {
     nodex_persistence::save_profile(&db, &profile).await?;
     let profile_state = Arc::new(RwLock::new(profile));
     let (events, _) = broadcast::channel(8192);
+    chart_service::start_chart_service(events.subscribe(), events.clone(), db.clone());
     if let (Some(rpc_client), Some(address)) = (
         config.solana_http_url.clone().map(SolanaRpc::new),
         wallet_address.clone(),
