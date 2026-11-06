@@ -723,6 +723,8 @@ fn start_launch_processor(
                         let scan_mint = mint_address.clone();
                         let approved_monitor = market_monitor.clone();
                         let approved_program_id = program_id.clone();
+                        let approved_registry = token_registry.clone();
+                        let approved_database = database.clone();
                         tokio::spawn(async move {
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
@@ -745,9 +747,33 @@ fn start_launch_processor(
                             {
                                 Ok(report) => {
                                     let decision = report.decision.clone();
-                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report}));
+                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
                                     match decision.as_str() {
                                         "APPROVED" => {
+                                            let approved_state = approved_registry.upsert_patch(
+                                                &scan_mint,
+                                                json!({"security":report}),
+                                            );
+                                            let approval_persisted = match approved_state {
+                                                Ok(snapshot) => match nodex_persistence::save_token_state(&approved_database, &snapshot).await {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
+                                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                            "severity":"error","component":"token_approval_persistence",
+                                                            "message":error.to_string(),"mint_address":scan_mint
+                                                        }}));
+                                                        false
+                                                    }
+                                                },
+                                                Err(error) => {
+                                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                        "severity":"error","component":"token_approval_registry",
+                                                        "message":error,"mint_address":scan_mint
+                                                    }}));
+                                                    false
+                                                }
+                                            };
+                                            if approval_persisted {
                                             if let Some(monitor) = approved_monitor.as_ref() {
                                                 match monitor.subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id).await {
                                                     Ok(account_address) => {
@@ -767,6 +793,7 @@ fn start_launch_processor(
                                                         }}));
                                                     }
                                                 }
+                                            }
                                             }
                                         }
                                         "REJECTED" => {
