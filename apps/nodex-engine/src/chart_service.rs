@@ -101,8 +101,11 @@ pub fn start_chart_service(
                 continue;
             };
             let approved = registry.get(mint).is_some_and(|state| {
-                state.data.pointer("/security/decision")
-                    .and_then(Value::as_str) == Some("APPROVED")
+                state
+                    .data
+                    .pointer("/security/decision")
+                    .and_then(Value::as_str)
+                    == Some("APPROVED")
             });
             if !approved {
                 continue;
@@ -224,11 +227,7 @@ pub fn start_chart_service(
                             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5));
                     if should_persist {
                         if let Err(error) = nodex_persistence::save_chart_candle(
-                            &database,
-                            mint,
-                            timeframe,
-                            open_time,
-                            &payload,
+                            &database, mint, timeframe, open_time, &payload,
                         )
                         .await
                         {
