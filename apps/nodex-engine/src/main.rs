@@ -1057,7 +1057,6 @@ fn is_token_detail_event(event_type: &str) -> bool {
             | "chart_candle_update"
             | "chart_candle_closed"
             | "position_updated"
-            | "portfolio_summary_updated"
     )
 }
 
@@ -1349,6 +1348,49 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                                             "reason":format!("Could not assemble token snapshot: {error}")
                                         }}))
                                     }
+                                }
+                            }
+                        }
+                        Ok(ClientCommand::SetChartTimeframe { mint, timeframe }) => {
+                            let mint = mint.trim().to_owned();
+                            let timeframe = timeframe.trim().to_owned();
+                            let valid_timeframe = matches!(
+                                timeframe.as_str(),
+                                "1m" | "5m" | "15m" | "1h" | "24h"
+                            );
+                            let approved = state.token_registry.get(&mint).is_some_and(|snapshot| {
+                                snapshot.data.pointer("/security/decision")
+                                    .and_then(serde_json::Value::as_str) == Some("APPROVED")
+                            });
+                            if !valid_timeframe || !subscribed_tokens.contains(&mint) || !approved {
+                                Some(json!({"type":"command_rejected","data":{
+                                    "command":"set_chart_timeframe",
+                                    "mint_address":mint,
+                                    "timeframe":timeframe,
+                                    "reason":"Subscribe to an approved token and request a supported chart timeframe."
+                                }}))
+                            } else {
+                                match nodex_persistence::load_chart_candles(
+                                    &state.database,
+                                    &mint,
+                                    &timeframe,
+                                    2_000,
+                                ).await {
+                                    Ok(candles) => Some(json!({
+                                        "type":"chart_history_snapshot",
+                                        "data":{
+                                            "mint_address":mint,
+                                            "timeframe":timeframe,
+                                            "candles":candles,
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }
+                                    })),
+                                    Err(error) => Some(json!({"type":"command_rejected","data":{
+                                        "command":"set_chart_timeframe",
+                                        "mint_address":mint,
+                                        "timeframe":timeframe,
+                                        "reason":format!("Could not load chart history: {error}")
+                                    }}))
                                 }
                             }
                         }
