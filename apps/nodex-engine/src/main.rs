@@ -467,7 +467,7 @@ fn start_token_state_projector(
                                     });
                                     let mut current_profile = profile.write().await;
                                     if let Some(object) = current_profile.as_object_mut() {
-                                        object.insert("portfolio".into(), portfolio);
+                                        object.insert("portfolio".into(), portfolio.clone());
                                     }
                                     let profile_snapshot = current_profile.clone();
                                     drop(current_profile);
