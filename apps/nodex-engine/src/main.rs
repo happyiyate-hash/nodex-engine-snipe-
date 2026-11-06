@@ -930,12 +930,22 @@ async fn token_state(
     Path(mint): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     if let Some(snapshot) = state.token_registry.get(&mint) {
-        return Ok(Json(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}))));
+        return Ok(Json(
+            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+        ));
     }
     match nodex_persistence::get_token_state(&state.database, &mint).await {
-        Ok(Some(snapshot)) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})))),
-        Ok(None) => Err((axum::http::StatusCode::NOT_FOUND, "Token state not found".to_string())),
-        Err(error) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string())),
+        Ok(Some(snapshot)) => Ok(Json(
+            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+        )),
+        Ok(None) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Token state not found".to_string(),
+        )),
+        Err(error) => Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        )),
     }
 }
 
