@@ -601,6 +601,8 @@ fn start_launch_processor(
                         "message":message,"signature":signature,"slot_hint":slot_hint,
                         "retry_exhausted":true,"received_at":chrono::Utc::now().to_rfc3339()
                     }}));
+                    // Allow reconnect/backfill to retry transactions that RPC could not return.
+                    seen_signatures.lock().await.remove(&signature);
                     return;
                 };
                 let decoded = match decode_pump_fun_create(&transaction, &signature, &program_id) {
