@@ -889,6 +889,79 @@ fn start_launch_processor(
             }
         });
     }
+
+    // The producer owns the Solana notification stream. It validates the program tag,
+    // extracts the confirmed transaction signature/slot, deduplicates, then hands work
+    // to the bounded decoder queue. RPC decoding stays in the worker pool above.
+    tokio::spawn(async move {
+        loop {
+            let notification = match receiver.recv().await {
+                Ok(value) => value,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    let _ = events.send(json!({"type":"diagnostic","data":{
+                        "severity":"warning",
+                        "component":"pump_fun_launch_queue",
+                        "message":"Launch notification consumer lagged; stream backfill may replay missed signatures.",
+                        "dropped_notifications":count,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+
+            if notification.get("method").and_then(serde_json::Value::as_str)
+                != Some("logsNotification")
+                || notification.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                    != Some(pump_fun_program_id.as_str())
+                || control.read().await.paused
+            {
+                continue;
+            }
+
+            let Some(value) = notification.pointer("/params/result/value") else {
+                continue;
+            };
+            if !value.get("err").is_some_and(serde_json::Value::is_null) {
+                continue;
+            }
+            let Some(signature) = value.get("signature")
+                .and_then(serde_json::Value::as_str)
+                .filter(|signature| !signature.is_empty())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let slot = notification.pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+
+            {
+                let mut seen = seen_signatures.lock().await;
+                if !seen.insert(signature.clone()) {
+                    continue;
+                }
+                if seen.len() > 20_000 {
+                    // Keep this bounded without retaining an unbounded process-lifetime set.
+                    seen.clear();
+                    seen.insert(signature.clone());
+                }
+            }
+
+            if let Err(error) = work_tx.try_send((signature.clone(), slot)) {
+                // Do not permanently suppress a signature that could not enter the queue.
+                seen_signatures.lock().await.remove(&signature);
+                let _ = events.send(json!({"type":"diagnostic","data":{
+                    "severity":"warning",
+                    "component":"pump_fun_launch_queue",
+                    "message":format!("Could not enqueue launch transaction: {error}"),
+                    "signature":signature,
+                    "queue_capacity":LAUNCH_QUEUE_CAPACITY,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }}));
+            }
+        }
+    });
 }
 
 async fn build_approved_token_detail_snapshot(
