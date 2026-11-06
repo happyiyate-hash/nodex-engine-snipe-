@@ -312,6 +312,7 @@ fn start_token_state_projector(
     events: broadcast::Sender<serde_json::Value>,
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
+    profile: Arc<RwLock<serde_json::Value>>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -346,6 +347,71 @@ fn start_token_state_projector(
                         continue;
                     }
                     let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                    if kind == "market_price_update" {
+                        if let Some(price_sol) = data.get("price_sol").and_then(serde_json::Value::as_f64) {
+                            match nodex_persistence::load_portfolio_positions(&database).await {
+                                Ok(mut positions) => {
+                                    for position in positions.iter_mut().filter(|position|
+                                        position.get("mint_address").and_then(serde_json::Value::as_str) == Some(mint)
+                                        && position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                                    ) {
+                                        let quantity = position.get("token_quantity")
+                                            .or_else(|| position.get("quantity"))
+                                            .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                        let cost_basis = position.get("cost_basis_sol")
+                                            .or_else(|| position.get("invested_sol"))
+                                            .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                        let current_value = quantity * price_sol;
+                                        let pnl = current_value - cost_basis;
+                                        if let Some(object) = position.as_object_mut() {
+                                            object.insert("current_price_sol".into(), json!(price_sol));
+                                            object.insert("current_value_sol".into(), json!(current_value));
+                                            object.insert("unrealized_pnl_sol".into(), json!(pnl));
+                                            object.insert("unrealized_pnl_pct".into(), json!(if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 }));
+                                            object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+                                        }
+                                        if let Err(error) = nodex_persistence::save_portfolio_position(
+                                            &database, mint, "open", position
+                                        ).await {
+                                            tracing::error!(%error, mint_address = mint, "Could not persist marked portfolio position");
+                                        }
+                                    }
+                                    let refreshed = match nodex_persistence::load_portfolio_positions(&database).await {
+                                        Ok(items) => items,
+                                        Err(error) => {
+                                            tracing::error!(%error, "Could not reload marked portfolio positions");
+                                            Vec::new()
+                                        }
+                                    };
+                                    let open: Vec<serde_json::Value> = refreshed.iter()
+                                        .filter(|item| item.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+                                        .cloned().collect();
+                                    let sum = |items: &[serde_json::Value], field: &str| -> f64 {
+                                        items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
+                                    };
+                                    let portfolio = json!({
+                                        "total_value_sol": sum(&open, "current_value_sol"),
+                                        "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
+                                        "realized_pnl_sol": sum(&refreshed, "realized_pnl_sol"),
+                                        "positions": open,
+                                        "position_count": open.len()
+                                    });
+                                    let mut current_profile = profile.write().await;
+                                    if let Some(object) = current_profile.as_object_mut() {
+                                        object.insert("portfolio".into(), portfolio);
+                                    }
+                                    let profile_snapshot = current_profile.clone();
+                                    drop(current_profile);
+                                    if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await {
+                                        tracing::error!(%error, "Could not persist recalculated profile portfolio");
+                                    } else {
+                                        let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                                    }
+                                }
+                                Err(error) => tracing::error!(%error, "Could not load portfolio positions for market mark"),
+                            }
+                        }
+                    }
                 }
                 Err(error) => tracing::error!(%error, mint_address = mint, "Could not update canonical token state"),
             }
@@ -1236,6 +1302,7 @@ async fn main() -> anyhow::Result<()> {
         events.clone(),
         db.clone(),
         token_registry.clone(),
+        profile_state.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
