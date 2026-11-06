@@ -389,12 +389,13 @@ fn start_token_state_projector(
                                     let sum = |items: &[serde_json::Value], field: &str| -> f64 {
                                         items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
                                     };
+                                    let position_count = open.len();
                                     let portfolio = json!({
                                         "total_value_sol": sum(&open, "current_value_sol"),
                                         "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
                                         "realized_pnl_sol": sum(&refreshed, "realized_pnl_sol"),
                                         "positions": open,
-                                        "position_count": open.len()
+                                        "position_count": position_count
                                     });
                                     let mut current_profile = profile.write().await;
                                     if let Some(object) = current_profile.as_object_mut() {
@@ -905,12 +906,13 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
         items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
     };
+    let position_count = open_positions.len();
     let portfolio = json!({
         "total_value_sol": sum_field(&open_positions, "current_value_sol"),
         "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
         "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
         "positions": open_positions,
-        "position_count": open_positions.len()
+        "position_count": position_count
     });
     if let Some(object) = profile.as_object_mut() {
         object.insert("portfolio".into(), portfolio);
