@@ -10,7 +10,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
-use nodex_core::config::EngineConfig;
+use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
     decode_pump_fun_create, decode_pump_swap_activity_logs, decode_pump_swap_pool_account,
     derive_pump_swap_pool_address, run_logs_stream, start_market_monitor, MarketMonitor,
@@ -43,6 +43,7 @@ struct AppState {
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
+    token_registry: TokenRegistry,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,6 +308,7 @@ fn start_launch_processor(
     pump_fun_program_id: String,
     control: Arc<RwLock<EngineControl>>,
     market_monitor: Option<MarketMonitor>,
+    token_registry: TokenRegistry,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     let concurrency = Arc::new(Semaphore::new(4));
@@ -366,6 +368,7 @@ fn start_launch_processor(
             let program_id = pump_fun_program_id.clone();
             let control = control.clone();
             let market_monitor = market_monitor.clone();
+            let token_registry = token_registry.clone();
             tokio::spawn(async move {
                 let _permit = match concurrency.acquire_owned().await {
                     Ok(permit) => permit,
@@ -441,6 +444,39 @@ fn start_launch_processor(
                     Ok(true) => {
                         let mint_address = launch.mint_address.clone();
                         let creator_address = launch.creator_address.clone();
+                        // Register the token immediately. Scanner and market workers
+                        // can now update independent domains of the same canonical record.
+                        let initial_state = token_registry.upsert_patch(&mint_address, json!({
+                            "identity": {"mint_address": mint_address},
+                            "discovery": {
+                                "source": "pump_fun",
+                                "creator_address": creator_address,
+                                "signature": launch.signature,
+                                "slot": launch.slot,
+                                "detected_at": launch.detected_at
+                            },
+                            "security": {"status": "pending"},
+                            "market": {"status": "starting"}
+                        }));
+                        match initial_state {
+                            Ok(snapshot) => {
+                                if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                                    let _ = events.send(json!({"type":"diagnostic","data":{
+                                        "severity":"error","component":"token_state_persistence",
+                                        "message":error.to_string(),"mint_address":mint_address,
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
+                                }
+                                let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                            }
+                            Err(error) => {
+                                let _ = events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"error","component":"token_registry",
+                                    "message":error,"mint_address":mint_address,
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
+                            }
+                        }
                         if let Some(monitor) = market_monitor.as_ref() {
                             match monitor
                                 .subscribe_pump_fun_bonding_curve(&mint_address, &program_id)
@@ -655,6 +691,20 @@ async fn clear_token_and_event_history(
             "source code, API keys, and environment configuration"
         ]
     })))
+}
+
+async fn token_state(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if let Some(snapshot) = state.token_registry.get(&mint) {
+        return Ok(Json(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}))));
+    }
+    match nodex_persistence::get_token_state(&state.database, &mint).await {
+        Ok(Some(snapshot)) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})))),
+        Ok(None) => Err((axum::http::StatusCode::NOT_FOUND, "Token state not found".to_string())),
+        Err(error) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string())),
+    }
 }
 
 async fn recent_launches(
@@ -945,6 +995,11 @@ async fn main() -> anyhow::Result<()> {
 
     let config = EngineConfig::from_env();
     let db = nodex_persistence::connect(&config.database_url).await?;
+    let token_registry = TokenRegistry::new();
+    for snapshot in nodex_persistence::load_token_states(&db).await? {
+        token_registry.restore(snapshot).map_err(|error| anyhow::anyhow!(error))?;
+    }
+    tracing::info!(restored_tokens = token_registry.len(), "Restored canonical token state registry");
     let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
         Some(wallet) => wallet,
         None => {
@@ -979,6 +1034,7 @@ async fn main() -> anyhow::Result<()> {
             config.pump_fun_program_id.clone(),
             control.clone(),
             market_monitor.clone(),
+            token_registry.clone(),
         );
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
@@ -1084,12 +1140,14 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|value| !value.trim().is_empty()),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
+        token_registry,
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/tokens/recent", get(recent_launches))
+        .route("/api/v1/tokens/:mint/state", get(token_state))
         .route("/api/v1/events/recent", get(recent_events))
         .route(
             "/api/v1/admin/maintenance/clear-history",
