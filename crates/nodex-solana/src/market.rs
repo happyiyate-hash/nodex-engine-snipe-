@@ -820,10 +820,12 @@ async fn connect_market_stream(
                                         program_id: expected_program.to_owned(),
                                         expected_mint,
                                     };
+                                    // Persist intent before writing to the socket. If the write fails,
+                                    // reconnect will replay this desired subscription.
+                                    desired.insert(account.clone(), child.clone());
                                     let request_id = next_request_id;
                                     next_request_id = next_request_id.saturating_add(1);
                                     send_account_subscribe(&mut sink, request_id, &account).await?;
-                                    desired.insert(account, child.clone());
                                     pending.insert(request_id, child);
                                 }
                             } else {
@@ -1044,10 +1046,12 @@ async fn connect_market_stream(
                                             program_id: PUMP_SWAP_PROGRAM_ID.to_owned(),
                                             expected_mint: None,
                                         };
+                                        // Keep the pool in desired state before the socket write so
+                                        // a reconnect can retry if the write fails.
+                                        desired.insert(pool_address.clone(), pool_subscription.clone());
                                         let request_id = next_request_id;
                                         next_request_id = next_request_id.saturating_add(1);
                                         send_account_subscribe(&mut sink, request_id, &pool_address).await?;
-                                        desired.insert(pool_address.clone(), pool_subscription.clone());
                                         pending.insert(request_id, pool_subscription);
                                         let _ = events.send(json!({"type":"market_pool_discovery","data":{
                                             "mint_address":subscription.mint,"pool_address":pool_address,
