@@ -264,6 +264,28 @@ pub async fn load_token_states(pool: &SqlitePool) -> Result<Vec<TokenState>> {
 }
 
 /// Load one token's latest canonical snapshot.
+/// Delete rejected token state from local storage.
+pub async fn delete_token_state(pool: &SqlitePool, mint: &str) -> Result<()> {
+    sqlx::query("DELETE FROM token_states WHERE mint_address = ?")
+        .bind(mint)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM chart_candles WHERE mint_address = ?")
+        .bind(mint)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Delete launch-history rows for a rejected token.
+pub async fn delete_token_launches(pool: &SqlitePool, mint: &str) -> Result<()> {
+    sqlx::query("DELETE FROM token_launches WHERE mint_address = ?")
+        .bind(mint)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn get_token_state(pool: &SqlitePool, mint: &str) -> Result<Option<TokenState>> {
     let payload = sqlx::query_scalar::<_, String>(
         "SELECT payload_json FROM token_states WHERE mint_address = ?",
