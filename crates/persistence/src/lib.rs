@@ -92,10 +92,13 @@ pub async fn save_profile(pool: &SqlitePool, profile: &serde_json::Value) -> Res
 }
 
 pub async fn load_profile(pool: &SqlitePool) -> Result<Option<serde_json::Value>> {
-    let payload = sqlx::query_scalar::<_, String>(
-        "SELECT payload_json FROM profiles WHERE id='default'",
-    ).fetch_optional(pool).await?;
-    payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    let payload =
+        sqlx::query_scalar::<_, String>("SELECT payload_json FROM profiles WHERE id='default'")
+            .fetch_optional(pool)
+            .await?;
+    payload
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
 }
 
 /// Store a paper position snapshot keyed by the canonical token mint.
@@ -125,16 +128,20 @@ pub async fn save_portfolio_position(
 pub async fn load_portfolio_positions(pool: &SqlitePool) -> Result<Vec<serde_json::Value>> {
     let rows = sqlx::query(
         "SELECT status, payload_json FROM portfolio_positions ORDER BY updated_at DESC",
-    ).fetch_all(pool).await?;
-    rows.into_iter().map(|row| {
-        let status: String = row.get("status");
-        let payload: String = row.get("payload_json");
-        let mut value: serde_json::Value = serde_json::from_str(&payload)?;
-        if let Some(object) = value.as_object_mut() {
-            object.insert("status".into(), serde_json::Value::String(status));
-        }
-        Ok(value)
-    }).collect()
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let status: String = row.get("status");
+            let payload: String = row.get("payload_json");
+            let mut value: serde_json::Value = serde_json::from_str(&payload)?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("status".into(), serde_json::Value::String(status));
+            }
+            Ok(value)
+        })
+        .collect()
 }
 
 pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool> {
@@ -199,7 +206,9 @@ pub async fn get_token_state(pool: &SqlitePool, mint: &str) -> Result<Option<Tok
     .bind(mint)
     .fetch_optional(pool)
     .await?;
-    payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    payload
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
 }
 
 pub async fn save_raw_solana_event(pool: &SqlitePool, event: &serde_json::Value) -> Result<()> {
@@ -208,10 +217,7 @@ pub async fn save_raw_solana_event(pool: &SqlitePool, event: &serde_json::Value)
 
 /// Persist a bounded batch in one SQLite transaction to reduce per-notification
 /// commit overhead when Solana launch and activity streams are busy.
-pub async fn save_raw_solana_events(
-    pool: &SqlitePool,
-    events: &[serde_json::Value],
-) -> Result<()> {
+pub async fn save_raw_solana_events(pool: &SqlitePool, events: &[serde_json::Value]) -> Result<()> {
     if events.is_empty() {
         return Ok(());
     }
