@@ -191,6 +191,31 @@ where
         .context("sending Solana accountUnsubscribe request")
 }
 
+fn reserve_desired_subscriptions(
+    subscriptions: Vec<MarketSubscription>,
+    desired: &mut HashMap<String, MarketSubscription>,
+) -> Option<Vec<MarketSubscription>> {
+    let mut seen = HashSet::new();
+    let missing = subscriptions
+        .into_iter()
+        .filter(|subscription| {
+            !desired.contains_key(&subscription.account)
+                && seen.insert(subscription.account.clone())
+        })
+        .collect::<Vec<_>>();
+
+    if missing.len() > MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len()) {
+        return None;
+    }
+
+    // Reserve the entire batch before any socket write. If a write fails,
+    // reconnect can replay every child account instead of a partial set.
+    for subscription in &missing {
+        desired.insert(subscription.account.clone(), subscription.clone());
+    }
+    Some(missing)
+}
+
 fn remove_mint_subscriptions(
     mint: &str,
     desired: &mut HashMap<String, MarketSubscription>,
@@ -784,48 +809,50 @@ async fn connect_market_stream(
                                 state.quote_reserves = existing.quote_reserves;
                             }
                             pumpswap_states.insert(subscription.mint.clone(), state);
-                            let required = [
-                                (
-                                    "spl_mint",
-                                    subscription.mint.clone(),
-                                    None,
-                                    "spl_token_program",
-                                ),
-                                (
-                                    "pump_swap_base_vault",
-                                    pool.pool_base_token_account.clone(),
-                                    Some(pool.base_mint.clone()),
-                                    "spl_token_program",
-                                ),
-                                (
-                                    "pump_swap_quote_vault",
-                                    pool.pool_quote_token_account.clone(),
-                                    Some(pool.quote_mint.clone()),
-                                    SPL_TOKEN_PROGRAM_ID,
-                                ),
+                            let required = vec![
+                                MarketSubscription {
+                                    mint: subscription.mint.clone(),
+                                    account: subscription.mint.clone(),
+                                    venue: "spl_mint",
+                                    program_id: "spl_token_program".to_owned(),
+                                    expected_mint: None,
+                                },
+                                MarketSubscription {
+                                    mint: subscription.mint.clone(),
+                                    account: pool.pool_base_token_account.clone(),
+                                    venue: "pump_swap_base_vault",
+                                    program_id: "spl_token_program".to_owned(),
+                                    expected_mint: Some(pool.base_mint.clone()),
+                                },
+                                MarketSubscription {
+                                    mint: subscription.mint.clone(),
+                                    account: pool.pool_quote_token_account.clone(),
+                                    venue: "pump_swap_quote_vault",
+                                    program_id: SPL_TOKEN_PROGRAM_ID.to_owned(),
+                                    expected_mint: Some(pool.quote_mint.clone()),
+                                },
                             ];
-                            let missing = required
-                                .into_iter()
-                                .filter(|(_, account, _, _)| !desired.contains_key(account))
-                                .collect::<Vec<_>>();
-                            let missing_count = missing.len();
+                            let missing_count = required
+                                .iter()
+                                .filter(|item| !desired.contains_key(&item.account))
+                                .count();
                             let remaining_capacity =
                                 MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len());
-                            if missing_count <= remaining_capacity {
-                                for (venue, account, expected_mint, expected_program) in missing {
-                                    let child = MarketSubscription {
-                                        mint: subscription.mint.clone(),
-                                        account: account.clone(),
-                                        venue,
-                                        program_id: expected_program.to_owned(),
-                                        expected_mint,
-                                    };
-                                    // Persist intent before writing to the socket. If the write fails,
-                                    // reconnect will replay this desired subscription.
-                                    desired.insert(account.clone(), child.clone());
+                            if let Some(children) =
+                                reserve_desired_subscriptions(required, desired)
+                            {
+                                // All child intents are now durable across reconnects.
+                                // A failed write drops this connection, and the next one
+                                // replays the complete batch from desired.
+                                for child in children {
                                     let request_id = next_request_id;
                                     next_request_id = next_request_id.saturating_add(1);
-                                    send_account_subscribe(&mut sink, request_id, &account).await?;
+                                    send_account_subscribe(
+                                        &mut sink,
+                                        request_id,
+                                        &child.account,
+                                    )
+                                    .await?;
                                     pending.insert(request_id, child);
                                 }
                             } else {
@@ -1274,6 +1301,67 @@ mod market_monitor_tests {
         data.extend_from_slice(&[9_u8; 32]);
         data.extend_from_slice(&[0_u8; 128]);
         data
+    }
+
+    #[test]
+    fn reserves_pumpswap_child_subscriptions_as_an_atomic_batch() {
+        let subscription = |mint: &str, account: &str| MarketSubscription {
+            mint: mint.to_owned(),
+            account: account.to_owned(),
+            venue: "pump_swap_base_vault",
+            program_id: "spl_token_program".to_owned(),
+            expected_mint: None,
+        };
+        let mut desired = HashMap::from([(
+            "already-present".to_owned(),
+            subscription("mint-a", "already-present"),
+        )]);
+
+        let reserved = reserve_desired_subscriptions(
+            vec![
+                subscription("mint-a", "already-present"),
+                subscription("mint-a", "new-base"),
+                subscription("mint-a", "new-quote"),
+            ],
+            &mut desired,
+        )
+        .expect("batch fits remaining capacity");
+
+        assert_eq!(reserved.len(), 2);
+        assert!(desired.contains_key("new-base"));
+        assert!(desired.contains_key("new-quote"));
+        assert_eq!(desired.len(), 3);
+    }
+
+    #[test]
+    fn rejects_oversized_subscription_batch_without_partial_reservation() {
+        let subscription = |mint: &str, account: String| MarketSubscription {
+            mint: mint.to_owned(),
+            account,
+            venue: "pump_swap_base_vault",
+            program_id: "spl_token_program".to_owned(),
+            expected_mint: None,
+        };
+        let mut desired = (0..MAX_MARKET_SUBSCRIPTIONS - 1)
+            .map(|index| {
+                let account = format!("existing-{index}");
+                (account.clone(), subscription("other-mint", account))
+            })
+            .collect::<HashMap<_, _>>();
+        let before = desired.len();
+
+        let result = reserve_desired_subscriptions(
+            vec![
+                subscription("mint-a", "new-base".to_owned()),
+                subscription("mint-a", "new-quote".to_owned()),
+            ],
+            &mut desired,
+        );
+
+        assert!(result.is_none());
+        assert_eq!(desired.len(), before);
+        assert!(!desired.contains_key("new-base"));
+        assert!(!desired.contains_key("new-quote"));
     }
 
     #[test]
