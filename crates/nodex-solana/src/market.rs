@@ -968,6 +968,7 @@ async fn connect_market_stream(
                                             "price_change_1m_pct":change_1m,"price_change_5m_pct":change_5m,
                                             "history_samples":history.len(),
                                             "price_change_status":if change_1m.is_some() && change_5m.is_some() {"ready"} else {"warming_up"},
+                                            "timestamp_ms":now_ms,
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }}));
                                 }
@@ -1048,6 +1049,7 @@ async fn connect_market_stream(
                                 "price_change_5m_pct":change_5m,
                                 "history_samples":history.len(),
                                 "price_change_status":if change_1m.is_some() && change_5m.is_some() {"ready"} else {"warming_up"},
+                                "timestamp_ms":now_ms,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }
                         }));
