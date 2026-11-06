@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nodex_core::TokenLaunch;
+use nodex_core::{TokenLaunch, TokenState};
 use nodex_trading::paper_wallet::{LedgerEntry, PaperWallet};
 use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions, Row, SqlitePool};
 use std::str::FromStr;
@@ -46,6 +46,16 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS token_states (
+            mint_address TEXT PRIMARY KEY NOT NULL,
+            version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
     Ok(pool)
 }
 
@@ -67,6 +77,51 @@ pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Persist the latest canonical state for a token. Older versions cannot
+/// overwrite newer state if independent workers finish writes out of order.
+pub async fn save_token_state(pool: &SqlitePool, state: &TokenState) -> Result<()> {
+    let payload = serde_json::to_string(state)?;
+    sqlx::query(
+        r#"INSERT INTO token_states (mint_address, version, updated_at, payload_json)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(mint_address) DO UPDATE SET
+            version=excluded.version,
+            updated_at=excluded.updated_at,
+            payload_json=excluded.payload_json
+        WHERE excluded.version >= token_states.version"#,
+    )
+    .bind(&state.mint_address)
+    .bind(state.version as i64)
+    .bind(state.updated_at.to_rfc3339())
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Restore persisted token snapshots during engine startup.
+pub async fn load_token_states(pool: &SqlitePool) -> Result<Vec<TokenState>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM token_states ORDER BY updated_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .collect()
+}
+
+/// Load one token's latest canonical snapshot.
+pub async fn get_token_state(pool: &SqlitePool, mint: &str) -> Result<Option<TokenState>> {
+    let payload = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM token_states WHERE mint_address = ?",
+    )
+    .bind(mint)
+    .fetch_optional(pool)
+    .await?;
+    payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
 }
 
 pub async fn save_raw_solana_event(pool: &SqlitePool, event: &serde_json::Value) -> Result<()> {
