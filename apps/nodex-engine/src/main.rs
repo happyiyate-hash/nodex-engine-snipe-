@@ -11,6 +11,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::{config::EngineConfig, TokenRegistry};
+use solana_keypair::Keypair;
 use nodex_solana::{
     decode_pump_fun_create, decode_pump_swap_activity_logs, decode_pump_swap_pool_account,
     derive_pump_swap_pool_address, run_logs_stream, start_market_monitor, MarketMonitor,
@@ -850,7 +851,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_started")
             | Some("token_scan_update")
             | Some("token_scan_progress")
-            | Some("token_state_updated")
+            | Some("token_state_updated")\n            | Some("profile_updated")
             | Some("market_price_update")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
@@ -1119,7 +1120,72 @@ async fn main() -> anyhow::Result<()> {
         token_registry.restore(snapshot).map_err(|error| anyhow::anyhow!(error))?;
     }
     tracing::info!(restored_tokens = token_registry.len(), "Restored canonical token state registry");
-    let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
+    // The public wallet identity is derived from the configured private key.
+    // The secret is parsed only in memory and is never persisted or returned by the API.
+    let wallet_keypair = std::env::var("NODEX_WALLET_PRIVATE_KEY").ok().and_then(|raw| {
+        let trimmed = raw.trim();
+        let bytes = if trimmed.starts_with('[') {
+            serde_json::from_str::<Vec<u8>>(trimmed).ok()
+        } else {
+            bs58::decode(trimmed).into_vec().ok()
+        }?;
+        Keypair::from_bytes(&bytes).ok()
+    });
+    let wallet_address = wallet_keypair.as_ref().map(|keypair| keypair.pubkey().to_string());
+    if wallet_address.is_none() {
+        tracing::warn!("NODEX_WALLET_PRIVATE_KEY is missing or invalid; profile wallet address and live SOL balance are unavailable");
+    }
+    let mut profile = nodex_persistence::load_profile(&db).await?.unwrap_or_else(|| json!({
+        "profile": {
+            "wallet_address": wallet_address,
+            "name": std::env::var("NODEX_PROFILE_NAME").unwrap_or_else(|_| "NodeX".into()),
+            "symbol": "SOL",
+            "profile_url": "",
+            "profile_picture_url": ""
+        },
+        "wallet": {"sol_balance": 0.0, "last_updated": null},
+        "portfolio": {"total_value_sol": 0.0, "unrealized_pnl_sol": 0.0, "realized_pnl_sol": 0.0, "positions": []},
+        "existing_wallet": {"sol_balance": 0.0, "last_synced": null}
+    }));
+    if let Some(profile_obj) = profile.get_mut("profile").and_then(serde_json::Value::as_object_mut) {
+        profile_obj.insert("wallet_address".into(), json!(wallet_address));
+    }
+    nodex_persistence::save_profile(&db, &profile).await?;
+    let profile_state = Arc::new(RwLock::new(profile));
+    if let (Some(rpc_client), Some(address)) = (config.solana_http_url.clone().map(SolanaRpc::new), wallet_address.clone()) {
+        let profile_for_sync = profile_state.clone();
+        let database_for_sync = db.clone();
+        let events_for_sync = broadcast::Sender::<serde_json::Value>::clone;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match rpc_client.get_balance_lamports(&address).await {
+                    Ok(lamports) => {
+                        let balance_sol = lamports as f64 / LAMPORTS_PER_SOL as f64;
+                        let mut current = profile_for_sync.write().await;
+                        if let Some(wallet) = current.get_mut("wallet").and_then(serde_json::Value::as_object_mut) {
+                            wallet.insert("sol_balance".into(), json!(balance_sol));
+                            wallet.insert("last_updated".into(), json!(chrono::Utc::now().to_rfc3339()));
+                        }
+                        if let Some(existing) = current.get_mut("existing_wallet").and_then(serde_json::Value::as_object_mut) {
+                            existing.insert("sol_balance".into(), json!(balance_sol));
+                            existing.insert("last_synced".into(), json!(chrono::Utc::now().to_rfc3339()));
+                        }
+                        let snapshot = current.clone();
+                        drop(current);
+                        if let Err(error) = nodex_persistence::save_profile(&database_for_sync, &snapshot).await {
+                            tracing::error!(%error, "Could not persist synchronized wallet profile");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "Could not synchronize Solana wallet balance"),
+                }
+            }
+        });
+    }
+
+    let wallet = match nodex_persistence::load_paper_wallet(&db).await {
         Some(wallet) => wallet,
         None => {
             let wallet = PaperWallet::new(config.paper_starting_balance_lamports);
@@ -1271,7 +1337,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
-        .route("/api/v1/paper-wallet", get(paper_wallet))
+        .route("/api/v1/paper-wallet", get(paper_wallet))\n        .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/tokens/:mint/state", get(token_state))
         .route("/api/v1/events/recent", get(recent_events))
