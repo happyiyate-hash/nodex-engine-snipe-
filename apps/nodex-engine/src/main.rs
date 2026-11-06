@@ -103,14 +103,26 @@ impl TradingSettings {
         let finite_non_negative = [
             ("min_liquidity_usd", self.min_liquidity_usd),
             ("max_entry_price_usd", self.max_entry_price_usd),
-            ("max_investment_per_token_sol", self.max_investment_per_token_sol),
-            ("max_investment_per_token_usd", self.max_investment_per_token_usd),
+            (
+                "max_investment_per_token_sol",
+                self.max_investment_per_token_sol,
+            ),
+            (
+                "max_investment_per_token_usd",
+                self.max_investment_per_token_usd,
+            ),
             ("max_slippage_pct", self.max_slippage_pct),
             ("stop_loss_pct", self.stop_loss_pct),
             ("take_profit_pct", self.take_profit_pct),
             ("min_5m_buy_volume_usd", self.min_5m_buy_volume_usd),
-            ("max_top10_holder_concentration_pct", self.max_top10_holder_concentration_pct),
-            ("trailing_stop_callback_pct", self.trailing_stop_callback_pct),
+            (
+                "max_top10_holder_concentration_pct",
+                self.max_top10_holder_concentration_pct,
+            ),
+            (
+                "trailing_stop_callback_pct",
+                self.trailing_stop_callback_pct,
+            ),
         ];
         for (name, value) in finite_non_negative {
             if !value.is_finite() || value < 0.0 {
@@ -118,7 +130,9 @@ impl TradingSettings {
             }
         }
         if self.stop_loss_pct > 100.0 || self.trailing_stop_callback_pct > 100.0 {
-            return Err("Stop-loss and trailing-stop percentages must be between 0 and 100.".into());
+            return Err(
+                "Stop-loss and trailing-stop percentages must be between 0 and 100.".into(),
+            );
         }
         if self.take_profit_pct > 1_000.0 {
             return Err("take_profit_pct must not exceed 1000.".into());
@@ -539,7 +553,9 @@ fn start_token_state_projector(
                     } else {
                         let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
                     }
-                    if kind == "market_price_update" && control.read().await.position_monitoring_enabled {
+                    if kind == "market_price_update"
+                        && control.read().await.position_monitoring_enabled
+                    {
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
                         {
@@ -907,7 +923,9 @@ fn start_launch_processor(
                                                     "type":"token_scan_update",
                                                     "data":report.clone()
                                                 }));
-                                                if let Some(monitor) = approved_monitor.read().await.clone() {
+                                                if let Some(monitor) =
+                                                    approved_monitor.read().await.clone()
+                                                {
                                                     match monitor
                                                         .subscribe_pump_fun_bonding_curve(
                                                             &scan_mint,
@@ -1096,13 +1114,23 @@ fn verify_operator_key(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, String)> {
-    let expected = state.admin_api_key.as_deref().filter(|key| !key.is_empty()).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Operator API is disabled: set NODEX_ADMIN_API_KEY on the backend.".to_string(),
-    ))?;
-    let provided = headers.get("x-nodex-admin-key").and_then(|value| value.to_str().ok()).unwrap_or_default();
+    let expected = state
+        .admin_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Operator API is disabled: set NODEX_ADMIN_API_KEY on the backend.".to_string(),
+        ))?;
+    let provided = headers
+        .get("x-nodex-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
     if provided.is_empty() || provided != expected {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid or missing NodeX operator key.".into()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing NodeX operator key.".into(),
+        ));
     }
     Ok(())
 }
@@ -1123,8 +1151,11 @@ async fn update_trading_config(
     Json(settings): Json<TradingSettings>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
-    settings.validate().map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    let serialized = serde_json::to_string(&settings).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    settings
+        .validate()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let serialized = serde_json::to_string(&settings)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     sqlx::query(
         "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at"
     )
@@ -1132,9 +1163,16 @@ async fn update_trading_config(
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(&state.database)
     .await
-    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist trading configuration: {error}")))?;
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not persist trading configuration: {error}"),
+        )
+    })?;
     *state.trading_settings.write().await = settings.clone();
-    let _ = state.events.send(json!({"type":"trading_config_updated","data":settings}));
+    let _ = state
+        .events
+        .send(json!({"type":"trading_config_updated","data":settings}));
     Ok(Json(json!({"status":"ok","config":settings})))
 }
 
@@ -1159,7 +1197,12 @@ async fn update_engine_control(
             control.token_discovery_enabled = false;
         }
         "configure" => {}
-        other => return Err((StatusCode::BAD_REQUEST, format!("Unsupported engine command: {other}"))),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Unsupported engine command: {other}"),
+            ))
+        }
     }
     if let Some(enabled) = request.token_discovery_enabled {
         control.token_discovery_enabled = enabled;
@@ -1176,7 +1219,9 @@ async fn update_engine_control(
     if !snapshot.paused {
         ensure_market_monitor(&state).await;
     }
-    let _ = state.events.send(json!({"type":"engine_state","data":snapshot}));
+    let _ = state
+        .events
+        .send(json!({"type":"engine_state","data":snapshot}));
     Ok(Json(json!({"status":"ok","engine":snapshot})))
 }
 
@@ -1878,7 +1923,7 @@ async fn main() -> anyhow::Result<()> {
     .execute(&db)
     .await?;
     let stored_trading_config: Option<String> = sqlx::query_scalar(
-        "SELECT config_json FROM nodex_runtime_config WHERE config_key = 'trading'"
+        "SELECT config_json FROM nodex_runtime_config WHERE config_key = 'trading'",
     )
     .fetch_optional(&db)
     .await?;
@@ -2167,8 +2212,14 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
-        .route("/api/v1/engine/control", get(get_engine_control).post(update_engine_control))
-        .route("/api/v1/config/trading", get(get_trading_config).put(update_trading_config))
+        .route(
+            "/api/v1/engine/control",
+            get(get_engine_control).post(update_engine_control),
+        )
+        .route(
+            "/api/v1/config/trading",
+            get(get_trading_config).put(update_trading_config),
+        )
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
