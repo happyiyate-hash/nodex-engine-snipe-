@@ -5,29 +5,35 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone, Copy)]
 struct Candle {
     open_time_ms: i64,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
+    open: Option<f64>,
+    high: Option<f64>,
+    low: Option<f64>,
+    close: Option<f64>,
     volume_sol: f64,
     trade_count: u64,
     buys: u64,
     sells: u64,
+    closed: bool,
 }
 
 impl Candle {
-    fn new(open_time_ms: i64, price: f64) -> Self {
-        Self { open_time_ms, open: price, high: price, low: price, close: price,
+    fn price(open_time_ms: i64, price: f64) -> Self {
+        Self { open_time_ms, open: Some(price), high: Some(price), low: Some(price),
+            close: Some(price), volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0, closed: false }
+    }
+
+    fn empty(open_time_ms: i64) -> Self {
+        Self { open_time_ms, open: None, high: None, low: None, close: None,
             volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0, closed: false }
     }
 
-    fn json(self, mint: &str, timeframe: &str, duration_ms: i64, closed: bool) -> Value {
+    fn json(self, mint: &str, timeframe: &str, duration_ms: i64) -> Value {
         json!({
             "mint_address": mint, "timeframe": timeframe,
             "open_time_ms": self.open_time_ms, "close_time_ms": self.open_time_ms + duration_ms,
             "open": self.open, "high": self.high, "low": self.low, "close": self.close,
             "volume_sol": self.volume_sol, "trade_count": self.trade_count,
-            "buys": self.buys, "sells": self.sells, "closed": closed || self.closed
+            "buys": self.buys, "sells": self.sells, "closed": self.closed
         })
     }
 }
@@ -58,7 +64,7 @@ pub fn start_chart_service(
             let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
             let Some(data) = event.get("data") else { continue };
             let Some(mint) = data.get("mint_address").and_then(Value::as_str) else { continue };
-            let (timestamp_ms, price, volume, side) = match kind {
+            let (timestamp_ms, price, volume_sol, side) = match kind {
                 "market_price_update" => {
                     let Some(price) = data.get("price_sol").and_then(Value::as_f64)
                         .filter(|value| value.is_finite() && *value > 0.0) else { continue };
@@ -83,41 +89,58 @@ pub fn start_chart_service(
             for (timeframe, duration) in TIMEFRAMES {
                 let open_time = timestamp_ms.div_euclid(duration).saturating_mul(duration);
                 let key = (mint.to_owned(), timeframe.to_owned(), open_time);
+
                 if let Some(price) = price {
-                    // Close the previous in-memory candle when a newer bucket arrives.
                     let previous = candles.keys()
                         .filter(|(candidate_mint, candidate_tf, candidate_open)|
                             candidate_mint == mint && candidate_tf == timeframe && *candidate_open < open_time)
                         .map(|(_, _, previous_open)| *previous_open)
                         .max();
                     if let Some(previous_open) = previous {
-                        if let Some(previous_candle) = candles.get(&(mint.to_owned(), timeframe.to_owned(), previous_open)).copied() {
-                            let closed = previous_candle.json(mint, timeframe, duration, true);
-                            let _ = nodex_persistence::save_chart_candle(&database, mint, timeframe, previous_open, &closed).await;
-                            let _ = events.send(json!({"type":"chart_candle_closed","data":closed}));
-                            candles.remove(&(mint.to_owned(), timeframe.to_owned(), previous_open));
+                        let previous_key = (mint.to_owned(), timeframe.to_owned(), previous_open);
+                        if let Some(previous_candle) = candles.get_mut(&previous_key) {
+                            if !previous_candle.closed {
+                                previous_candle.closed = true;
+                                let payload = previous_candle.json(mint, timeframe, duration);
+                                if let Err(error) = nodex_persistence::save_chart_candle(
+                                    &database, mint, timeframe, previous_open, &payload,
+                                ).await {
+                                    tracing::warn!(%error, mint_address=mint, timeframe, "Could not persist closed chart candle");
+                                }
+                                let _ = events.send(json!({"type":"chart_candle_closed","data":payload}));
+                            }
                         }
                     }
-                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle::new(open_time, price));
-                    candle.high = candle.high.max(price);
-                    candle.low = candle.low.min(price);
-                    candle.close = price;
+                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle::price(open_time, price));
+                    candle.open.get_or_insert(price);
+                    candle.high = Some(candle.high.map_or(price, |value| value.max(price)));
+                    candle.low = Some(candle.low.map_or(price, |value| value.min(price)));
+                    candle.close = Some(price);
                 } else if let Some(side) = side {
-                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle { open_time_ms: open_time, open: None, high: None, low: None, close: None, volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0, closed: false });
-                    candle.volume_sol += volume;
+                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle::empty(open_time));
+                    candle.volume_sol += volume_sol;
                     candle.trade_count = candle.trade_count.saturating_add(1);
                     if side == "buy" { candle.buys = candle.buys.saturating_add(1); }
                     else { candle.sells = candle.sells.saturating_add(1); }
                 }
+
                 if let Some(candle) = candles.get(&key).copied() {
-                    let payload = candle.json(mint, timeframe, duration, false);
-                    if let Err(error) = nodex_persistence::save_chart_candle(&database, mint, timeframe, open_time, &payload).await {
-                        tracing::warn!(%error, mint_address=mint, timeframe, "Could not persist active chart candle");
+                    let payload = candle.json(mint, timeframe, duration);
+                    if let Err(error) = nodex_persistence::save_chart_candle(
+                        &database, mint, timeframe, open_time, &payload,
+                    ).await {
+                        tracing::warn!(%error, mint_address=mint, timeframe, "Could not persist chart candle update");
                     }
-                    let _ = events.send(json!({
-                        "type":"chart_candle_update",
-                        "data":payload
-                    }));
+                    let _ = events.send(json!({"type":"chart_candle_update","data":payload}));
+                }
+            }
+
+            // Bound memory while retaining enough recent buckets for late events.
+            if candles.len() > 20_000 {
+                let mut keys: Vec<_> = candles.keys().cloned().collect();
+                keys.sort_by_key(|(_, _, open_time)| *open_time);
+                for key in keys.into_iter().take(candles.len().saturating_sub(15_000)) {
+                    candles.remove(&key);
                 }
             }
         }
