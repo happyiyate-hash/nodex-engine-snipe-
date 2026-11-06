@@ -512,7 +512,7 @@ fn start_launch_processor(
                                 if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
                                     let _ = events.send(json!({"type":"diagnostic","data":{
                                         "severity":"error","component":"token_state_persistence",
-                                        "message":error.to_string(),"mint_address":mint_address,
+                                        "message":error.to_string(),"mint_address":mint_address.clone(),
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}));
                                 }
