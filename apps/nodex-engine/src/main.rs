@@ -766,14 +766,11 @@ fn start_launch_processor(
                             {
                                 Ok(report) => {
                                     let decision = report.decision.clone();
-                                    let _ = scan_events.send(
-                                        json!({"type":"token_scan_update","data":report.clone()}),
-                                    );
                                     match decision.as_str() {
                                         "APPROVED" => {
                                             let approved_state = approved_registry.upsert_patch(
                                                 &scan_mint,
-                                                json!({"security":report}),
+                                                json!({"security":report.clone()}),
                                             );
                                             let approval_persisted = match approved_state {
                                                 Ok(snapshot) => {
@@ -802,6 +799,12 @@ fn start_launch_processor(
                                                 }
                                             };
                                             if approval_persisted {
+                                                // Publish APPROVED only after the canonical state is durable,
+                                                // so a frontend subscription cannot race the approval gate.
+                                                let _ = scan_events.send(json!({
+                                                    "type":"token_scan_update",
+                                                    "data":report.clone()
+                                                }));
                                                 if let Some(monitor) = approved_monitor.as_ref() {
                                                     match monitor
                                                         .subscribe_pump_fun_bonding_curve(
@@ -828,9 +831,23 @@ fn start_launch_processor(
                                                         }
                                                     }
                                                 }
+                                            } else {
+                                                approved_registry.remove(&scan_mint);
+                                                let _ = scan_events.send(json!({
+                                                    "type":"token_approval_pending",
+                                                    "data":{
+                                                        "mint_address":scan_mint,
+                                                        "decision":"UNVERIFIED",
+                                                        "reason":"Security checks passed, but the approved token state could not be persisted. Activation is blocked."
+                                                    }
+                                                }));
                                             }
                                         }
                                         "REJECTED" => {
+                                            let _ = scan_events.send(json!({
+                                                "type":"token_scan_update",
+                                                "data":report.clone()
+                                            }));
                                             let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
                                                 "mint_address":scan_mint,
                                                 "reason":"Security scanner rejected this token.",
@@ -838,6 +855,10 @@ fn start_launch_processor(
                                             }}));
                                         }
                                         _ => {
+                                            let _ = scan_events.send(json!({
+                                                "type":"token_scan_update",
+                                                "data":report.clone()
+                                            }));
                                             let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
                                                 "mint_address":scan_mint,
                                                 "decision":decision,
