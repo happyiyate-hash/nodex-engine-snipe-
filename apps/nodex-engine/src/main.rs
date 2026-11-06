@@ -282,6 +282,7 @@ fn start_pumpswap_activity_processor(
                                             "venue":"pump_swap",
                                             "pool_address":pool,
                                             "base_mint":pool_details.as_ref().map(|details| details.base_mint.clone()),
+                                            "mint_address":pool_details.as_ref().map(|details| details.base_mint.clone()),
                                             "quote_mint":pool_details.as_ref().map(|details| details.quote_mint.clone()),
                                             "quote_amount_unit":quote_unit,
                                             "window_30s":volume_window_json(window_30s),
@@ -353,6 +354,7 @@ fn start_token_state_projector(
                     json!({"security":{"creator_history":data.get("history").cloned().unwrap_or(serde_json::Value::Null)}})
                 }
                 "market_price_update" => json!({"market":data}),
+                "pumpswap_volume_update" => json!({"statistics":{"pumpswap_volume":data}}),
                 _ => continue,
             };
             match registry.upsert_patch(mint, domain_patch) {
@@ -375,6 +377,15 @@ fn start_token_state_projector(
                                 "state_version":snapshot.version,
                                 "event_timestamp_ms":event_timestamp_ms,
                                 "market_patch":data.clone()
+                            }
+                        }));
+                    } else if kind == "pumpswap_volume_update" {
+                        let _ = events.send(json!({
+                            "type":"token_statistics_update",
+                            "data":{
+                                "mint_address":mint,
+                                "state_version":snapshot.version,
+                                "statistics_patch":data.clone()
                             }
                         }));
                     } else {
@@ -1087,6 +1098,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_market_update")
             | Some("chart_candle_update")
             | Some("chart_candle_closed")
+            | Some("token_statistics_update")
             | Some("profile_updated")
             | Some("wallet_balance_updated")
             | Some("position_updated")
