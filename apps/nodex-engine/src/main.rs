@@ -33,7 +33,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -48,6 +48,9 @@ struct AppState {
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
     trading_settings: Arc<RwLock<TradingSettings>>,
+    runtime_enabled: watch::Sender<bool>,
+    market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
+    solana_ws_url: Option<String>,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
@@ -693,7 +696,7 @@ fn start_launch_processor(
     database: sqlx::SqlitePool,
     pump_fun_program_id: String,
     control: Arc<RwLock<EngineControl>>,
-    market_monitor: Option<MarketMonitor>,
+    market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     token_registry: TokenRegistry,
 ) {
     const LAUNCH_QUEUE_CAPACITY: usize = 256;
@@ -903,7 +906,7 @@ fn start_launch_processor(
                                                     "type":"token_scan_update",
                                                     "data":report.clone()
                                                 }));
-                                                if let Some(monitor) = approved_monitor.as_ref() {
+                                                if let Some(monitor) = approved_monitor.read().await.clone() {
                                                     match monitor
                                                         .subscribe_pump_fun_bonding_curve(
                                                             &scan_mint,
@@ -1168,6 +1171,10 @@ async fn update_engine_control(
     }
     let snapshot = control.clone();
     drop(control);
+    state.runtime_enabled.send_replace(!snapshot.paused);
+    if !snapshot.paused {
+        ensure_market_monitor(&state).await;
+    }
     let _ = state.events.send(json!({"type":"engine_state","data":snapshot}));
     Ok(Json(json!({"status":"ok","engine":snapshot})))
 }
@@ -1689,13 +1696,20 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                             let mut control = state.control.write().await;
                             control.paused = true;
                             control.token_discovery_enabled = false;
-                            Some(json!({"type":"engine_state","data":control.clone()}))
+                            let snapshot = control.clone();
+                            drop(control);
+                            state.runtime_enabled.send_replace(false);
+                            Some(json!({"type":"engine_state","data":snapshot}))
                         }
                         Ok(ClientCommand::Resume) | Ok(ClientCommand::Start) => {
                             let mut control = state.control.write().await;
                             control.paused = false;
                             control.token_discovery_enabled = true;
-                            Some(json!({"type":"engine_state","data":control.clone()}))
+                            let snapshot = control.clone();
+                            drop(control);
+                            state.runtime_enabled.send_replace(true);
+                            ensure_market_monitor(&state).await;
+                            Some(json!({"type":"engine_state","data":snapshot}))
                         }
                         Ok(ClientCommand::SetMode { mode }) if mode == "paper" => {
                             state.control.write().await.mode = "paper".into();
@@ -1797,6 +1811,53 @@ async fn client_socket(socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+async fn ensure_market_monitor(state: &AppState) {
+    let mut monitor = state.market_monitor.write().await;
+    if monitor.is_none() {
+        if let Some(ws_url) = state.solana_ws_url.clone() {
+            *monitor = Some(start_market_monitor(ws_url, state.events.clone()));
+        }
+    }
+}
+
+fn spawn_controlled_log_stream(
+    ws_url: String,
+    program_id: String,
+    events: broadcast::Sender<serde_json::Value>,
+    status: Arc<RwLock<StreamStatus>>,
+    recovery_rpc: Option<SolanaRpc>,
+    mut runtime_enabled: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            while !*runtime_enabled.borrow() {
+                if runtime_enabled.changed().await.is_err() {
+                    return;
+                }
+            }
+            let stream = run_logs_stream(
+                ws_url.clone(),
+                program_id.clone(),
+                events.clone(),
+                status.clone(),
+                recovery_rpc.clone(),
+            );
+            tokio::pin!(stream);
+            tokio::select! {
+                _ = &mut stream => {}
+                changed = runtime_enabled.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    if !*runtime_enabled.borrow() {
+                        *status.write().await = StreamStatus::default();
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[tokio::main]
@@ -1978,10 +2039,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
-    let market_monitor = config
-        .solana_ws_url
-        .clone()
-        .map(|ws_url| start_market_monitor(ws_url, events.clone()));
+    let market_monitor = Arc::new(RwLock::new(None));
+    let (runtime_enabled, runtime_receiver) = watch::channel(false);
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
     if let Some(launch_rpc) = rpc.clone() {
@@ -2015,19 +2074,14 @@ async fn main() -> anyhow::Result<()> {
 
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
     if let Some(ws_url) = config.solana_ws_url.clone() {
-        let sender = events.clone();
-        let status = pumpswap_status.clone();
-        let recovery_rpc = rpc.clone();
-        tokio::spawn(async move {
-            run_logs_stream(
-                ws_url,
-                PUMPSWAP_PROGRAM_ID.to_owned(),
-                sender,
-                status,
-                recovery_rpc,
-            )
-            .await;
-        });
+        spawn_controlled_log_stream(
+            ws_url,
+            PUMPSWAP_PROGRAM_ID.to_owned(),
+            events.clone(),
+            pumpswap_status.clone(),
+            rpc.clone(),
+            runtime_receiver.clone(),
+        );
     }
 
     // Persist raw upstream log notifications independently of browser subscribers.
@@ -2077,13 +2131,14 @@ async fn main() -> anyhow::Result<()> {
     });
 
     if let Some(ws_url) = config.solana_ws_url.clone() {
-        let sender = events.clone();
-        let status = stream_status.clone();
-        let program_id = config.pump_fun_program_id.clone();
-        let recovery_rpc = rpc.clone();
-        tokio::spawn(async move {
-            run_logs_stream(ws_url, program_id, sender, status, recovery_rpc).await;
-        });
+        spawn_controlled_log_stream(
+            ws_url,
+            config.pump_fun_program_id.clone(),
+            events.clone(),
+            stream_status.clone(),
+            rpc.clone(),
+            runtime_receiver.clone(),
+        );
     } else {
         tracing::warn!("Helius not configured; set HELIUS_API_KEY or SOLANA_RPC_WS_URL");
     }
@@ -2100,6 +2155,9 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|value| !value.trim().is_empty()),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
+        runtime_enabled,
+        market_monitor,
+        solana_ws_url: config.solana_ws_url.clone(),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
         profile: profile_state,
