@@ -1226,7 +1226,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 
                     // Full token snapshots are delivered only to clients that explicitly
                     // subscribed to that mint. They are never broadcast to every browser.
-                    if event_type == "token_state_updated" || event_type == "token_market_update" {
+                    if event_type == "token_state_updated" || event_type == "token_market_update" || event_type == "chart_candle_update" || event_type == "chart_candle_closed" || event_type == "token_statistics_update" {
                         let mint = value.pointer("/data/mint_address")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default();
@@ -1362,9 +1362,10 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                                             }
                                         };
                                         if let Some(chart) = details.get_mut("chart").and_then(serde_json::Value::as_object_mut) {
+                                            let has_candles = !candles.is_empty();
                                             chart.insert("timeframe".into(), json!("5m"));
                                             chart.insert("candles".into(), json!(candles));
-                                            chart.insert("status".into(), json!(if chart.get("candles").and_then(serde_json::Value::as_array).is_some_and(|items| !items.is_empty()) { "ready" } else { "warming_up" }));
+                                            chart.insert("status".into(), json!(if has_candles { "ready" } else { "warming_up" }));
                                         }
                                         Some(json!({
                                             "type":"token_detail_snapshot",
