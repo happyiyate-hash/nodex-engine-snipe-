@@ -41,12 +41,25 @@ The engine listens on `http://127.0.0.1:8080` by default.
 ## Current endpoints
 
 - `GET /health` — health status.
-- `GET /api/v1/engine/status` — paper mode and upstream stream status.
+- `GET /api/v1/engine/status`
+- `GET /api/v1/engine/control` — current runtime state and independent discovery/entry/position-monitoring switches.
+- `POST /api/v1/engine/control` — operator-authenticated `start`, `resume`, `pause`, or `stop` command; accepts optional `token_discovery_enabled`, `new_entries_enabled`, and `position_monitoring_enabled` booleans.
+- `GET /api/v1/config/trading` — complete persisted paper-strategy configuration.
+- `PUT /api/v1/config/trading` — replace the strategy configuration; requires `x-nodex-admin-key`.
+ — paper mode and upstream stream status.
 - `GET /api/v1/paper-wallet` — persisted paper wallet snapshot.
 - `GET /api/v1/tokens/recent?limit=100` — most recently persisted decoded Pump.fun launches (limit is clamped to 1–500).
 - `GET /api/v1/tokens/{mint}/scan` — on-demand SPL Token / Token-2022 mint authority and extension scan, enriched with a RugCheck summary when available.
 - `GET /api/v1/fees/token-account-rent` — live rent-exempt minimum for a standard 165-byte SPL token account.
 - `WS /api/v1/ws` — upstream logs, provider status, diagnostics, and engine control messages.
+
+### Runtime configuration
+
+The first startup creates a persisted `trading` configuration record when none exists. Defaults are paper-only: 20% stop loss, 50% take profit, $5,000 minimum liquidity, 0.1 SOL paper position size, 3 maximum open positions, 80 minimum safety score, 10% maximum slippage, $1,000 minimum 5-minute buy volume, and 35% maximum top-10 concentration. Automated paper buys default to off; known rug-creator blacklisting defaults to on. The dashboard can read the full state and replace it through the configuration API. Updates are validated and stored in SQLite.
+
+Mutating configuration and HTTP engine controls require the `x-nodex-admin-key` header. Do not embed this operator key in a distributed mobile app. Live/real trading remains unavailable and requests to switch away from paper mode are rejected.
+
+The process now starts in a paused/idle control state; an explicit Start/Resume command enables launch discovery processing. The provider stream workers are currently initialized by the process separately, so idle mode does not yet guarantee that all upstream WebSocket connections are closed. Automated paper entry execution and automatic stop-loss/take-profit exits are not implemented by this configuration API alone; those strategy execution paths still need to be wired before these values can place or close positions.
 
 ### WebSocket commands
 
