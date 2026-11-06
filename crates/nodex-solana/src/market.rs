@@ -3,7 +3,7 @@ use base64::Engine as _;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{collections::{HashMap, HashSet}, str::FromStr, time::Duration};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -24,6 +24,7 @@ struct MarketSubscription {
 
 enum MarketCommand {
     Subscribe(MarketSubscription),
+    UnsubscribeMint(String),
 }
 
 #[derive(Clone)]
@@ -51,6 +52,19 @@ impl MarketMonitor {
             .await
             .map_err(|_| anyhow!("market monitor task is not running"))?;
         Ok(account)
+    }
+
+    /// Stop monitoring every account currently associated with a token mint.
+    /// Pending subscribe acknowledgements are cancelled as soon as the provider returns their IDs.
+    pub async fn unsubscribe_mint(&self, mint: &str) -> Result<()> {
+        let mint = mint.trim();
+        if mint.is_empty() {
+            return Err(anyhow!("token mint is required to unsubscribe"));
+        }
+        self.commands
+            .send(MarketCommand::UnsubscribeMint(mint.to_owned()))
+            .await
+            .map_err(|_| anyhow!("market monitor task is not running"))
     }
 }
 
@@ -151,6 +165,46 @@ where
     sink.send(Message::Text(request.to_string().into()))
         .await
         .context("sending Solana accountSubscribe request")
+}
+
+async fn send_account_unsubscribe<S>(sink: &mut S, request_id: u64, subscription_id: u64) -> Result<()>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    let request = json!({
+        "jsonrpc":"2.0",
+        "id":request_id,
+        "method":"accountUnsubscribe",
+        "params":[subscription_id]
+    });
+    sink.send(Message::Text(request.to_string().into()))
+        .await
+        .context("sending Solana accountUnsubscribe request")
+}
+
+fn remove_mint_subscriptions(
+    mint: &str,
+    desired: &mut HashMap<String, MarketSubscription>,
+    pending: &mut HashMap<u64, MarketSubscription>,
+    active: &mut HashMap<u64, MarketSubscription>,
+) -> (Vec<u64>, Vec<u64>) {
+    desired.retain(|_, subscription| subscription.mint != mint);
+    let pending_ids = pending
+        .iter()
+        .filter_map(|(id, subscription)| (subscription.mint == mint).then_some(*id))
+        .collect::<Vec<_>>();
+    for id in &pending_ids {
+        pending.remove(id);
+    }
+    let active_ids = active
+        .iter()
+        .filter_map(|(id, subscription)| (subscription.mint == mint).then_some(*id))
+        .collect::<Vec<_>>();
+    for id in &active_ids {
+        active.remove(id);
+    }
+    (pending_ids, active_ids)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -482,6 +536,7 @@ async fn connect_market_stream(
     let mut next_request_id = 100_u64;
     let mut pending = HashMap::<u64, MarketSubscription>::new();
     let mut active = HashMap::<u64, MarketSubscription>::new();
+    let mut cancelled_pending = HashSet::<u64>::new();
     let mut price_history = HashMap::<String, std::collections::VecDeque<PriceSample>>::new();
     let mut pumpswap_states = HashMap::<String, PumpSwapLiveState>::new();
 
@@ -514,9 +569,34 @@ async fn connect_market_stream(
     loop {
         tokio::select! {
             command = commands.recv() => {
-                let Some(MarketCommand::Subscribe(subscription)) = command else {
+                let Some(command) = command else {
                     return Err(anyhow!("market monitor command channel closed"));
                 };
+                if let MarketCommand::UnsubscribeMint(mint) = command {
+                    let (pending_ids, active_ids) = remove_mint_subscriptions(
+                        &mint, &mut desired, &mut pending, &mut active,
+                    );
+                    for request_id in pending_ids {
+                        cancelled_pending.insert(request_id);
+                    }
+                    let removed_active = active_ids.len();
+                    for subscription_id in active_ids {
+                        let request_id = next_request_id;
+                        next_request_id = next_request_id.saturating_add(1);
+                        send_account_unsubscribe(&mut sink, request_id, subscription_id).await?;
+                    }
+                    price_history.remove(&mint);
+                    pumpswap_states.remove(&mint);
+                    let _ = events.send(json!({
+                        "type":"market_subscriptions_removed",
+                        "data":{"mint_address":mint,"removed_active":removed_active,
+                            "cancelled_pending":cancelled_pending.len(),
+                            "desired_accounts":desired.len(),
+                            "received_at":chrono::Utc::now().to_rfc3339()}
+                    }));
+                    continue;
+                }
+                let MarketCommand::Subscribe(subscription) = command else { unreachable!() };
                 if desired.contains_key(&subscription.account) {
                     continue;
                 }
@@ -549,6 +629,14 @@ async fn connect_market_stream(
                         let value: Value = serde_json::from_str(text.as_ref())
                             .context("decoding market monitor JSON-RPC message")?;
                         if let Some(request_id) = value.get("id").and_then(Value::as_u64) {
+                            if cancelled_pending.remove(&request_id) {
+                                if let Some(subscription_id) = value.get("result").and_then(Value::as_u64) {
+                                    let unsubscribe_request_id = next_request_id;
+                                    next_request_id = next_request_id.saturating_add(1);
+                                    send_account_unsubscribe(&mut sink, unsubscribe_request_id, subscription_id).await?;
+                                }
+                                continue;
+                            }
                             if let Some(subscription) = pending.remove(&request_id) {
                                 if let Some(subscription_id) = value.get("result").and_then(Value::as_u64) {
                                     active.insert(subscription_id, subscription.clone());
@@ -1138,6 +1226,41 @@ mod market_monitor_tests {
         data.extend_from_slice(&[9_u8; 32]);
         data.extend_from_slice(&[0_u8; 128]);
         data
+    }
+
+    #[test]
+    fn removing_a_mint_clears_desired_pending_and_active_subscriptions() {
+        let subscription = |mint: &str, account: &str| MarketSubscription {
+            mint: mint.to_owned(),
+            account: account.to_owned(),
+            venue: "pump_fun_bonding_curve",
+            program_id: "program".to_owned(),
+            expected_mint: None,
+        };
+        let mut desired = HashMap::from([
+            ("account-a".to_owned(), subscription("mint-a", "account-a")),
+            ("account-b".to_owned(), subscription("mint-b", "account-b")),
+        ]);
+        let mut pending = HashMap::from([
+            (10, subscription("mint-a", "account-a")),
+            (11, subscription("mint-b", "account-b")),
+        ]);
+        let mut active = HashMap::from([
+            (20, subscription("mint-a", "account-a")),
+            (21, subscription("mint-b", "account-b")),
+        ]);
+
+        let (pending_ids, active_ids) =
+            remove_mint_subscriptions("mint-a", &mut desired, &mut pending, &mut active);
+
+        assert_eq!(pending_ids, vec![10]);
+        assert_eq!(active_ids, vec![20]);
+        assert!(!desired.values().any(|item| item.mint == "mint-a"));
+        assert!(!pending.values().any(|item| item.mint == "mint-a"));
+        assert!(!active.values().any(|item| item.mint == "mint-a"));
+        assert_eq!(desired.len(), 1);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(active.len(), 1);
     }
 
     #[test]
