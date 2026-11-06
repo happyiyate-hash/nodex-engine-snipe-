@@ -57,11 +57,53 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS portfolio_positions (
-            mint_address TEXT PRIMARY KEY NOT NULL,
+            position_id TEXT PRIMARY KEY NOT NULL,
+            mint_address TEXT NOT NULL,
             status TEXT NOT NULL,
             payload_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    // Upgrade the original one-position-per-mint table without losing existing
+    // paper positions. Legacy rows receive stable IDs and can coexist with future lots.
+    let position_columns = sqlx::query("PRAGMA table_info(portfolio_positions)")
+        .fetch_all(&pool)
+        .await?;
+    let has_position_id = position_columns.iter().any(|row| {
+        row.get::<String, _>("name") == "position_id"
+    });
+    if !has_position_id {
+        sqlx::query("ALTER TABLE portfolio_positions RENAME TO portfolio_positions_legacy")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            r#"CREATE TABLE portfolio_positions (
+                position_id TEXT PRIMARY KEY NOT NULL,
+                mint_address TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO portfolio_positions
+                (position_id, mint_address, status, payload_json, updated_at)
+            SELECT 'legacy-' || mint_address, mint_address, status, payload_json, updated_at
+            FROM portfolio_positions_legacy"#,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("DROP TABLE portfolio_positions_legacy")
+            .execute(&pool)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_positions_mint_status ON portfolio_positions(mint_address, status)",
     )
     .execute(&pool)
     .await?;
@@ -101,21 +143,25 @@ pub async fn load_profile(pool: &SqlitePool) -> Result<Option<serde_json::Value>
         .transpose()
 }
 
-/// Store a paper position snapshot keyed by the canonical token mint.
+/// Store a paper position by its unique lot ID. Multiple positions may share a mint.
 pub async fn save_portfolio_position(
     pool: &SqlitePool,
+    position_id: &str,
     mint: &str,
     status: &str,
     payload: &serde_json::Value,
 ) -> Result<()> {
     sqlx::query(
-        r#"INSERT INTO portfolio_positions (mint_address, status, payload_json, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(mint_address) DO UPDATE SET
+        r#"INSERT INTO portfolio_positions
+            (position_id, mint_address, status, payload_json, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(position_id) DO UPDATE SET
+            mint_address=excluded.mint_address,
             status=excluded.status,
             payload_json=excluded.payload_json,
             updated_at=excluded.updated_at"#,
     )
+    .bind(position_id)
     .bind(mint)
     .bind(status)
     .bind(serde_json::to_string(payload)?)
@@ -127,16 +173,20 @@ pub async fn save_portfolio_position(
 
 pub async fn load_portfolio_positions(pool: &SqlitePool) -> Result<Vec<serde_json::Value>> {
     let rows = sqlx::query(
-        "SELECT status, payload_json FROM portfolio_positions ORDER BY updated_at DESC",
+        "SELECT position_id, mint_address, status, payload_json FROM portfolio_positions ORDER BY updated_at DESC",
     )
     .fetch_all(pool)
     .await?;
     rows.into_iter()
         .map(|row| {
+            let position_id: String = row.get("position_id");
+            let mint_address: String = row.get("mint_address");
             let status: String = row.get("status");
             let payload: String = row.get("payload_json");
             let mut value: serde_json::Value = serde_json::from_str(&payload)?;
             if let Some(object) = value.as_object_mut() {
+                object.insert("position_id".into(), serde_json::Value::String(position_id));
+                object.insert("mint_address".into(), serde_json::Value::String(mint_address));
                 object.insert("status".into(), serde_json::Value::String(status));
             }
             Ok(value)
