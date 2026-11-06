@@ -685,7 +685,7 @@ async fn connect_market_stream(
                         let Some(subscription_id) = value.pointer("/params/subscription").and_then(Value::as_u64) else {
                             continue;
                         };
-                        let Some(subscription) = active.get(&subscription_id) else {
+                        let Some(subscription) = active.get(&subscription_id).cloned() else {
                             continue;
                         };
                         let result = value.pointer("/params/result");
@@ -1064,6 +1064,34 @@ async fn connect_market_stream(
                                         "message":error.to_string(),"mint_address":subscription.mint
                                     }}));
                                 }
+                            }
+                            // A completed bonding curve is no longer the active trading venue.
+                            // Release its account slot after attempting PumpSwap pool discovery.
+                            if let Some(completed_id) = active
+                                .iter()
+                                .find_map(|(id, item)| (item.account == subscription.account).then_some(*id))
+                            {
+                                active.remove(&completed_id);
+                                desired.remove(&subscription.account);
+                                let unsubscribe_request_id = next_request_id;
+                                next_request_id = next_request_id.saturating_add(1);
+                                send_account_unsubscribe(
+                                    &mut sink,
+                                    unsubscribe_request_id,
+                                    completed_id,
+                                )
+                                .await?;
+                                let _ = events.send(json!({
+                                    "type":"market_subscription_released",
+                                    "data":{
+                                        "mint_address":subscription.mint,
+                                        "account_address":subscription.account,
+                                        "reason":"bonding_curve_completed",
+                                        "active_subscriptions":active.len(),
+                                        "desired_accounts":desired.len(),
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }
+                                }));
                             }
                         }
                     }
