@@ -72,9 +72,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let position_columns = sqlx::query("PRAGMA table_info(portfolio_positions)")
         .fetch_all(&pool)
         .await?;
-    let has_position_id = position_columns.iter().any(|row| {
-        row.get::<String, _>("name") == "position_id"
-    });
+    let has_position_id = position_columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "position_id");
     if !has_position_id {
         sqlx::query("ALTER TABLE portfolio_positions RENAME TO portfolio_positions_legacy")
             .execute(&pool)
@@ -198,7 +198,10 @@ pub async fn load_portfolio_positions(pool: &SqlitePool) -> Result<Vec<serde_jso
             let mut value: serde_json::Value = serde_json::from_str(&payload)?;
             if let Some(object) = value.as_object_mut() {
                 object.insert("position_id".into(), serde_json::Value::String(position_id));
-                object.insert("mint_address".into(), serde_json::Value::String(mint_address));
+                object.insert(
+                    "mint_address".into(),
+                    serde_json::Value::String(mint_address),
+                );
                 object.insert("status".into(), serde_json::Value::String(status));
             }
             Ok(value)
@@ -466,7 +469,8 @@ pub async fn load_chart_candles(
     .bind(limit.clamp(1, 2_000) as i64)
     .fetch_all(pool)
     .await?;
-    let mut candles = rows.into_iter()
+    let mut candles = rows
+        .into_iter()
         .map(|payload| serde_json::from_str(&payload))
         .collect::<std::result::Result<Vec<serde_json::Value>, _>>()?;
     candles.reverse();
