@@ -451,7 +451,11 @@ fn start_token_state_projector(
                                             .unwrap_or(mint);
                                         if let Err(error) =
                                             nodex_persistence::save_portfolio_position(
-                                                &database, position_id, mint, "open", position,
+                                                &database,
+                                                position_id,
+                                                mint,
+                                                "open",
+                                                position,
                                             )
                                             .await
                                         {
