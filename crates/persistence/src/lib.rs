@@ -117,6 +117,18 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS chart_candles (
+            mint_address TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            open_time_ms INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (mint_address, timeframe, open_time_ms)
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
     Ok(pool)
 }
 
@@ -411,4 +423,52 @@ pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u6
         .rows_affected();
     transaction.commit().await?;
     Ok((launches, events))
+}
+
+/// Upsert one OHLCV candle by token, timeframe and its event-time bucket.
+pub async fn save_chart_candle(
+    pool: &SqlitePool,
+    mint: &str,
+    timeframe: &str,
+    open_time_ms: i64,
+    candle: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO chart_candles
+            (mint_address, timeframe, open_time_ms, payload_json, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(mint_address, timeframe, open_time_ms) DO UPDATE SET
+            payload_json=excluded.payload_json,
+            updated_at=excluded.updated_at"#,
+    )
+    .bind(mint)
+    .bind(timeframe)
+    .bind(open_time_ms)
+    .bind(serde_json::to_string(candle)?)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Load recent candles in chronological order for one token/timeframe.
+pub async fn load_chart_candles(
+    pool: &SqlitePool,
+    mint: &str,
+    timeframe: &str,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM chart_candles WHERE mint_address = ? AND timeframe = ? ORDER BY open_time_ms DESC LIMIT ?",
+    )
+    .bind(mint)
+    .bind(timeframe)
+    .bind(limit.clamp(1, 2_000) as i64)
+    .fetch_all(pool)
+    .await?;
+    let mut candles = rows.into_iter()
+        .map(|payload| serde_json::from_str(&payload))
+        .collect::<std::result::Result<Vec<serde_json::Value>, _>>()?;
+    candles.reverse();
+    Ok(candles)
 }
