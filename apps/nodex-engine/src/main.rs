@@ -94,6 +94,7 @@ fn start_pumpswap_activity_processor(
     events: broadcast::Sender<serde_json::Value>,
     control: Arc<RwLock<EngineControl>>,
     rpc: Option<SolanaRpc>,
+    registry: TokenRegistry,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     tokio::spawn(async move {
@@ -232,6 +233,20 @@ fn start_pumpswap_activity_processor(
                         } else {
                             None
                         };
+                        let Some(pool_details) = pool_details else {
+                            continue;
+                        };
+                        let approved = registry.get(&pool_details.base_mint).is_some_and(|state| {
+                            state
+                                .data
+                                .pointer("/security/decision")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("APPROVED")
+                        });
+                        if !approved {
+                            continue;
+                        }
+                        let pool_details = Some(pool_details);
                         let pair_status = if pool_details.is_some() {
                             "resolved"
                         } else {
@@ -912,6 +927,7 @@ fn start_launch_processor(
         events.clone(),
         control.clone(),
         rpc.clone(),
+        token_registry.clone(),
     );
 
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
