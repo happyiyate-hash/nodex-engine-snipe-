@@ -300,6 +300,55 @@ fn start_pumpswap_activity_processor(
     });
 }
 
+/// Projects independent worker events into the canonical shared token state.
+/// Workers remain decoupled: they publish domain events and this projector updates
+/// only the matching domain of the token record.
+fn start_token_state_projector(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    database: sqlx::SqlitePool,
+    registry: TokenRegistry,
+) {
+    tokio::spawn(async move {
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(dropped_events = count, "Token state projector lagged; latest state may need reconciliation");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let Some(kind) = event.get("type").and_then(serde_json::Value::as_str) else { continue };
+            let Some(data) = event.get("data").cloned() else { continue };
+            let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str) else { continue };
+            let domain_patch = match kind {
+                "token_scan_started" => json!({"security":{"status":"scanning"}}),
+                "token_scan_progress" => json!({"security":{
+                    "status":"scanning",
+                    "progress":data.get("progress").cloned().unwrap_or(serde_json::Value::Null),
+                    "stage":data.get("stage").cloned().unwrap_or(serde_json::Value::Null),
+                    "message":data.get("message").cloned().unwrap_or(serde_json::Value::Null)
+                }}),
+                "token_scan_update" => json!({"security":data}),
+                "creator_history_update" => json!({"security":{"creator_history":data.get("history").cloned().unwrap_or(serde_json::Value::Null)}}),
+                "market_price_update" => json!({"market":data}),
+                _ => continue,
+            };
+            match registry.upsert_patch(mint, domain_patch) {
+                Ok(snapshot) => {
+                    if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                        tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
+                        continue;
+                    }
+                    let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                }
+                Err(error) => tracing::error!(%error, mint_address = mint, "Could not update canonical token state"),
+            }
+        }
+    });
+}
+
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -798,6 +847,8 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("launch_detected")
             | Some("token_scan_started")
             | Some("token_scan_update")
+            | Some("token_scan_progress")
+            | Some("token_state_updated")
             | Some("market_price_update")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
@@ -1010,6 +1061,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (events, _) = broadcast::channel(8192);
+    // Keep canonical token state synchronized from independent worker events.
+    start_token_state_projector(
+        events.subscribe(),
+        events.clone(),
+        db.clone(),
+        token_registry.clone(),
+    );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
     let control = Arc::new(RwLock::new(EngineControl {
