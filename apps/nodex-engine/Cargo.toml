@@ -18,6 +18,8 @@ nodex-trading = { path = "../../crates/nodex-trading" }
 serde.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true
+solana-keypair.workspace = true
+bs58.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
