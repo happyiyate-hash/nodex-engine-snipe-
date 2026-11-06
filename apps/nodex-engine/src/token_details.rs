@@ -10,6 +10,7 @@ pub fn build_token_detail_snapshot(
     let data = state.map(|item| &item.data);
     let identity = data.and_then(|value| value.get("identity")).cloned().unwrap_or_else(|| json!({}));
     let market = data.and_then(|value| value.get("market")).cloned().unwrap_or_else(|| json!({}));
+    let statistics = data.and_then(|value| value.get("statistics")).cloned().unwrap_or_else(|| json!({}));
     let chart = data.and_then(|value| value.get("chart")).cloned().unwrap_or_else(|| json!({
         "status": "unavailable",
         "timeframe": "5m",
@@ -53,6 +54,29 @@ pub fn build_token_detail_snapshot(
         market_object.entry(field).or_insert(Value::Null);
     }
 
+    let volume_5m = statistics.pointer("/pumpswap_volume/window_5m/total_volume_raw")
+        .and_then(Value::as_str)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(|lamports| lamports as f64 / 1_000_000_000.0);
+    let buys_5m = statistics.pointer("/pumpswap_volume/window_5m/buy_trade_count").cloned();
+    let sells_5m = statistics.pointer("/pumpswap_volume/window_5m/sell_trade_count").cloned();
+
+    let mut statistics_data = json!({
+        "market_cap_sol": market_data.get("market_cap_sol").cloned().unwrap_or(Value::Null),
+        "liquidity_sol": Value::Null,
+        "volume_5m_sol": volume_5m.map_or(Value::Null, |value| json!(value)),
+        "volume_1h_sol": Value::Null,
+        "buys_5m": buys_5m.unwrap_or(Value::Null),
+        "sells_5m": sells_5m.unwrap_or(Value::Null),
+        "holders": Value::Null,
+        "bonding_curve_pct": Value::Null,
+        "source_status": if statistics.get("pumpswap_volume").is_some() { "partial" } else { "waiting_for_provider" }
+    });
+    if let Some(object) = statistics_data.as_object_mut() {
+        object.insert("volume_5m_raw".into(), statistics.pointer("/pumpswap_volume/window_5m/total_volume_raw").cloned().unwrap_or(Value::Null));
+        object.insert("quote_amount_unit".into(), statistics.pointer("/pumpswap_volume/quote_amount_unit").cloned().unwrap_or(Value::Null));
+    }
+
     json!({
         "mint_address": mint,
         "version": state.map(|item| item.version).unwrap_or(0),
@@ -65,6 +89,7 @@ pub fn build_token_detail_snapshot(
             "total_supply": identity.get("total_supply").cloned().unwrap_or(Value::Null)
         },
         "market": market_data,
+        "statistics": statistics_data,
         "chart": chart,
         "position": {
             "has_position": !matching.is_empty(),
