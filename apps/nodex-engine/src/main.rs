@@ -561,7 +561,7 @@ fn start_launch_processor(
                 };
                 let decoded = match decode_pump_fun_create(&transaction, &signature, &program_id) {
                     Ok(Some(decoded)) => decoded,
-                    Ok(None) => return,
+                    Ok(None) => continue,
                     Err(error) => {
                         let _ = events.send(json!({"type":"diagnostic","data":{
                             "severity":"error","component":"pump_fun_decoder",
@@ -583,7 +583,7 @@ fn start_launch_processor(
                         decoded.slot
                     },
                 });
-                let Some(launch) = launch else { return };
+                let Some(launch) = launch else { continue };
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
                         let mint_address = launch.mint_address.clone();
