@@ -868,29 +868,62 @@ fn start_launch_processor(
             }
         });
     }
+}
 
+async fn build_approved_token_detail_snapshot(
+    state: &AppState,
+    mint: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(token_state) = state.token_registry.get(mint).filter(|snapshot| {
+        snapshot
+            .data
+            .pointer("/security/decision")
+            .and_then(serde_json::Value::as_str)
+            == Some("APPROVED")
+    }) else {
+        return Ok(None);
+    };
+
+    let positions = nodex_persistence::load_portfolio_positions(&state.database)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut detail =
+        token_details::build_token_detail_snapshot(mint, Some(&token_state), &positions);
+
+    let chart_candles =
+        match nodex_persistence::load_chart_candles(&state.database, mint, "5m", 500).await {
+            Ok(candles) => candles,
+            Err(error) => {
+                tracing::warn!(%error, mint_address = mint, "Could not load persisted token chart candles");
+                Vec::new()
+            }
+        };
+    detail["chart"] = json!({
+        "status": if chart_candles.is_empty() { "unavailable" } else { "available" },
+        "timeframe": "5m",
+        "candles": chart_candles,
+        "message": if chart_candles.is_empty() {
+            "Historical candle data is not available yet"
+        } else {
+            ""
+        }
+    });
+    Ok(Some(detail))
 }
 
 async fn token_state(
     State(state): State<AppState>,
     Path(mint): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    if let Some(snapshot) = state.token_registry.get(&mint) {
-        return Ok(Json(
-            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
-        ));
-    }
-    match nodex_persistence::get_token_state(&state.database, &mint).await {
-        Ok(Some(snapshot)) => Ok(Json(
-            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
-        )),
+    match build_approved_token_detail_snapshot(&state, &mint).await {
+        Ok(Some(snapshot)) => Ok(Json(snapshot)),
         Ok(None) => Err((
             axum::http::StatusCode::NOT_FOUND,
-            "Token state not found".to_string(),
+            "Approved token state not found".to_string(),
         )),
         Err(error) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            error.to_string(),
+            error,
         )),
     }
 }
@@ -1016,18 +1049,38 @@ async fn token_account_rent(
 // Only curated application events are allowed onto the browser WebSocket.
 // Raw Solana notifications, provider status chatter, diagnostics, and pool-level
 // activity remain internal to the engine and its processors.
+fn is_token_detail_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "token_market_update"
+            | "token_statistics_update"
+            | "chart_candle_update"
+            | "chart_candle_closed"
+            | "position_updated"
+            | "portfolio_summary_updated"
+    )
+}
+
 fn is_frontend_event(value: &serde_json::Value) -> bool {
     matches!(
         value.get("type").and_then(serde_json::Value::as_str),
         Some("connection_status")
             | Some("engine_state")
             | Some("launch_detected")
+            | Some("token_removed")
+            | Some("token_approval_pending")
             | Some("token_scan_started")
             | Some("token_scan_update")
             | Some("token_scan_progress")
             | Some("token_state_updated")
             | Some("profile_updated")
             | Some("market_price_update")
+            | Some("token_market_update")
+            | Some("token_statistics_update")
+            | Some("chart_candle_update")
+            | Some("chart_candle_closed")
+            | Some("position_updated")
+            | Some("portfolio_summary_updated")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
             | Some("strategy_rejected_token")
@@ -1162,7 +1215,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 
                     // Full token snapshots are delivered only to clients that explicitly
                     // subscribed to that mint. They are never broadcast to every browser.
-                    if event_type == "token_state_updated" {
+                    if event_type == "token_state_updated" || is_token_detail_event(event_type) {
                         let mint = value.pointer("/data/mint_address")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default();
@@ -1170,10 +1223,19 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                             continue;
                         }
                     } else if event_type == "market_price_update" {
-                        // The global stream receives only a compact market tick.
+                        // The global stream receives only compact ticks for approved tokens.
                         let Some(data) = value.get("data").cloned() else { continue };
                         let mint = data.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
-                        if mint.is_empty() { continue; }
+                        if mint.is_empty() {
+                            continue;
+                        }
+                        let approved = state.token_registry.get(mint).is_some_and(|snapshot| {
+                            snapshot.data.pointer("/security/decision")
+                                .and_then(serde_json::Value::as_str) == Some("APPROVED")
+                        });
+                        if !approved {
+                            continue;
+                        }
                         let snapshot = state.token_registry.get(mint);
                         let identity = snapshot.as_ref().and_then(|item| item.data.get("identity"));
                         value = json!({
@@ -1263,25 +1325,29 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                             if mint.is_empty() || mint.len() > 64 {
                                 Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"A valid token mint address is required."}}))
                             } else {
-                                subscribed_tokens.insert(mint.clone());
-                                let snapshot = match state.token_registry.get(&mint) {
-                                    Some(snapshot) => Some(snapshot),
-                                    None => match nodex_persistence::get_token_state(&state.database, &mint).await {
-                                        Ok(snapshot) => snapshot,
-                                        Err(error) => {
-                                            tracing::warn!(%error, mint_address = mint, "Could not load token snapshot for WebSocket subscription");
-                                            None
-                                        }
+                                match build_approved_token_detail_snapshot(&state, &mint).await {
+                                    Ok(Some(snapshot)) => {
+                                        subscribed_tokens.insert(mint.clone());
+                                        Some(json!({
+                                            "type":"token_detail_snapshot",
+                                            "data":{"subscription":"active","mint_address":mint,"snapshot":snapshot}
+                                        }))
                                     }
-                                };
-                                match snapshot {
-                                    Some(snapshot) => Some(json!({
-                                        "type":"token_detail_snapshot",
-                                        "data":{"subscription":"active","mint_address":mint,"snapshot":snapshot}
-                                    })),
-                                    None => {
+                                    Ok(None) => {
                                         subscribed_tokens.remove(&mint);
-                                        Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"Token state was not found."}}))
+                                        Some(json!({"type":"command_rejected","data":{
+                                            "command":"subscribe_token",
+                                            "mint":mint,
+                                            "reason":"Token is not present in the approved token registry."
+                                        }}))
+                                    }
+                                    Err(error) => {
+                                        subscribed_tokens.remove(&mint);
+                                        Some(json!({"type":"command_rejected","data":{
+                                            "command":"subscribe_token",
+                                            "mint":mint,
+                                            "reason":format!("Could not assemble token snapshot: {error}")
+                                        }}))
                                     }
                                 }
                             }
