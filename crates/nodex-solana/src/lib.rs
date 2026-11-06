@@ -97,6 +97,16 @@ impl SolanaRpc {
         }
     }
 
+    /// Read the confirmed native SOL balance for a public wallet address.
+    pub async fn get_balance_lamports(&self, address: &str) -> Result<u64> {
+        let response: Value = self.call(
+            "getBalance",
+            json!([address, {"commitment":"confirmed"}]),
+        ).await?;
+        response.get("value").and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("getBalance response omitted lamport value"))
+    }
+
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
         let response = self
             .client
