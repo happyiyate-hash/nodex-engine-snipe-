@@ -882,8 +882,17 @@ fn start_launch_processor(
                             }
                         });
                     }
+                    Ok(false) => {
+                        // Duplicate launch signature: it has already been persisted.
+                    }
                     Err(error) => {
-                        tracing::warn!(%error, "Could not synchronize Solana wallet balance")
+                        let _ = events.send(json!({"type":"diagnostic","data":{
+                            "severity":"error",
+                            "component":"launch_persistence",
+                            "message":error.to_string(),
+                            "signature":signature,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
                     }
                 }
             }
@@ -969,6 +978,87 @@ fn start_launch_processor(
         }
     });
 }
+
+async fn health() -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        mode: "paper",
+        service: "nodex-engine",
+    })
+}
+
+async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let stream = state.stream_status.read().await.clone();
+    let pumpswap_stream = state.pumpswap_status.read().await.clone();
+    let control = state.control.read().await.clone();
+    Json(json!({
+        "mode": control.mode,
+        "paused": control.paused,
+        "live_execution_enabled": false,
+        "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
+        "solana_stream": stream,
+        "solana_streams": {
+            "pump_fun": stream,
+            "pumpswap": pumpswap_stream
+        }
+    }))
+}
+
+/// Temporary maintenance endpoint. Deletes historical launch rows and raw
+/// upstream notification history only; live subscriptions and monitor state stay running.
+async fn clear_token_and_event_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let configured_key = state
+        .admin_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .ok_or((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Maintenance endpoint is disabled: set NODEX_ADMIN_API_KEY on the backend first."
+                .to_string(),
+        ))?;
+    let supplied_key = headers
+        .get("x-nodex-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if supplied_key.is_empty() || supplied_key != configured_key {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Invalid or missing NodeX admin key.".to_string(),
+        ));
+    }
+
+    let (deleted_token_records, deleted_raw_event_records) =
+        nodex_persistence::clear_token_and_event_history(&state.database)
+            .await
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("History cleanup failed: {error}"),
+                )
+            })?;
+
+    tracing::warn!(
+        deleted_token_records,
+        deleted_raw_event_records,
+        "NodeX historical token and raw event records cleared through maintenance API"
+    );
+
+    Ok(Json(json!({
+        "status": "ok",
+        "deleted_token_records": deleted_token_records,
+        "deleted_raw_event_records": deleted_raw_event_records,
+        "preserved": [
+            "live token discovery and market subscriptions",
+            "paper wallet and ledger",
+            "database schema and configuration",
+            "source code, API keys, and environment configuration"
+        ]
+    })))
+}
+
 
 async fn build_approved_token_detail_snapshot(
     state: &AppState,
