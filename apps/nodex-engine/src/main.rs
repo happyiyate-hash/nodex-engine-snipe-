@@ -353,10 +353,19 @@ fn start_token_state_projector(
                 registry.remove(mint);
                 let _ = events.send(json!({"type":"token_removed","data":{
                     "mint_address":mint,
-                    "reason":data.get("reason").cloned().unwrap_or(Value::Null),
+                    "reason":data.get("reason").cloned().unwrap_or(serde_json::Value::Null),
                     "removed_at":chrono::Utc::now().to_rfc3339()
                 }}));
                 continue;
+            }
+            if matches!(kind, "market_price_update" | "pumpswap_volume_update") {
+                let approved = registry.get(mint).is_some_and(|state| {
+                    state.data.pointer("/security/decision")
+                        .and_then(serde_json::Value::as_str) == Some("APPROVED")
+                });
+                if !approved {
+                    continue;
+                }
             }
             let domain_patch = match kind {
                 "token_scan_started" => json!({"security":{"status":"scanning"}}),
@@ -817,6 +826,13 @@ fn start_launch_processor(
         db.clone(),
         token_registry.clone(),
         profile_state.clone(),
+    );
+    // Candles are generated only for tokens whose security decision is APPROVED.
+    chart_service::start_chart_service(
+        events.subscribe(),
+        events.clone(),
+        db.clone(),
+        token_registry.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
