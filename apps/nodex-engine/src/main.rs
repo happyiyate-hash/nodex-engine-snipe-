@@ -970,7 +970,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         }
                     } else if event_type == "market_price_update" {
                         // The global stream receives only a compact market tick.
-                        let Some(data) = value.get("data") else { continue };
+                        let Some(data) = value.get("data").cloned() else { continue };
                         let mint = data.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
                         if mint.is_empty() { continue; }
                         let snapshot = state.token_registry.get(mint);
@@ -986,7 +986,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                                 "price_change_5m_pct":data.get("price_change_5m_pct").cloned().unwrap_or(serde_json::Value::Null),
                                 "market_cap_sol":data.get("market_cap_sol").cloned().unwrap_or(serde_json::Value::Null),
                                 "timestamp":data.get("received_at").cloned().unwrap_or(serde_json::Value::Null),
-                                "version":snapshot.map(|item| item.version)
+                                "version":snapshot.as_ref().map(|item| item.version)
                             }
                         });
                     } else if !is_frontend_event(&value) {
