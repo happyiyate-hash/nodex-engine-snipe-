@@ -3,7 +3,11 @@ use base64::Engine as _;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
-use std::{collections::{HashMap, HashSet}, str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::Duration,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -167,7 +171,11 @@ where
         .context("sending Solana accountSubscribe request")
 }
 
-async fn send_account_unsubscribe<S>(sink: &mut S, request_id: u64, subscription_id: u64) -> Result<()>
+async fn send_account_unsubscribe<S>(
+    sink: &mut S,
+    request_id: u64,
+    subscription_id: u64,
+) -> Result<()>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
