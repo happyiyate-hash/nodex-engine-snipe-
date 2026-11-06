@@ -804,11 +804,15 @@ async fn connect_market_stream(
                                     SPL_TOKEN_PROGRAM_ID,
                                 ),
                             ];
-                            if desired.len().saturating_add(required.len()) <= MAX_MARKET_SUBSCRIPTIONS {
-                                for (venue, account, expected_mint, expected_program) in required {
-                                    if desired.contains_key(&account) {
-                                        continue;
-                                    }
+                            let missing = required
+                                .into_iter()
+                                .filter(|(_, account, _, _)| !desired.contains_key(account))
+                                .collect::<Vec<_>>();
+                            let missing_count = missing.len();
+                            let remaining_capacity =
+                                MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len());
+                            if missing_count <= remaining_capacity {
+                                for (venue, account, expected_mint, expected_program) in missing {
                                     let child = MarketSubscription {
                                         mint: subscription.mint.clone(),
                                         account: account.clone(),
@@ -825,9 +829,10 @@ async fn connect_market_stream(
                             } else {
                                 let _ = events.send(json!({"type":"diagnostic","data":{
                                     "severity":"warning","component":"market_monitor",
-                                    "message":"Not enough remaining account-subscription capacity for the PumpSwap mint and both vaults.",
-                                    "mint_address":subscription.mint,"required_additional_accounts":3,
-                                    "remaining_capacity":MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len())
+                                    "message":"Not enough remaining account-subscription capacity for all missing PumpSwap mint and vault accounts; none were added.",
+                                    "mint_address":subscription.mint,
+                                    "required_additional_accounts":missing_count,
+                                    "remaining_capacity":remaining_capacity
                                 }}));
                             }
                             let _ = events.send(json!({"type":"market_pool_verified","data":{
