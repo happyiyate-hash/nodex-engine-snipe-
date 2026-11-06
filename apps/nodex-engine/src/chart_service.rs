@@ -52,6 +52,7 @@ pub fn start_chart_service(
 ) {
     tokio::spawn(async move {
         let mut candles = HashMap::<(String, String, i64), Candle>::new();
+        let mut last_persisted = HashMap::<(String, String, i64), std::time::Instant>::new();
         loop {
             let event = match receiver.recv().await {
                 Ok(event) => event,
@@ -126,10 +127,17 @@ pub fn start_chart_service(
 
                 if let Some(candle) = candles.get(&key).copied() {
                     let payload = candle.json(mint, timeframe, duration);
-                    if let Err(error) = nodex_persistence::save_chart_candle(
-                        &database, mint, timeframe, open_time, &payload,
-                    ).await {
-                        tracing::warn!(%error, mint_address=mint, timeframe, "Could not persist chart candle update");
+                    let should_persist = candle.closed || last_persisted
+                        .get(&key)
+                        .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5));
+                    if should_persist {
+                        if let Err(error) = nodex_persistence::save_chart_candle(
+                            &database, mint, timeframe, open_time, &payload,
+                        ).await {
+                            tracing::warn!(%error, mint_address=mint, timeframe, "Could not persist chart candle update");
+                        } else {
+                            last_persisted.insert(key.clone(), std::time::Instant::now());
+                        }
                     }
                     let _ = events.send(json!({"type":"chart_candle_update","data":payload}));
                 }
