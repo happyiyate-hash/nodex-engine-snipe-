@@ -1153,7 +1153,8 @@ async fn update_engine_control(
         "pause" | "stop" => {
             control.paused = true;
             control.token_discovery_enabled = false;
-        },
+        }
+        "configure" => {}
         other => return Err((StatusCode::BAD_REQUEST, format!("Unsupported engine command: {other}"))),
     }
     if let Some(enabled) = request.token_discovery_enabled {
