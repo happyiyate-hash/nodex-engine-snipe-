@@ -890,14 +890,20 @@ async fn build_approved_token_detail_snapshot(
     let mut detail =
         token_details::build_token_detail_snapshot(mint, Some(&token_state), &positions);
 
-    let chart_candles =
-        match nodex_persistence::load_chart_candles(&state.database, mint, "5m", 500).await {
-            Ok(candles) => candles,
-            Err(error) => {
-                tracing::warn!(%error, mint_address = mint, "Could not load persisted token chart candles");
-                Vec::new()
-            }
-        };
+    let chart_candles = match nodex_persistence::load_chart_candles(
+        &state.database,
+        mint,
+        "5m",
+        500,
+    )
+    .await
+    {
+        Ok(candles) => candles,
+        Err(error) => {
+            tracing::warn!(%error, mint_address = mint, "Could not load persisted token chart candles");
+            Vec::new()
+        }
+    };
     detail["chart"] = json!({
         "status": if chart_candles.is_empty() { "unavailable" } else { "available" },
         "timeframe": "5m",
@@ -921,10 +927,7 @@ async fn token_state(
             axum::http::StatusCode::NOT_FOUND,
             "Approved token state not found".to_string(),
         )),
-        Err(error) => Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            error,
-        )),
+        Err(error) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)),
     }
 }
 
