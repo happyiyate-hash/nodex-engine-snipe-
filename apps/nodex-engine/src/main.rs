@@ -2083,7 +2083,10 @@ async fn main() -> anyhow::Result<()> {
     let control = Arc::new(RwLock::new(EngineControl {
         paused: true,
         mode: "paper".into(),
-        available_modes: TradingModeAvailability {\n            paper: true,\n            real: false,\n        },
+        available_modes: TradingModeAvailability {
+            paper: true,
+            real: false,
+        },
         real_trading_available: false,
         token_discovery_enabled: false,
         new_entries_enabled: false,
