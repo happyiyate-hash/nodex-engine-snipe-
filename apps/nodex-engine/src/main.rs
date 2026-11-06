@@ -22,6 +22,7 @@ use nodex_trading::volume::{RollingTradeVolume, TradeSide, WindowVolumeMetrics};
 use serde::Serialize;
 use serde_json::json;
 use solana_keypair::Keypair;
+use solana_signer::Signer;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -1362,8 +1363,7 @@ async fn main() -> anyhow::Result<()> {
         });
     let wallet_address = wallet_keypair
         .as_ref()
-        .and_then(|keypair| keypair.try_pubkey().ok())
-        .map(|pubkey| pubkey.to_string());
+        .map(|keypair| keypair.pubkey().to_string());
     if wallet_address.is_none() {
         tracing::warn!("NODEX_WALLET_PRIVATE_KEY is missing or invalid; profile wallet address and live SOL balance are unavailable");
     }
