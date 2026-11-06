@@ -1358,11 +1358,12 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 bs58::decode(trimmed).into_vec().ok()
             }?;
-            Keypair::from_bytes(&bytes).ok()
+            Keypair::try_from(bytes.as_slice()).ok()
         });
     let wallet_address = wallet_keypair
         .as_ref()
-        .map(|keypair| keypair.pubkey().to_string());
+        .and_then(|keypair| keypair.try_pubkey().ok())
+        .map(|pubkey| pubkey.to_string());
     if wallet_address.is_none() {
         tracing::warn!("NODEX_WALLET_PRIVATE_KEY is missing or invalid; profile wallet address and live SOL balance are unavailable");
     }
@@ -1442,7 +1443,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let wallet = match nodex_persistence::load_paper_wallet(&db).await {
+    let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
         Some(wallet) => wallet,
         None => {
             let wallet = PaperWallet::new(config.paper_starting_balance_lamports);
