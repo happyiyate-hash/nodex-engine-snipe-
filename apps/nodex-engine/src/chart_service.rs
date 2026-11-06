@@ -18,7 +18,7 @@ struct Candle {
 impl Candle {
     fn new(open_time_ms: i64, price: f64) -> Self {
         Self { open_time_ms, open: price, high: price, low: price, close: price,
-            volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0 }
+            volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0, closed: false }
     }
 
     fn json(self, mint: &str, timeframe: &str, duration_ms: i64, closed: bool) -> Value {
@@ -27,7 +27,7 @@ impl Candle {
             "open_time_ms": self.open_time_ms, "close_time_ms": self.open_time_ms + duration_ms,
             "open": self.open, "high": self.high, "low": self.low, "close": self.close,
             "volume_sol": self.volume_sol, "trade_count": self.trade_count,
-            "buys": self.buys, "sells": self.sells, "closed": closed
+            "buys": self.buys, "sells": self.sells, "closed": closed || self.closed
         })
     }
 }
@@ -103,7 +103,7 @@ pub fn start_chart_service(
                     candle.low = candle.low.min(price);
                     candle.close = price;
                 } else if let Some(side) = side {
-                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle { open_time_ms: open_time, open: None, high: None, low: None, close: None, volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0 });
+                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle { open_time_ms: open_time, open: None, high: None, low: None, close: None, volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0, closed: false });
                     candle.volume_sol += volume;
                     candle.trade_count = candle.trade_count.saturating_add(1);
                     if side == "buy" { candle.buys = candle.buys.saturating_add(1); }
