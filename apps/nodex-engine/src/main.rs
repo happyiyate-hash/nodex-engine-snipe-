@@ -1066,6 +1066,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_progress")
             | Some("token_state_updated")
             | Some("profile_updated")
+            | Some("wallet_balance_updated")
             | Some("position_updated")
             | Some("portfolio_summary_updated")
             | Some("market_price_update")
@@ -1449,8 +1450,13 @@ async fn main() -> anyhow::Result<()> {
                         {
                             tracing::error!(%error, "Could not persist synchronized wallet profile");
                         } else {
-                            let _ = events_for_sync
-                                .send(json!({"type":"profile_updated","data":snapshot}));
+                            let _ = events_for_sync.send(json!({
+                                "type":"wallet_balance_updated",
+                                "data":{
+                                    "sol_balance":balance_sol,
+                                    "last_synced":snapshot.pointer("/existing_wallet/last_synced").cloned().unwrap_or(serde_json::Value::Null)
+                                }
+                            }));
                         }
                     }
                     Err(error) => {
