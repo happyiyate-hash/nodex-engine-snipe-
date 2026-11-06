@@ -1110,10 +1110,7 @@ async fn health() -> Json<Health> {
     })
 }
 
-fn verify_operator_key(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<(), (StatusCode, String)> {
+fn verify_operator_key(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let expected = state
         .admin_api_key
         .as_deref()
