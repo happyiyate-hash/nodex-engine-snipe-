@@ -368,7 +368,8 @@ fn start_token_state_projector(
                         continue;
                     }
                     if kind == "market_price_update" {
-                        let event_timestamp_ms = data.get("timestamp_ms")
+                        let event_timestamp_ms = data
+                            .get("timestamp_ms")
                             .or_else(|| data.get("block_time_ms"))
                             .and_then(serde_json::Value::as_i64)
                             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
