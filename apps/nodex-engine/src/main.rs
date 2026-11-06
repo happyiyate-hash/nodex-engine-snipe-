@@ -30,7 +30,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -498,73 +498,27 @@ fn start_launch_processor(
     market_monitor: Option<MarketMonitor>,
     token_registry: TokenRegistry,
 ) {
+    const LAUNCH_QUEUE_CAPACITY: usize = 256;
+    const LAUNCH_WORKER_COUNT: usize = 4;
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let concurrency = Arc::new(Semaphore::new(4));
-    tokio::spawn(async move {
-        loop {
-            let event = match receiver.recv().await {
-                Ok(event) => event,
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    let _ = events.send(json!({"type":"diagnostic","data":{
-                        "severity":"warning","component":"launch_processor",
-                        "message":"Transaction notification consumer lagged; some notifications may need RPC backfill.",
-                        "dropped_notifications":count,"received_at":chrono::Utc::now().to_rfc3339()
-                    }}));
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
-                || event
-                    .get("nodex_program_id")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(pump_fun_program_id.as_str())
-            {
-                continue;
-            }
-            if control.read().await.paused {
-                continue;
-            }
-            let Some(value) = event.pointer("/params/result/value") else {
-                continue;
-            };
-            let Some(signature) = value
-                .get("signature")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            {
-                let mut seen = seen_signatures.lock().await;
-                if !seen.insert(signature.clone()) {
-                    continue;
-                }
-                if seen.len() > 20_000 {
-                    seen.clear();
-                    seen.insert(signature.clone());
-                }
-            }
-            let slot_hint = event
-                .pointer("/params/result/context/slot")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or_default();
-            let concurrency = concurrency.clone();
-            let rpc = rpc.clone();
-            let events = events.clone();
-            let database = database.clone();
-            let program_id = pump_fun_program_id.clone();
-            let control = control.clone();
-            let market_monitor = market_monitor.clone();
-            let token_registry = token_registry.clone();
-            tokio::spawn(async move {
-                let _permit = match concurrency.acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => return,
-                };
-                if control.read().await.paused {
-                    return;
-                }
+    let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64)>(LAUNCH_QUEUE_CAPACITY);
+    let work_rx = Arc::new(Mutex::new(work_rx));
+
+    for _ in 0..LAUNCH_WORKER_COUNT {
+        let work_rx = work_rx.clone();
+        let seen_signatures = seen_signatures.clone();
+        let rpc = rpc.clone();
+        let events = events.clone();
+        let database = database.clone();
+        let program_id = pump_fun_program_id.clone();
+        let control = control.clone();
+        let market_monitor = market_monitor.clone();
+        let token_registry = token_registry.clone();
+        tokio::spawn(async move {
+            loop {
+                let work = { work_rx.lock().await.recv().await };
+                let Some((signature, slot_hint)) = work else { break };
+                if control.read().await.paused { continue; }
                 let mut transaction = None;
                 let mut last_error = None;
                 for attempt in 0..4 {
@@ -603,7 +557,7 @@ fn start_launch_processor(
                     }}));
                     // Allow reconnect/backfill to retry transactions that RPC could not return.
                     seen_signatures.lock().await.remove(&signature);
-                    return;
+                    continue;
                 };
                 let decoded = match decode_pump_fun_create(&transaction, &signature, &program_id) {
                     Ok(Some(decoded)) => decoded,
@@ -614,7 +568,7 @@ fn start_launch_processor(
                             "message":error.to_string(),"signature":signature,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
-                        return;
+                        continue;
                     }
                 };
                 let launch = detect_pump_fun_launch(CreateInstruction {
@@ -812,236 +766,62 @@ fn start_launch_processor(
                         }}));
                     }
                 }
-            });
+
+            }
+        });
+    }
+
+    tokio::spawn(async move {
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    let _ = events.send(json!({"type":"diagnostic","data":{
+                        "severity":"warning","component":"launch_processor",
+                        "message":"Transaction notification consumer lagged; some notifications may need RPC backfill.",
+                        "dropped_notifications":count,"received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if event.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
+                || event.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                    != Some(pump_fun_program_id.as_str())
+            { continue; }
+            if control.read().await.paused { continue; }
+            let Some(value) = event.pointer("/params/result/value") else { continue; };
+            let Some(signature) = value.get("signature")
+                .and_then(serde_json::Value::as_str).map(str::to_owned)
+            else { continue; };
+            {
+                let mut seen = seen_signatures.lock().await;
+                if !seen.insert(signature.clone()) { continue; }
+                if seen.len() > 20_000 {
+                    seen.clear();
+                    seen.insert(signature.clone());
+                }
+            }
+            let slot_hint = event.pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64).unwrap_or_default();
+            if let Err(error) = work_tx.try_send((signature.clone(), slot_hint)) {
+                let (reason, retryable) = match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => ("queue_full", true),
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => ("queue_closed", true),
+                };
+                if retryable { seen_signatures.lock().await.remove(&signature); }
+                let _ = events.send(json!({"type":"diagnostic","data":{
+                    "severity":"warning","component":"launch_processor_queue",
+                    "message":"Launch transaction was not admitted to the bounded worker queue; it remains eligible for a later backfill/re-delivery.",
+                    "reason":reason,"signature":signature,"slot_hint":slot_hint,
+                    "queue_capacity":LAUNCH_QUEUE_CAPACITY,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }}));
+                if reason == "queue_closed" { break; }
+            }
         }
     });
 }
-
-async fn health() -> Json<Health> {
-    Json(Health {
-        status: "ok",
-        mode: "paper",
-        service: "nodex-engine",
-    })
-}
-
-async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let stream = state.stream_status.read().await.clone();
-    let pumpswap_stream = state.pumpswap_status.read().await.clone();
-    let control = state.control.read().await.clone();
-    Json(json!({
-        "mode": control.mode,
-        "paused": control.paused,
-        "live_execution_enabled": false,
-        "live_execution_reason": "Live signing and transaction submission are not implemented; the backend refuses live mode.",
-        "solana_stream": stream,
-        "solana_streams": {
-            "pump_fun": stream,
-            "pumpswap": pumpswap_stream
-        }
-    }))
-}
-
-/// Temporary maintenance endpoint. Deletes historical launch rows and raw
-/// upstream notification history only; live subscriptions and monitor state stay running.
-async fn clear_token_and_event_history(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let configured_key = state
-        .admin_api_key
-        .as_deref()
-        .filter(|key| !key.is_empty())
-        .ok_or((
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Maintenance endpoint is disabled: set NODEX_ADMIN_API_KEY on the backend first."
-                .to_string(),
-        ))?;
-    let supplied_key = headers
-        .get("x-nodex-admin-key")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if supplied_key.is_empty() || supplied_key != configured_key {
-        return Err((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "Invalid or missing NodeX admin key.".to_string(),
-        ));
-    }
-
-    let (deleted_token_records, deleted_raw_event_records) =
-        nodex_persistence::clear_token_and_event_history(&state.database)
-            .await
-            .map_err(|error| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("History cleanup failed: {error}"),
-                )
-            })?;
-
-    tracing::warn!(
-        deleted_token_records,
-        deleted_raw_event_records,
-        "NodeX historical token and raw event records cleared through maintenance API"
-    );
-
-    Ok(Json(json!({
-        "status": "ok",
-        "deleted_token_records": deleted_token_records,
-        "deleted_raw_event_records": deleted_raw_event_records,
-        "preserved": [
-            "live token discovery and market subscriptions",
-            "paper wallet and ledger",
-            "database schema and configuration",
-            "source code, API keys, and environment configuration"
-        ]
-    })))
-}
-
-async fn token_state(
-    State(state): State<AppState>,
-    Path(mint): Path<String>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    if let Some(snapshot) = state.token_registry.get(&mint) {
-        return Ok(Json(
-            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
-        ));
-    }
-    match nodex_persistence::get_token_state(&state.database, &mint).await {
-        Ok(Some(snapshot)) => Ok(Json(
-            serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
-        )),
-        Ok(None) => Err((
-            axum::http::StatusCode::NOT_FOUND,
-            "Token state not found".to_string(),
-        )),
-        Err(error) => Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            error.to_string(),
-        )),
-    }
-}
-
-async fn recent_launches(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
-    let limit = query
-        .get("limit")
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(100);
-    let launches = nodex_persistence::list_recent_launches(&state.database, limit)
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })?;
-    Ok(Json(launches))
-}
-
-async fn recent_events(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
-    let limit = query
-        .get("limit")
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(200);
-    let events = nodex_persistence::list_recent_events(&state.database, limit)
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })?;
-    Ok(Json(events))
-}
-
-async fn scan_token(
-    State(state): State<AppState>,
-    Path(mint): Path<String>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let rpc = state.rpc.ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Solana HTTP RPC is not configured".to_string(),
-    ))?;
-    let report = rpc.scan_token_security(&mint).await.map_err(|error| {
-        (
-            axum::http::StatusCode::BAD_GATEWAY,
-            format!("Token security scan failed: {error}"),
-        )
-    })?;
-    Ok(Json(
-        serde_json::to_value(report).unwrap_or_else(|_| json!({})),
-    ))
-}
-
-async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
-    Json(state.wallet.read().await.clone())
-}
-
-/// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
-/// paper-trading funds and positions remain separate accounting domains.
-async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut profile = state.profile.read().await.clone();
-    let positions = match nodex_persistence::load_portfolio_positions(&state.database).await {
-        Ok(positions) => positions,
-        Err(error) => {
-            tracing::error!(%error, "Could not load portfolio positions for profile response");
-            Vec::new()
-        }
-    };
-    let open_positions: Vec<serde_json::Value> = positions
-        .iter()
-        .filter(|position| {
-            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-        })
-        .cloned()
-        .collect();
-    let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
-        items
-            .iter()
-            .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
-            .sum()
-    };
-    let position_count = open_positions.len();
-    let portfolio = json!({
-        "total_value_sol": sum_field(&open_positions, "current_value_sol"),
-        "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
-        "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
-        "positions": open_positions,
-        "position_count": position_count
-    });
-    if let Some(object) = profile.as_object_mut() {
-        object.insert("portfolio".into(), portfolio);
-    }
-    Json(profile)
-}
-
-async fn token_account_rent(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let rpc = state.rpc.ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Solana HTTP RPC is not configured".to_string(),
-    ))?;
-    let rent = rpc
-        .token_account_rent_lamports()
-        .await
-        .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
-    Ok(Json(json!({
-        "account_size_bytes": 165,
-        "rent_lamports": rent,
-        "rent_sol": rent as f64 / LAMPORTS_PER_SOL as f64,
-        "source": "solana_getMinimumBalanceForRentExemption"
-    })))
-}
-
-// Only curated application events are allowed onto the browser WebSocket.
-// Raw Solana notifications, provider status chatter, diagnostics, and pool-level
-// activity remain internal to the engine and its processors.
 fn is_frontend_event(value: &serde_json::Value) -> bool {
     matches!(
         value.get("type").and_then(serde_json::Value::as_str),
