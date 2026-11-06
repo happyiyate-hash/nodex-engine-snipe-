@@ -98,6 +98,39 @@ pub async fn load_profile(pool: &SqlitePool) -> Result<Option<serde_json::Value>
     payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
 }
 
+/// Store a paper position snapshot keyed by the canonical token mint.
+pub async fn save_portfolio_position(
+    pool: &SqlitePool,
+    mint: &str,
+    status: &str,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO portfolio_positions (mint_address, status, payload_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(mint_address) DO UPDATE SET
+            status=excluded.status,
+            payload_json=excluded.payload_json,
+            updated_at=excluded.updated_at"#,
+    )
+    .bind(mint)
+    .bind(status)
+    .bind(serde_json::to_string(payload)?)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_portfolio_positions(pool: &SqlitePool) -> Result<Vec<serde_json::Value>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM portfolio_positions ORDER BY updated_at DESC",
+    ).fetch_all(pool).await?;
+    rows.into_iter()
+        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .collect()
+}
+
 pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool> {
     let payload = serde_json::to_string(launch)?;
     let result = sqlx::query(
