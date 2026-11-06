@@ -373,7 +373,7 @@ fn start_token_state_projector(
                                 "mint_address":mint,
                                 "state_version":snapshot.version,
                                 "event_timestamp_ms":event_timestamp_ms,
-                                "market_patch":data
+                                "market_patch":data.clone()
                             }
                         }));
                     } else {
