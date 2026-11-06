@@ -521,7 +521,7 @@ fn start_launch_processor(
                             Err(error) => {
                                 let _ = events.send(json!({"type":"diagnostic","data":{
                                     "severity":"error","component":"token_registry",
-                                    "message":error,"mint_address":mint_address,
+                                    "message":error,"mint_address":mint_address.clone(),
                                     "received_at":chrono::Utc::now().to_rfc3339()
                                 }}));
                             }
