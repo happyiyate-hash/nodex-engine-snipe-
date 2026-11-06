@@ -59,7 +59,7 @@ The first startup creates a persisted `trading` configuration record when none e
 
 Mutating configuration and HTTP engine controls require the `x-nodex-admin-key` header. Do not embed this operator key in a distributed mobile app. Live/real trading remains unavailable and requests to switch away from paper mode are rejected.
 
-The process now starts in a paused/idle control state; an explicit Start/Resume command enables launch discovery processing. The provider stream workers are currently initialized by the process separately, so idle mode does not yet guarantee that all upstream WebSocket connections are closed. Automated paper entry execution and automatic stop-loss/take-profit exits are not implemented by this configuration API alone; those strategy execution paths still need to be wired before these values can place or close positions.
+The process starts in a paused/idle state with no Solana log-stream or market-monitor WebSocket connection. An explicit Start/Resume command opens the provider streams and enables launch discovery; Pause/Stop pauses discovery and closes the log-stream workers. The market-account monitor is started on the first Start and can remain available to track existing positions while the independent position-monitoring switch is enabled. Automated paper entry execution and automatic stop-loss/take-profit exits are not implemented by this configuration API alone; those strategy execution paths still need to be wired before these values can place or close positions. The independent new-entry switch is stored and exposed, but it does not create trades until the paper execution strategy is implemented.
 
 ### WebSocket commands
 
