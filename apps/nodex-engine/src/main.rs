@@ -821,6 +821,12 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
     Json(state.wallet.read().await.clone())
 }
 
+/// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
+/// paper-trading funds and positions remain separate accounting domains.
+async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.profile.read().await.clone())
+}
+
 async fn token_account_rent(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
