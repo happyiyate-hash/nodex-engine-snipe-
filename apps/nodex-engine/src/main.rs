@@ -860,7 +860,6 @@ fn start_launch_processor(
                                 }
                             }
                         });
-
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Could not synchronize Solana wallet balance")
