@@ -853,7 +853,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_update")
             | Some("token_scan_progress")
             | Some("token_state_updated")
-            | Some("profile_updated")\n            | Some("profile_updated")
+            | Some("profile_updated")
             | Some("market_price_update")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
@@ -1154,9 +1154,11 @@ async fn main() -> anyhow::Result<()> {
     }
     nodex_persistence::save_profile(&db, &profile).await?;
     let profile_state = Arc::new(RwLock::new(profile));
+    let (events, _) = broadcast::channel(8192);
     if let (Some(rpc_client), Some(address)) = (config.solana_http_url.clone().map(SolanaRpc::new), wallet_address.clone()) {
         let profile_for_sync = profile_state.clone();
         let database_for_sync = db.clone();
+        let events_for_sync = events.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1178,6 +1180,8 @@ async fn main() -> anyhow::Result<()> {
                         drop(current);
                         if let Err(error) = nodex_persistence::save_profile(&database_for_sync, &snapshot).await {
                             tracing::error!(%error, "Could not persist synchronized wallet profile");
+                        } else {
+                            let _ = events_for_sync.send(json!({"type":"profile_updated","data":snapshot}));
                         }
                     }
                     Err(error) => tracing::warn!(%error, "Could not synchronize Solana wallet balance"),
@@ -1195,7 +1199,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let (events, _) = broadcast::channel(8192);
     // Keep canonical token state synchronized from independent worker events.
     start_token_state_projector(
         events.subscribe(),
