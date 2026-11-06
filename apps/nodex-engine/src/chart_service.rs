@@ -103,7 +103,7 @@ pub fn start_chart_service(
                     candle.low = candle.low.min(price);
                     candle.close = price;
                 } else if let Some(side) = side {
-                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle::new(open_time, 0.0));
+                    let candle = candles.entry(key.clone()).or_insert_with(|| Candle { open_time_ms: open_time, open: None, high: None, low: None, close: None, volume_sol: 0.0, trade_count: 0, buys: 0, sells: 0 });
                     candle.volume_sol += volume;
                     candle.trade_count = candle.trade_count.saturating_add(1);
                     if side == "buy" { candle.buys = candle.buys.saturating_add(1); }
