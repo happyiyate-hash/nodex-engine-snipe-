@@ -412,13 +412,22 @@ fn start_token_state_projector(
                                                 json!(chrono::Utc::now().to_rfc3339()),
                                             );
                                         }
+                                        let position_id = position
+                                            .get("position_id")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or(mint);
                                         if let Err(error) =
                                             nodex_persistence::save_portfolio_position(
-                                                &database, mint, "open", position,
+                                                &database, position_id, mint, "open", position,
                                             )
                                             .await
                                         {
-                                            tracing::error!(%error, mint_address = mint, "Could not persist marked portfolio position");
+                                            tracing::error!(%error, mint_address = mint, position_id, "Could not persist marked portfolio position");
+                                        } else {
+                                            let _ = events.send(json!({
+                                                "type":"position_updated",
+                                                "data":position.clone()
+                                            }));
                                         }
                                     }
                                     let refreshed =
@@ -450,6 +459,7 @@ fn start_token_state_projector(
                                     let position_count = open.len();
                                     let portfolio = json!({
                                         "total_value_sol": sum(&open, "current_value_sol"),
+                                        "total_invested_sol": sum(&open, "cost_basis_sol"),
                                         "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
                                         "realized_pnl_sol": sum(&refreshed, "realized_pnl_sol"),
                                         "positions": open,
@@ -469,7 +479,17 @@ fn start_token_state_projector(
                                     {
                                         tracing::error!(%error, "Could not persist recalculated profile portfolio");
                                     } else {
-                                        let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                                        let _ = events.send(json!({
+                                            "type":"portfolio_summary_updated",
+                                            "data":{
+                                                "total_value_sol":portfolio["total_value_sol"],
+                                                "total_invested_sol":portfolio["total_invested_sol"],
+                                                "unrealized_pnl_sol":portfolio["unrealized_pnl_sol"],
+                                                "realized_pnl_sol":portfolio["realized_pnl_sol"],
+                                                "position_count":portfolio["position_count"],
+                                                "updated_at":chrono::Utc::now().to_rfc3339()
+                                            }
+                                        }));
                                     }
                                 }
                                 Err(error) => {
@@ -1046,6 +1066,8 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_progress")
             | Some("token_state_updated")
             | Some("profile_updated")
+            | Some("position_updated")
+            | Some("portfolio_summary_updated")
             | Some("market_price_update")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
