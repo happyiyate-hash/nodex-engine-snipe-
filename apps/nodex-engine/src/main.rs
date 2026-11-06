@@ -254,6 +254,7 @@ fn start_pumpswap_activity_processor(
                             "pool_address":pool,
                             "pool_pair_status":pair_status,
                             "base_mint":pool_details.as_ref().map(|details| details.base_mint.clone()),
+                            "mint_address":pool_details.as_ref().map(|details| details.base_mint.clone()),
                             "quote_mint":pool_details.as_ref().map(|details| details.quote_mint.clone()),
                             "pool_creator":pool_details.as_ref().map(|details| details.creator.clone()),
                             "user_address":user,
