@@ -436,6 +436,7 @@ fn start_token_state_projector(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
+    control: Arc<RwLock<EngineControl>>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -538,7 +539,7 @@ fn start_token_state_projector(
                     } else {
                         let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
                     }
-                    if kind == "market_price_update" {
+                    if kind == "market_price_update" && control.read().await.position_monitoring_enabled {
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
                         {
@@ -2010,23 +2011,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Keep canonical token state synchronized from independent worker events.
-    start_token_state_projector(
-        events.subscribe(),
-        events.clone(),
-        db.clone(),
-        token_registry.clone(),
-        profile_state.clone(),
-    );
-    // Candles are generated only for tokens whose security decision is APPROVED.
-    chart_service::start_chart_service(
-        events.subscribe(),
-        events.clone(),
-        db.clone(),
-        token_registry.clone(),
-    );
-    let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
-    let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
     // The process starts online but idle. An explicit operator Start/Resume command
     // is required before launch processors accept discovery work.
     let control = Arc::new(RwLock::new(EngineControl {
@@ -2037,6 +2021,24 @@ async fn main() -> anyhow::Result<()> {
         position_monitoring_enabled: true,
     }));
 
+    // Keep canonical token state synchronized from independent worker events.
+    start_token_state_projector(
+        events.subscribe(),
+        events.clone(),
+        db.clone(),
+        token_registry.clone(),
+        profile_state.clone(),
+        control.clone(),
+    );
+    // Candles are generated only for tokens whose security decision is APPROVED.
+    chart_service::start_chart_service(
+        events.subscribe(),
+        events.clone(),
+        db.clone(),
+        token_registry.clone(),
+    );
+    let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
+    let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
