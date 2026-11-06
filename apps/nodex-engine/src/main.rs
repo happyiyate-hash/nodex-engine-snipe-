@@ -362,7 +362,23 @@ fn start_token_state_projector(
                         tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
                         continue;
                     }
-                    let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                    if kind == "market_price_update" {
+                        let event_timestamp_ms = data.get("timestamp_ms")
+                            .or_else(|| data.get("block_time_ms"))
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                        let _ = events.send(json!({
+                            "type":"token_market_update",
+                            "data":{
+                                "mint_address":mint,
+                                "state_version":snapshot.version,
+                                "event_timestamp_ms":event_timestamp_ms,
+                                "market_patch":data
+                            }
+                        }));
+                    } else {
+                        let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                    }
                     if kind == "market_price_update" {
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
@@ -1067,6 +1083,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_update")
             | Some("token_scan_progress")
             | Some("token_state_updated")
+            | Some("token_market_update")
             | Some("profile_updated")
             | Some("wallet_balance_updated")
             | Some("position_updated")
@@ -1206,7 +1223,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 
                     // Full token snapshots are delivered only to clients that explicitly
                     // subscribed to that mint. They are never broadcast to every browser.
-                    if event_type == "token_state_updated" {
+                    if event_type == "token_state_updated" || event_type == "token_market_update" {
                         let mint = value.pointer("/data/mint_address")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default();
