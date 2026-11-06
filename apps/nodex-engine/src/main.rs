@@ -60,6 +60,8 @@ enum ClientCommand {
     Start,
     SetMode { mode: String },
     Status,
+    SubscribeToken { mint: String },
+    UnsubscribeToken { mint: String },
 }
 
 #[derive(Serialize)]
@@ -916,6 +918,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
     let (mut sender, mut receiver_socket) = socket.split();
     let mut receiver = state.events.subscribe();
+    let mut subscribed_tokens = HashSet::<String>::new();
     let status = state.stream_status.read().await.clone();
     let pumpswap_status = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
@@ -954,7 +957,39 @@ async fn client_socket(socket: WebSocket, state: AppState) {
             }
             event = receiver.recv() => match event {
                 Ok(mut value) => {
-                    if !is_frontend_event(&value) {
+                    let event_type = value.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+
+                    // Full token snapshots are delivered only to clients that explicitly
+                    // subscribed to that mint. They are never broadcast to every browser.
+                    if event_type == "token_state_updated" {
+                        let mint = value.pointer("/data/mint_address")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        if !subscribed_tokens.contains(mint) {
+                            continue;
+                        }
+                    } else if event_type == "market_price_update" {
+                        // The global stream receives only a compact market tick.
+                        let Some(data) = value.get("data") else { continue };
+                        let mint = data.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
+                        if mint.is_empty() { continue; }
+                        let snapshot = state.token_registry.get(mint);
+                        let identity = snapshot.as_ref().and_then(|item| item.data.get("identity"));
+                        value = json!({
+                            "type":"market_tick",
+                            "data":{
+                                "mint_address":mint,
+                                "name":identity.and_then(|v| v.get("name")).cloned().unwrap_or(serde_json::Value::Null),
+                                "symbol":identity.and_then(|v| v.get("symbol")).cloned().unwrap_or(serde_json::Value::Null),
+                                "price_sol":data.get("price_sol").cloned().unwrap_or(serde_json::Value::Null),
+                                "price_change_1m_pct":data.get("price_change_1m_pct").cloned().unwrap_or(serde_json::Value::Null),
+                                "price_change_5m_pct":data.get("price_change_5m_pct").cloned().unwrap_or(serde_json::Value::Null),
+                                "market_cap_sol":data.get("market_cap_sol").cloned().unwrap_or(serde_json::Value::Null),
+                                "timestamp":data.get("received_at").cloned().unwrap_or(serde_json::Value::Null),
+                                "version":snapshot.map(|item| item.version)
+                            }
+                        });
+                    } else if !is_frontend_event(&value) {
                         continue;
                     }
                     let paused = state.control.read().await.paused;
@@ -1021,6 +1056,39 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         Ok(ClientCommand::Status) => {
                             let control = state.control.read().await.clone();
                             Some(json!({"type":"engine_state","data":control}))
+                        }
+                        Ok(ClientCommand::SubscribeToken { mint }) => {
+                            let mint = mint.trim().to_owned();
+                            if mint.is_empty() || mint.len() > 64 {
+                                Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"A valid token mint address is required."}}))
+                            } else {
+                                subscribed_tokens.insert(mint.clone());
+                                let snapshot = match state.token_registry.get(&mint) {
+                                    Some(snapshot) => Some(snapshot),
+                                    None => match nodex_persistence::get_token_state(&state.database, &mint).await {
+                                        Ok(snapshot) => snapshot,
+                                        Err(error) => {
+                                            tracing::warn!(%error, mint_address = mint, "Could not load token snapshot for WebSocket subscription");
+                                            None
+                                        }
+                                    }
+                                };
+                                match snapshot {
+                                    Some(snapshot) => Some(json!({
+                                        "type":"token_detail_snapshot",
+                                        "data":{"subscription":"active","mint_address":mint,"snapshot":snapshot}
+                                    })),
+                                    None => {
+                                        subscribed_tokens.remove(&mint);
+                                        Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"Token state was not found."}}))
+                                    }
+                                }
+                            }
+                        }
+                        Ok(ClientCommand::UnsubscribeToken { mint }) => {
+                            let mint = mint.trim().to_owned();
+                            subscribed_tokens.remove(&mint);
+                            Some(json!({"type":"token_unsubscribed","data":{"mint_address":mint}}))
                         }
                         Err(error) => Some(json!({"type":"diagnostic","data":{"severity":"error","component":"websocket_command","message":error.to_string(),"received_at":chrono::Utc::now().to_rfc3339()}})),
                     };
