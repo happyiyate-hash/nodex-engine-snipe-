@@ -47,6 +47,25 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS profiles (
+            id TEXT PRIMARY KEY NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS portfolio_positions (
+            mint_address TEXT PRIMARY KEY NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS token_states (
             mint_address TEXT PRIMARY KEY NOT NULL,
             version INTEGER NOT NULL,
@@ -57,6 +76,26 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     Ok(pool)
+}
+
+/// Persist the assembled profile snapshot independently from the paper-trading wallet.
+pub async fn save_profile(pool: &SqlitePool, profile: &serde_json::Value) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO profiles (id, payload_json, updated_at) VALUES ('default', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at"#,
+    )
+    .bind(serde_json::to_string(profile)?)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_profile(pool: &SqlitePool) -> Result<Option<serde_json::Value>> {
+    let payload = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM profiles WHERE id='default'",
+    ).fetch_optional(pool).await?;
+    payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
 }
 
 pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool> {
