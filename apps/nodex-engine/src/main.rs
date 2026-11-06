@@ -45,6 +45,7 @@ struct AppState {
     admin_api_key: Option<String>,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
+    profile: Arc<RwLock<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -851,7 +852,8 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_started")
             | Some("token_scan_update")
             | Some("token_scan_progress")
-            | Some("token_state_updated")\n            | Some("profile_updated")
+            | Some("token_state_updated")
+            | Some("profile_updated")\n            | Some("profile_updated")
             | Some("market_price_update")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
@@ -1155,7 +1157,6 @@ async fn main() -> anyhow::Result<()> {
     if let (Some(rpc_client), Some(address)) = (config.solana_http_url.clone().map(SolanaRpc::new), wallet_address.clone()) {
         let profile_for_sync = profile_state.clone();
         let database_for_sync = db.clone();
-        let events_for_sync = broadcast::Sender::<serde_json::Value>::clone;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1333,11 +1334,13 @@ async fn main() -> anyhow::Result<()> {
             .filter(|value| !value.trim().is_empty()),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
+        profile: profile_state,
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
-        .route("/api/v1/paper-wallet", get(paper_wallet))\n        .route("/api/v1/profile", get(get_profile))
+        .route("/api/v1/paper-wallet", get(paper_wallet))
+        .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/tokens/:mint/state", get(token_state))
         .route("/api/v1/events/recent", get(recent_events))
