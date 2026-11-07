@@ -1,6 +1,5 @@
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
-use nodex_trading::paper_wallet::{LedgerEntry, PaperWallet};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     Row, SqlitePool,
