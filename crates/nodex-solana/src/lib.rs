@@ -798,6 +798,8 @@ pub struct TokenSecurityReport {
     pub freeze_authority: Option<String>,
     pub extensions: Vec<String>,
     pub holder_distribution: Option<HolderDistribution>,
+    #[serde(default)]
+    pub creator_history: Option<CreatorHistoryReport>,
     pub metadata: TokenMetadataReport,
     pub checks: Vec<SecurityCheck>,
     pub decision: String,
@@ -818,6 +820,7 @@ impl TokenSecurityReport {
             freeze_authority: None,
             extensions: vec![],
             holder_distribution: None,
+            creator_history: None,
             metadata: TokenMetadataReport {
                 status: "unverified".into(),
                 caveat: "Mint account metadata was not available.".into(),
@@ -1149,6 +1152,7 @@ pub fn parse_mint_security_report(
         freeze_authority,
         extensions,
         holder_distribution: None,
+        creator_history: None,
         metadata,
         checks,
         decision: decision.into(),
