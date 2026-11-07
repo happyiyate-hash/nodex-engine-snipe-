@@ -1035,9 +1035,13 @@ fn start_launch_processor(
                             // Market observation is independent from trade approval.
                             // Security decisions gate execution, never token visibility or price collection.
                             if let Some(monitor) = approved_monitor.read().await.clone() {
-                                match monitor.subscribe_pump_fun_bonding_curve(
-                                    &scan_mint, &approved_program_id
-                                ).await {
+                                match monitor
+                                    .subscribe_pump_fun_bonding_curve(
+                                        &scan_mint,
+                                        &approved_program_id,
+                                    )
+                                    .await
+                                {
                                     Ok(account_address) => {
                                         let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
                                             "mint_address":scan_mint,
