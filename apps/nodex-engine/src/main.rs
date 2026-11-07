@@ -202,6 +202,7 @@ struct Health {
 /// Projects independent worker events into the canonical shared token state.
 /// Workers remain decoupled: they publish domain events and this projector updates
 /// only the matching domain of the token record.
+#[allow(clippy::too_many_arguments)]
 fn start_token_state_projector(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -578,6 +579,7 @@ async fn resolve_discovery_metadata(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
