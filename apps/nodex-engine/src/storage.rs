@@ -13,6 +13,33 @@ pub struct DiskUsage {
     pub used_percent: String,
 }
 
+
+#[derive(Debug, Serialize)]
+pub struct StorageOverview {
+    pub disk: Option<DiskUsage>,
+    pub disk_error: Option<String>,
+    pub database: DatabaseUsage,
+    pub system_journal: JournalUsage,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatabaseUsage {
+    pub path: Option<String>,
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+    pub total_file_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JournalUsage {
+    pub available: bool,
+    pub reported_size_bytes: Option<u64>,
+    pub raw_report: Option<String>,
+    pub note: String,
+}
+
 async fn command_output(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program)
         .args(args)
