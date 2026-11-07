@@ -882,7 +882,62 @@ fn start_launch_processor(
                                 )
                                 .await
                             {
-                                Ok(report) => {
+                                Ok(mut report) => {
+                                    // Resolve canonical Metaplex metadata for standard SPL
+                                    // tokens; embedded Token-2022 metadata remains preferred.
+                                    if report.metadata.name.is_none() {
+                                        match scan_rpc.resolve_metaplex_metadata(&scan_mint).await {
+                                            Ok(Some(metadata)) => report.metadata = metadata,
+                                            Ok(None) => {},
+                                            Err(error) => {
+                                                tracing::debug!(%error, mint_address=%scan_mint, "Metaplex metadata PDA was unavailable");
+                                            }
+                                        }
+                                    }
+                                    let mut identity_patch = serde_json::Map::new();
+                                    if let Some(name) = report.metadata.name.as_ref() {
+                                        identity_patch.insert("name".into(), json!(name));
+                                    }
+                                    if let Some(symbol) = report.metadata.symbol.as_ref() {
+                                        identity_patch.insert("symbol".into(), json!(symbol));
+                                    }
+                                    if let Some(uri) = report.metadata.uri.as_ref() {
+                                        identity_patch.insert("metadata_uri".into(), json!(uri));
+                                    }
+                                    if let Some(decimals) = report.decimals {
+                                        identity_patch.insert("decimals".into(), json!(decimals));
+                                    }
+                                    if let Some(supply) = report.supply_raw.as_ref() {
+                                        identity_patch.insert("total_supply_raw".into(), json!(supply));
+                                    }
+                                    if !identity_patch.is_empty() {
+                                        match approved_registry.upsert_patch(
+                                            &scan_mint,
+                                            json!({"identity":identity_patch}),
+                                        ) {
+                                            Ok(snapshot) => {
+                                                if let Err(error) = nodex_persistence::save_token_state(
+                                                    &approved_database, &snapshot
+                                                ).await {
+                                                    tracing::warn!(%error, mint_address=%scan_mint, "Could not persist resolved token identity");
+                                                }
+                                                let _ = scan_events.send(json!({
+                                                    "type":"token_metadata_updated",
+                                                    "data":{
+                                                        "mint_address":scan_mint,
+                                                        "name":report.metadata.name,
+                                                        "symbol":report.metadata.symbol,
+                                                        "metadata_uri":report.metadata.uri,
+                                                        "decimals":report.decimals,
+                                                        "total_supply_raw":report.supply_raw,
+                                                        "source":report.metadata.source,
+                                                        "status":report.metadata.status
+                                                    }
+                                                }));
+                                            }
+                                            Err(error) => tracing::warn!(%error, mint_address=%scan_mint, "Could not update canonical token identity"),
+                                        }
+                                    }
                                     let decision = report.decision.clone();
                                     match decision.as_str() {
                                         "APPROVED" => {
