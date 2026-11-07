@@ -1497,10 +1497,14 @@ pub async fn run_logs_stream(
     status: std::sync::Arc<tokio::sync::RwLock<StreamStatus>>,
     rpc: Option<SolanaRpc>,
     notification_limit: Option<usize>,
+    checkpoint: Option<std::sync::Arc<tokio::sync::Mutex<Option<(u64, String)>>>>,
 ) {
     let mut reconnect_count = 0_u64;
     let mut next_endpoint = 0usize;
-    let mut last_seen_signature: Option<(u64, String)> = None;
+    let mut last_seen_signature: Option<(u64, String)> = match &checkpoint {
+        Some(checkpoint) => checkpoint.lock().await.clone(),
+        None => None,
+    };
     let mut recovery_incomplete = false;
     let mut batch_notifications = 0usize;
     let mut batch_signatures = HashSet::<String>::new();
@@ -1530,6 +1534,9 @@ pub async fn run_logs_stream(
                     "notifications":batch_notifications,
                     "received_at":chrono::Utc::now().to_rfc3339()
                 }}));
+                if let Some(checkpoint) = &checkpoint {
+                    *checkpoint.lock().await = last_seen_signature.clone();
+                }
                 return;
             }
             Ok(false) => {}
