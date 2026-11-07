@@ -292,13 +292,6 @@ fn start_pumpswap_activity_processor(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
 
-            if notification.get("type").and_then(serde_json::Value::as_str)
-                == Some("discovery_batch_full")
-            {
-                producer_batch_tracker.mark_full();
-                continue;
-            }
-
             if notification
                 .get("method")
                 .and_then(serde_json::Value::as_str)
@@ -1251,6 +1244,13 @@ fn start_launch_processor(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+
+            if notification.get("type").and_then(serde_json::Value::as_str)
+                == Some("discovery_batch_full")
+            {
+                producer_batch_tracker.mark_full();
+                continue;
+            }
 
             if notification
                 .get("method")
