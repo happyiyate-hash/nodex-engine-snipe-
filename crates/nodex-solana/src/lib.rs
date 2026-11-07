@@ -301,6 +301,27 @@ impl SolanaRpc {
         }))
     }
 
+    /// Resolve token identity from the mint's actual token program before security scanning.
+    /// Standard SPL tokens use the Metaplex metadata PDA; Token-2022 tokens use their
+    /// embedded TokenMetadata extension when present.
+    pub async fn resolve_token_metadata(&self, mint: &str) -> Result<TokenMetadataReport> {
+        let Some((owner, data, _slot)) = self.get_account_data(mint).await? else {
+            return Err(anyhow!("Mint account was not found while resolving metadata"));
+        };
+        match owner.as_str() {
+            SPL_TOKEN_PROGRAM_ID => {
+                Ok(self.resolve_metaplex_metadata(mint).await?.unwrap_or_else(|| TokenMetadataReport {
+                    source: "metaplex_metadata_pda".into(),
+                    status: "unavailable".into(),
+                    caveat: "No Metaplex metadata account was found for this mint.".into(),
+                    ..Default::default()
+                }))
+            }
+            TOKEN_2022_PROGRAM_ID => parse_token_2022_metadata(&data),
+            _ => Err(anyhow!("Mint account is owned by an unsupported token program")),
+        }
+    }
+
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
     /// This is the first scanner stage; it deliberately cannot approve a token by itself.
     pub async fn scan_token_security(&self, mint: &str) -> Result<TokenSecurityReport> {
