@@ -1304,7 +1304,6 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
     let stream = state.stream_status.read().await.clone();
     let pumpswap_stream = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
-    let trading_settings = state.trading_settings.read().await.clone();
     Json(json!({
         "mode": control.mode,
         "paused": control.paused,
@@ -1511,6 +1510,20 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
             position.get("status").and_then(serde_json::Value::as_str) == Some("open")
         })
         .cloned()
+        .map(|mut position| {
+            // Risk configuration belongs to /api/v1/config/trading, not the
+            // profile/portfolio snapshot. Do not expose per-position SL/TP fields here.
+            if let Some(fields) = position.as_object_mut() {
+                fields.retain(|key, _| {
+                    let normalized = key.to_ascii_lowercase();
+                    !normalized.contains("stop_loss")
+                        && !normalized.contains("take_profit")
+                        && !normalized.contains("stoploss")
+                        && !normalized.contains("takeprofit")
+                });
+            }
+            position
+        })
         .collect();
     let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
         items
@@ -1567,7 +1580,6 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
 
     if let Some(object) = profile.as_object_mut() {
         object.insert("paper_wallet".into(), json!(paper_wallet));
-        object.insert("trading_settings".into(), json!(trading_settings));
         object.insert("portfolio".into(), portfolio);
     }
     Json(profile)
