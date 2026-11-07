@@ -494,7 +494,6 @@ fn start_launch_processor(
         let seen_signatures = seen_signatures.clone();
         let rpc = rpc.clone();
         let events = events.clone();
-        let database = database.clone();
         let program_id = pump_fun_program_id.clone();
         let control = control.clone();
         let market_monitor = market_monitor.clone();
@@ -643,7 +642,7 @@ fn start_launch_processor(
                                 "metadata_uri":metadata.metadata_uri,
                                 "metadata_status":metadata.status,
                                 "scan_status":"pending",
-                                "discovery":snapshot.data.get("discovery").cloned().unwrap_or(Value::Null)
+                                "discovery":snapshot.data.get("discovery").cloned().unwrap_or(serde_json::Value::Null)
                             }
                         }));
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
@@ -734,7 +733,7 @@ fn start_launch_processor(
                                             "security":report.clone(),
                                             "market":{"status":"starting"}
                                         }))
-                                    } else { Err("Approved launch could not be persisted".to_string()) };
+                                    } else { Err("Approved launch could not be persisted") };
                                     let approval_persisted = match approved_state {
                                         Ok(snapshot) => nodex_persistence::save_token_state(&approved_database, &snapshot).await.is_ok(),
                                         Err(error) => {
