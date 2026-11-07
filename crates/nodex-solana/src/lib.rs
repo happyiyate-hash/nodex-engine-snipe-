@@ -12,8 +12,10 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{stream, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use solana_pubkey::Pubkey;
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -235,6 +237,54 @@ impl SolanaRpc {
 
     pub async fn recent_prioritization_fees(&self) -> Result<Vec<PriorityFeeSample>> {
         self.call("getRecentPrioritizationFees", json!([])).await
+    }
+
+    /// Resolve standard SPL token metadata from the canonical Metaplex metadata PDA.
+    /// This reads on-chain metadata only; it does not trust or fetch arbitrary off-chain URLs.
+    pub async fn resolve_metaplex_metadata(&self, mint: &str) -> Result<Option<TokenMetadataReport>> {
+        const METADATA_PROGRAM_ID: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
+        let mint_key = Pubkey::from_str(mint).context("invalid token mint address")?;
+        let metadata_program = Pubkey::from_str(METADATA_PROGRAM_ID)
+            .context("invalid Metaplex metadata program id")?;
+        let (metadata_address, _) = Pubkey::find_program_address(
+            &[b"metadata", metadata_program.as_ref(), mint_key.as_ref()],
+            &metadata_program,
+        );
+        let account: Value = self.call(
+            "getAccountInfo",
+            json!([metadata_address.to_string(), {"encoding":"base64","commitment":"confirmed"}]),
+        ).await?;
+        let Some(encoded) = account.pointer("/value/data/0").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            encoded,
+        ).context("decoding Metaplex metadata account")?;
+        // MetadataV1: key(1), update authority(32), mint(32), then Borsh strings.
+        if bytes.len() < 65 {
+            return Err(anyhow!("Metaplex metadata account is shorter than its fixed header"));
+        }
+        if bytes[33..65] != *mint_key.as_ref() {
+            return Err(anyhow!("Metaplex metadata account mint does not match requested mint"));
+        }
+        let mut offset = 65usize;
+        let name = read_metadata_string(&bytes, &mut offset)?.trim_end_matches('\0').trim().to_owned();
+        let symbol = read_metadata_string(&bytes, &mut offset)?.trim_end_matches('\0').trim().to_owned();
+        let uri = read_metadata_string(&bytes, &mut offset)?.trim_end_matches('\0').trim().to_owned();
+        let update_authority = bs58::encode(&bytes[1..33]).into_string();
+        Ok(Some(TokenMetadataReport {
+            source: "metaplex_metadata_pda".into(),
+            update_authority: Some(update_authority),
+            mutable: None,
+            name: (!name.is_empty()).then_some(name),
+            symbol: (!symbol.is_empty()).then_some(symbol),
+            uri: (!uri.is_empty()).then_some(uri),
+            status: "partial".into(),
+            caveat: "Name, symbol and metadata URI were read from the canonical Metaplex metadata PDA. Off-chain image content and authenticity have not been independently verified.".into(),
+            metadata_pointer_authority: None,
+            metadata_pointer_address: None,
+        }))
     }
 
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
