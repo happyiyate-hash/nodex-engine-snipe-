@@ -518,6 +518,9 @@ fn start_token_state_projector(
             };
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
+                    if control.read().await.paused {
+                        continue;
+                    }
                     if let Err(error) =
                         nodex_persistence::save_token_state(&database, &snapshot).await
                     {
@@ -608,6 +611,9 @@ fn start_token_state_projector(
                                             .get("position_id")
                                             .and_then(serde_json::Value::as_str)
                                             .unwrap_or(mint);
+                                        if control.read().await.paused {
+                                            continue;
+                                        }
                                         if let Err(error) =
                                             nodex_persistence::save_portfolio_position(
                                                 &database,
@@ -667,6 +673,9 @@ fn start_token_state_projector(
                                     }
                                     let profile_snapshot = current_profile.clone();
                                     drop(current_profile);
+                                    if control.read().await.paused {
+                                        continue;
+                                    }
                                     if let Err(error) = nodex_persistence::save_profile(
                                         &database,
                                         &profile_snapshot,
@@ -809,6 +818,9 @@ fn start_launch_processor(
                 }
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
+                        if control.read().await.paused {
+                            continue;
+                        }
                         let mint_address = launch.mint_address.clone();
                         let creator_address = launch.creator_address.clone();
                         // Register the token immediately. Scanner and market workers
@@ -830,6 +842,9 @@ fn start_launch_processor(
                         );
                         match initial_state {
                             Ok(snapshot) => {
+                                if control.read().await.paused {
+                                    continue;
+                                }
                                 if let Err(error) =
                                     nodex_persistence::save_token_state(&database, &snapshot).await
                                 {
@@ -1316,6 +1331,10 @@ async fn update_trading_config(
     Json(settings): Json<TradingSettings>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
+    if state.control.read().await.paused {
+        return Err((StatusCode::CONFLICT,
+            "Engine is paused for maintenance; trading configuration writes are temporarily disabled.".into()));
+    }
     settings
         .validate()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
