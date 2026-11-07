@@ -223,7 +223,7 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
 /// Rotate and vacuum archived systemd journal files. This is deliberately gated
 /// by an explicit deployment setting and the service's own OS permissions.
 pub async fn cleanup_system_journal() -> Result<String, String> {
-    if std::env::var("NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP").as_deref() != Ok("true") {
+    if std::env::var("NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP").ok().as_deref() != Some("true") {
         return Err("System journal cleanup is disabled. Set NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP=true after reviewing its system-wide effect.".into());
     }
     let rotate = Command::new("journalctl").arg("--rotate").output().await
