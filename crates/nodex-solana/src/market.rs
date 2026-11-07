@@ -85,7 +85,10 @@ pub fn derive_pump_fun_bonding_curve(mint: &str, program_id: &str) -> Result<Str
 /// Start one multiplexed account-subscription connection with automatic reconnect.
 /// Account updates are emitted independently as market_account_update events.
 /// Raw account bytes are preserved; reserve decoding is a separate layout-verified stage.
-pub fn start_market_monitor(ws_urls: Vec<String>, events: broadcast::Sender<Value>) -> MarketMonitor {
+pub fn start_market_monitor(
+    ws_urls: Vec<String>,
+    events: broadcast::Sender<Value>,
+) -> MarketMonitor {
     let (commands, receiver) = mpsc::channel(MARKET_COMMAND_CAPACITY);
     tokio::spawn(run_market_monitor(ws_urls, events, receiver));
     MarketMonitor { commands }
@@ -99,12 +102,13 @@ async fn run_market_monitor(
     let mut desired = HashMap::<String, MarketSubscription>::new();
     let mut reconnect_count = 0_u64;
     let mut next_endpoint = 0usize;
-    if ws_urls.is_empty() { return; }
+    if ws_urls.is_empty() {
+        return;
+    }
     loop {
         let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
         match connect_market_stream(&active_url, &events, &mut commands, &mut desired).await {
             // A disconnect or provider rejection rotates to the next configured Helius key.
-            
             Ok(()) => {
                 reconnect_count = reconnect_count.saturating_add(1);
                 let message =
