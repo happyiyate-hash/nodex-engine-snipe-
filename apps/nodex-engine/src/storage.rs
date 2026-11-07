@@ -12,7 +12,7 @@ pub struct DiskUsage {
     pub used_percent: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DataCategory {
     pub logical_bytes: Option<u64>,
     pub records: Option<i64>,
@@ -181,7 +181,7 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
         disk,
         categories: Categories {
             tokens,
-            launches,
+            launches: launches.clone(),
             events,
             discovery: DataCategory {
                 logical_bytes: launches.logical_bytes,
