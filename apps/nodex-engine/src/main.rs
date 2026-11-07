@@ -935,11 +935,11 @@ fn start_launch_processor(
                                 Ok(Err(error)) => Err(error.to_string()),
                                 Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
                             };
+                            let mut approved_for_market = false;
                             match scan_result {
                                 Ok(mut report) => {
-                                    // Metadata is an independent operation: it must never keep
-                                    // the security scan in a scanning state.
-                                    if report.metadata.name.is_none() {
+                                    // Resolve display metadata only after the security checks approve the mint.
+                                    if report.metadata.name.is_none() && report.decision == "APPROVED" {
                                         let _ = scan_events.send(json!({"type":"token_metadata_started","data":{
                                             "mint_address":scan_mint,
                                             "provider":"metaplex",
@@ -1084,6 +1084,7 @@ fn start_launch_processor(
                                                 }
                                             };
                                             if approval_persisted {
+                                                approved_for_market = true;
                                                 // Publish APPROVED only after the canonical state is durable,
                                                 // so a frontend subscription cannot race the approval gate.
                                                 let _ = scan_events.send(json!({
@@ -1175,35 +1176,44 @@ fn start_launch_processor(
                                     }}));
                                 }
                             }
-                            // Market observation is independent from trade approval.
-                            // Security decisions gate execution, never token visibility or price collection.
-                            if let Some(monitor) = approved_monitor.read().await.clone() {
-                                match monitor
-                                    .subscribe_pump_fun_bonding_curve(
-                                        &scan_mint,
-                                        &approved_program_id,
-                                    )
-                                    .await
-                                {
-                                    Ok(account_address) => {
-                                        let _ = scan_events.send(
-                                            json!({"type":"market_subscription_requested","data":{
-                                                "mint_address":scan_mint,
-                                                "account_address":account_address,
-                                                "venue":"pump_fun_bonding_curve",
-                                                "status":"pending",
+                            if approved_for_market {
+                                // Only approved tokens enter the continuous market monitor.
+                                if let Some(monitor) = approved_monitor.read().await.clone() {
+                                    match monitor
+                                        .subscribe_pump_fun_bonding_curve(
+                                            &scan_mint,
+                                            &approved_program_id,
+                                        )
+                                        .await
+                                    {
+                                        Ok(account_address) => {
+                                            let _ = scan_events.send(
+                                                json!({"type":"market_subscription_requested","data":{
+                                                    "mint_address":scan_mint,
+                                                    "account_address":account_address,
+                                                    "venue":"pump_fun_bonding_curve",
+                                                    "status":"pending",
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                "severity":"warning","component":"market_monitor_registration",
+                                                "message":error.to_string(),"mint_address":scan_mint,
                                                 "received_at":chrono::Utc::now().to_rfc3339()
-                                            }}),
-                                        );
-                                    }
-                                    Err(error) => {
-                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                            "severity":"warning","component":"market_monitor_registration",
-                                            "message":error.to_string(),"mint_address":scan_mint,
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }}));
+                                            }}));
+                                        }
                                     }
                                 }
+                            } else {
+                                // The UI has already received the scan result. Remove rejected,
+                                // unverified, and failed candidates from durable monitored-token storage.
+                                let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                    "mint_address":scan_mint,
+                                    "reason":"Token did not receive a persisted APPROVED security decision.",
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
                             }
                         });
                     }
