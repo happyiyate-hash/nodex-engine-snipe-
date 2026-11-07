@@ -502,18 +502,6 @@ fn start_token_state_projector(
                 }}));
                 continue;
             }
-            if matches!(kind, "market_price_update" | "pumpswap_volume_update") {
-                let approved = registry.get(mint).is_some_and(|state| {
-                    state
-                        .data
-                        .pointer("/security/decision")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("APPROVED")
-                });
-                if !approved {
-                    continue;
-                }
-            }
             let domain_patch = match kind {
                 "token_scan_started" => json!({"security":{"status":"scanning"}}),
                 "token_scan_progress" => json!({"security":{
@@ -935,34 +923,7 @@ fn start_launch_processor(
                                                     "type":"token_scan_update",
                                                     "data":report.clone()
                                                 }));
-                                                if let Some(monitor) =
-                                                    approved_monitor.read().await.clone()
-                                                {
-                                                    match monitor
-                                                        .subscribe_pump_fun_bonding_curve(
-                                                            &scan_mint,
-                                                            &approved_program_id,
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(account_address) => {
-                                                            let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
-                                                                "mint_address":scan_mint,
-                                                                "account_address":account_address,
-                                                                "venue":"pump_fun_bonding_curve",
-                                                                "status":"pending",
-                                                                "received_at":chrono::Utc::now().to_rfc3339()
-                                                            }}));
-                                                        }
-                                                        Err(error) => {
-                                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                                "severity":"warning","component":"market_monitor_registration",
-                                                                "message":error.to_string(),"mint_address":scan_mint,
-                                                                "received_at":chrono::Utc::now().to_rfc3339()
-                                                            }}));
-                                                        }
-                                                    }
-                                                }
+
                                             } else {
                                                 approved_registry.remove(&scan_mint);
                                                 let _ = scan_events.send(json!({
@@ -976,14 +937,28 @@ fn start_launch_processor(
                                             }
                                         }
                                         "REJECTED" => {
+                                            let rejected_state = approved_registry.upsert_patch(
+                                                &scan_mint,
+                                                json!({"security":report.clone()}),
+                                            );
+                                            if let Ok(snapshot) = rejected_state {
+                                                if let Err(error) = nodex_persistence::save_token_state(
+                                                    &approved_database, &snapshot
+                                                ).await {
+                                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                        "severity":"error","component":"token_scan_persistence",
+                                                        "message":error.to_string(),"mint_address":scan_mint
+                                                    }}));
+                                                }
+                                            }
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
                                             }));
-                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                            let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
                                                 "mint_address":scan_mint,
-                                                "reason":"Security scanner rejected this token.",
-                                                "received_at":chrono::Utc::now().to_rfc3339()
+                                                "decision":"REJECTED",
+                                                "reason":report.decision_reason
                                             }}));
                                         }
                                         _ => {
@@ -1010,6 +985,30 @@ fn start_launch_processor(
                                         "decision_reason":"Scanner failed; token remains isolated and no market or metadata service may use it.",
                                         "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
                                     }}));
+                                }
+                            }
+                            // Market observation is independent from trade approval.
+                            // Security decisions gate execution, never token visibility or price collection.
+                            if let Some(monitor) = approved_monitor.read().await.clone() {
+                                match monitor.subscribe_pump_fun_bonding_curve(
+                                    &scan_mint, &approved_program_id
+                                ).await {
+                                    Ok(account_address) => {
+                                        let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
+                                            "mint_address":scan_mint,
+                                            "account_address":account_address,
+                                            "venue":"pump_fun_bonding_curve",
+                                            "status":"pending",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                    }
+                                    Err(error) => {
+                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                            "severity":"warning","component":"market_monitor_registration",
+                                            "message":error.to_string(),"mint_address":scan_mint,
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                    }
                                 }
                             }
                         });
@@ -1330,13 +1329,9 @@ async fn build_approved_token_detail_snapshot(
     state: &AppState,
     mint: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some(token_state) = state.token_registry.get(mint).filter(|snapshot| {
-        snapshot
-            .data
-            .pointer("/security/decision")
-            .and_then(serde_json::Value::as_str)
-            == Some("APPROVED")
-    }) else {
+    // Detail snapshots are read-only market/identity data. Approval is a
+    // separate safety gate for execution and must not hide discovered tokens.
+    let Some(token_state) = state.token_registry.get(mint) else {
         return Ok(None);
     };
 
@@ -1686,13 +1681,6 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         let Some(data) = value.get("data").cloned() else { continue };
                         let mint = data.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
                         if mint.is_empty() {
-                            continue;
-                        }
-                        let approved = state.token_registry.get(mint).is_some_and(|snapshot| {
-                            snapshot.data.pointer("/security/decision")
-                                .and_then(serde_json::Value::as_str) == Some("APPROVED")
-                        });
-                        if !approved {
                             continue;
                         }
                         let snapshot = state.token_registry.get(mint);
