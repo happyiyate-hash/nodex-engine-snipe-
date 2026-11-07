@@ -241,7 +241,10 @@ impl SolanaRpc {
 
     /// Resolve standard SPL token metadata from the canonical Metaplex metadata PDA.
     /// This reads on-chain metadata only; it does not trust or fetch arbitrary off-chain URLs.
-    pub async fn resolve_metaplex_metadata(&self, mint: &str) -> Result<Option<TokenMetadataReport>> {
+    pub async fn resolve_metaplex_metadata(
+        &self,
+        mint: &str,
+    ) -> Result<Option<TokenMetadataReport>> {
         const METADATA_PROGRAM_ID: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
         let mint_key = Pubkey::from_str(mint).context("invalid token mint address")?;
         let metadata_program = Pubkey::from_str(METADATA_PROGRAM_ID)
@@ -257,21 +260,32 @@ impl SolanaRpc {
         let Some(encoded) = account.pointer("/value/data/0").and_then(Value::as_str) else {
             return Ok(None);
         };
-        let bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            encoded,
-        ).context("decoding Metaplex metadata account")?;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .context("decoding Metaplex metadata account")?;
         // MetadataV1: key(1), update authority(32), mint(32), then Borsh strings.
         if bytes.len() < 65 {
-            return Err(anyhow!("Metaplex metadata account is shorter than its fixed header"));
+            return Err(anyhow!(
+                "Metaplex metadata account is shorter than its fixed header"
+            ));
         }
         if bytes[33..65] != *mint_key.as_ref() {
-            return Err(anyhow!("Metaplex metadata account mint does not match requested mint"));
+            return Err(anyhow!(
+                "Metaplex metadata account mint does not match requested mint"
+            ));
         }
         let mut offset = 65usize;
-        let name = read_metadata_string(&bytes, &mut offset)?.trim_end_matches('\0').trim().to_owned();
-        let symbol = read_metadata_string(&bytes, &mut offset)?.trim_end_matches('\0').trim().to_owned();
-        let uri = read_metadata_string(&bytes, &mut offset)?.trim_end_matches('\0').trim().to_owned();
+        let name = read_metadata_string(&bytes, &mut offset)?
+            .trim_end_matches('\0')
+            .trim()
+            .to_owned();
+        let symbol = read_metadata_string(&bytes, &mut offset)?
+            .trim_end_matches('\0')
+            .trim()
+            .to_owned();
+        let uri = read_metadata_string(&bytes, &mut offset)?
+            .trim_end_matches('\0')
+            .trim()
+            .to_owned();
         let update_authority = bs58::encode(&bytes[1..33]).into_string();
         Ok(Some(TokenMetadataReport {
             source: "metaplex_metadata_pda".into(),
