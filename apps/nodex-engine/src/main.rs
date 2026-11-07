@@ -552,6 +552,7 @@ fn start_launch_processor(
                                 Ok(Err(error)) => Err(error.to_string()),
                                 Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
                             };
+                            let mut token_approved = false;
                             match scan_result {
                                 Ok(mut report) => {
                                     // Metadata is an independent operation: it must never keep
@@ -701,6 +702,7 @@ fn start_launch_processor(
                                                 }
                                             };
                                             if approval_persisted {
+                                                token_approved = true;
                                                 // Publish APPROVED only after the canonical state is durable,
                                                 // so a frontend subscription cannot race the approval gate.
                                                 let _ = scan_events.send(json!({
@@ -721,24 +723,14 @@ fn start_launch_processor(
                                             }
                                         }
                                         "REJECTED" => {
-                                            let rejected_state = approved_registry.upsert_patch(
-                                                &scan_mint,
-                                                json!({"security":report.clone()}),
-                                            );
-                                            if let Ok(snapshot) = rejected_state {
-                                                if let Err(error) =
-                                                    nodex_persistence::save_token_state(
-                                                        &approved_database,
-                                                        &snapshot,
-                                                    )
-                                                    .await
-                                                {
-                                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                        "severity":"error","component":"token_scan_persistence",
-                                                        "message":error.to_string(),"mint_address":scan_mint
-                                                    }}));
-                                                }
-                                            }
+                                            // Rejected tokens are transient: remove their pending
+                                            // registry state and let the projector clean up any
+                                            // legacy launch/state rows created during migration.
+                                            approved_registry.remove(&scan_mint);
+                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                "mint_address":scan_mint,
+                                                "reason":report.decision_reason
+                                            }}));
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
@@ -752,6 +744,11 @@ fn start_launch_processor(
                                             );
                                         }
                                         _ => {
+                                            approved_registry.remove(&scan_mint);
+                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                "mint_address":scan_mint,
+                                                "reason":"Token did not receive an explicit APPROVED decision."
+                                            }}));
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
@@ -773,6 +770,11 @@ fn start_launch_processor(
                                     }}));
                                 }
                                 Err(error) => {
+                                    approved_registry.remove(&scan_mint);
+                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                        "mint_address":scan_mint,
+                                        "reason":error
+                                    }}));
                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                         "severity":"error","component":"token_security_scanner",
                                         "message":error,"mint_address":scan_mint,
@@ -792,10 +794,10 @@ fn start_launch_processor(
                                     }}));
                                 }
                             }
-                            // Market observation is independent from trade approval.
-                            // Security decisions gate execution, never token visibility or price collection.
-                            if let Some(monitor) = approved_monitor.read().await.clone() {
-                                match monitor
+                            // Only durably approved tokens receive a Core price subscription.
+                            if token_approved {
+                                if let Some(monitor) = approved_monitor.read().await.clone() {
+                                    match monitor
                                     .subscribe_pump_fun_bonding_curve(
                                         &scan_mint,
                                         &approved_program_id,
@@ -819,6 +821,7 @@ fn start_launch_processor(
                                             "message":error.to_string(),"mint_address":scan_mint,
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }}));
+                                    }
                                     }
                                 }
                             }
