@@ -643,6 +643,8 @@ fn start_launch_processor(
                 };
 
                 let creator_address = launch.creator_address.clone();
+                let creator_address_for_scan = creator_address.clone();
+                let launch_signature_for_scan = launch.signature.clone();
                 let mut identity = serde_json::Map::new();
                 identity.insert("mint_address".into(), json!(mint_address));
                 if let Some(value) = metadata.name.as_ref() { identity.insert("name".into(), json!(value)); }
@@ -757,6 +759,58 @@ fn start_launch_processor(
                             if let Some(logo) = metadata.logo_url.as_ref() { identity_patch.insert("logo_url".into(), json!(logo)); }
                             if !identity_patch.is_empty() {
                                 let _ = approved_registry.upsert_patch(&scan_mint, json!({"identity":identity_patch}));
+                            }
+
+                            // Creator history is evidence, not a standalone verdict. A bounded sample
+                            // can reveal prior launches, but cannot prove wallet clusters or early selling.
+                            let _ = scan_events.send(json!({"type":"token_scan_progress","data":{
+                                "mint_address":scan_mint,
+                                "stage":"creator_history",
+                                "progress":72,
+                                "message":"Reviewing recent creator activity",
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            match tokio::time::timeout(
+                                Duration::from_secs(15),
+                                scan_rpc.scan_creator_history(
+                                    &creator_address_for_scan,
+                                    &launch_signature_for_scan,
+                                    &approved_program_id,
+                                ),
+                            ).await {
+                                Ok(Ok(creator_report)) => {
+                                    let status = creator_report.status.clone();
+                                    let detail = format!(
+                                        "Sampled {} creator signatures and resolved {} transactions; found {} prior Pump.fun launches. Early selling and linked-wallet behaviour remain unverified. {}",
+                                        creator_report.signatures_sampled,
+                                        creator_report.transactions_resolved,
+                                        creator_report.prior_pump_fun_launches,
+                                        creator_report.caveat
+                                    );
+                                    report.checks.push(nodex_solana::SecurityCheck {
+                                        name: "creator_history".into(),
+                                        status: if status == "unverified" { "unverified" } else { "partial" }.into(),
+                                        severity: "high".into(),
+                                        detail,
+                                    });
+                                    report.creator_history = Some(creator_report);
+                                }
+                                Ok(Err(error)) => {
+                                    report.checks.push(nodex_solana::SecurityCheck {
+                                        name: "creator_history".into(),
+                                        status: "unverified".into(),
+                                        severity: "high".into(),
+                                        detail: format!("Creator history lookup failed: {error}"),
+                                    });
+                                }
+                                Err(_) => {
+                                    report.checks.push(nodex_solana::SecurityCheck {
+                                        name: "creator_history".into(),
+                                        status: "unverified".into(),
+                                        severity: "high".into(),
+                                        detail: "Creator history lookup exceeded its 15-second time budget.".into(),
+                                    });
+                                }
                             }
 
                             let decision = report.decision.clone();
