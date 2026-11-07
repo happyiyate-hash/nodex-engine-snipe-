@@ -363,16 +363,6 @@ fn start_pumpswap_activity_processor(
                         let Some(pool_details) = pool_details else {
                             continue;
                         };
-                        let approved = registry.get(&pool_details.base_mint).is_some_and(|state| {
-                            state
-                                .data
-                                .pointer("/security/decision")
-                                .and_then(serde_json::Value::as_str)
-                                == Some("APPROVED")
-                        });
-                        if !approved {
-                            continue;
-                        }
                         let pool_details = Some(pool_details);
                         let pair_status = if pool_details.is_some() {
                             "resolved"
