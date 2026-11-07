@@ -1581,6 +1581,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_started")
             | Some("token_scan_update")
             | Some("token_scan_progress")
+            | Some("token_metadata_updated")
             | Some("token_state_updated")
             | Some("profile_updated")
             | Some("market_price_update")
