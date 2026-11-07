@@ -151,8 +151,10 @@ pub fn build_token_detail_snapshot(
             "name": identity.get("name").cloned().unwrap_or(Value::Null),
             "symbol": identity.get("symbol").cloned().unwrap_or(Value::Null),
             "logo_url": identity.get("logo_url").cloned().unwrap_or(Value::Null),
+            "metadata_uri": identity.get("metadata_uri").cloned().unwrap_or(Value::Null),
             "decimals": identity.get("decimals").cloned().unwrap_or(Value::Null),
-            "total_supply": identity.get("total_supply").cloned().unwrap_or(Value::Null)
+            "total_supply": identity.get("total_supply").or_else(|| identity.get("total_supply_raw")).cloned().unwrap_or(Value::Null),
+            "total_supply_raw": identity.get("total_supply_raw").cloned().unwrap_or(Value::Null)
         },
         "market": market_data,
         "statistics": statistics_data,
