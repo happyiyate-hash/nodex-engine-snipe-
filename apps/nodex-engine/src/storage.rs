@@ -13,7 +13,6 @@ pub struct DiskUsage {
     pub used_percent: String,
 }
 
-
 #[derive(Debug, Serialize)]
 pub struct StorageOverview {
     pub disk: Option<DiskUsage>,
@@ -79,7 +78,11 @@ fn parse_human_bytes(report: &str) -> Option<u64> {
     let value = words.get(index + 1)?.trim_end_matches(',');
     let split = value.find(|ch: char| !ch.is_ascii_digit() && ch != '.')?;
     let number: f64 = value[..split].parse().ok()?;
-    let multiplier = match value[split..].trim_end_matches('B').to_ascii_uppercase().as_str() {
+    let multiplier = match value[split..]
+        .trim_end_matches('B')
+        .to_ascii_uppercase()
+        .as_str()
+    {
         "K" | "KB" | "KI" | "KIB" => 1024_f64,
         "M" | "MB" | "MI" | "MIB" => 1024_f64.powi(2),
         "G" | "GB" | "GI" | "GIB" => 1024_f64.powi(3),
@@ -94,16 +97,24 @@ async fn database_file_usage(pool: &SqlitePool) -> DatabaseUsage {
         .fetch_all(pool)
         .await
         .ok()
-        .and_then(|rows| rows.into_iter().find_map(|row| {
-            let name: String = row.try_get("name").ok()?;
-            if name == "main" {
-                row.try_get::<String, _>("file").ok().filter(|value| !value.is_empty())
-            } else { None }
-        }));
+        .and_then(|rows| {
+            rows.into_iter().find_map(|row| {
+                let name: String = row.try_get("name").ok()?;
+                if name == "main" {
+                    row.try_get::<String, _>("file")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                } else {
+                    None
+                }
+            })
+        });
     let file_bytes = |suffix: &str| -> u64 {
         let Some(path) = path.as_ref() else { return 0 };
         let candidate = PathBuf::from(format!("{path}{suffix}"));
-        std::fs::metadata(candidate).map(|meta| meta.len()).unwrap_or(0)
+        std::fs::metadata(candidate)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
     };
     let database_bytes = file_bytes("");
     let wal_bytes = file_bytes("-wal");
@@ -113,7 +124,9 @@ async fn database_file_usage(pool: &SqlitePool) -> DatabaseUsage {
         database_bytes,
         wal_bytes,
         shm_bytes,
-        total_file_bytes: database_bytes.saturating_add(wal_bytes).saturating_add(shm_bytes),
+        total_file_bytes: database_bytes
+            .saturating_add(wal_bytes)
+            .saturating_add(shm_bytes),
     }
 }
 
@@ -157,18 +170,34 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
 /// Rotate and vacuum archived systemd journal files. This is deliberately gated
 /// by an explicit deployment setting and the service's own OS permissions.
 pub async fn cleanup_system_journal() -> Result<String, String> {
-    if std::env::var("NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP").ok().as_deref() != Some("true") {
+    if std::env::var("NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP")
+        .ok()
+        .as_deref()
+        != Some("true")
+    {
         return Err("System journal cleanup is disabled. Set NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP=true after reviewing its system-wide effect.".into());
     }
-    let rotate = Command::new("journalctl").arg("--rotate").output().await
+    let rotate = Command::new("journalctl")
+        .arg("--rotate")
+        .output()
+        .await
         .map_err(|error| format!("Could not execute journalctl: {error}"))?;
     if !rotate.status.success() {
-        return Err(format!("journalctl --rotate failed: {}", String::from_utf8_lossy(&rotate.stderr).trim()));
+        return Err(format!(
+            "journalctl --rotate failed: {}",
+            String::from_utf8_lossy(&rotate.stderr).trim()
+        ));
     }
-    let vacuum = Command::new("journalctl").arg("--vacuum-size=200M").output().await
+    let vacuum = Command::new("journalctl")
+        .arg("--vacuum-size=200M")
+        .output()
+        .await
         .map_err(|error| format!("Could not execute journalctl: {error}"))?;
     if !vacuum.status.success() {
-        return Err(format!("journalctl vacuum failed; check service permissions: {}", String::from_utf8_lossy(&vacuum.stderr).trim()));
+        return Err(format!(
+            "journalctl vacuum failed; check service permissions: {}",
+            String::from_utf8_lossy(&vacuum.stderr).trim()
+        ));
     }
     Ok(String::from_utf8_lossy(&vacuum.stdout).trim().to_owned())
 }
@@ -191,7 +220,8 @@ mod tests {
 
     #[test]
     fn rejects_df_output_with_missing_columns() {
-        let output = "1B-blocks Used Avail Use% Mounted on\n85819633664 7597551616 78222082048 9% /\n";
+        let output =
+            "1B-blocks Used Avail Use% Mounted on\n85819633664 7597551616 78222082048 9% /\n";
         assert!(parse_df(output).is_none());
     }
 }
