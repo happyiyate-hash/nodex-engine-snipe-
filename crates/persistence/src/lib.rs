@@ -1,11 +1,21 @@
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
 use nodex_trading::paper_wallet::{LedgerEntry, PaperWallet};
-use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 use std::str::FromStr;
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool> {
-    let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+    let options = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true)
+        // Live ingestion and maintenance can contend for SQLite's single writer.
+        // Wait for short-lived locks instead of failing immediately.
+        .busy_timeout(std::time::Duration::from_secs(10))
+        // WAL lets readers continue while a writer commits. SQLite still
+        // serializes writers, so the busy timeout remains important.
+        .journal_mode(SqliteJournalMode::Wal);
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(options)
@@ -437,17 +447,47 @@ pub async fn list_recent_events(pool: &SqlitePool, limit: u32) -> Result<Vec<ser
 /// Clears only historical launch and raw upstream notification rows.
 /// It does not alter wallets, ledger entries, schema, or live monitor state.
 pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u64)> {
-    let mut transaction = pool.begin().await?;
-    let launches = sqlx::query("DELETE FROM token_launches")
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-    let events = sqlx::query("DELETE FROM solana_raw_events")
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-    transaction.commit().await?;
-    Ok((launches, events))
+    // Retry the complete transaction on transient SQLITE_BUSY/locked errors.
+    // Each failed attempt is rolled back when its transaction is dropped.
+    const MAX_ATTEMPTS: usize = 4;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let result = async {
+            let mut transaction = pool.begin().await?;
+            let launches = sqlx::query("DELETE FROM token_launches")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+            let events = sqlx::query("DELETE FROM solana_raw_events")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+            transaction.commit().await?;
+            Ok::<(u64, u64), anyhow::Error>((launches, events))
+        }
+        .await;
+
+        match result {
+            Ok(counts) => return Ok(counts),
+            Err(error)
+                if attempt + 1 < MAX_ATTEMPTS
+                    && error.to_string().to_ascii_lowercase().contains("database is locked") =>
+            {
+                let delay_ms = 250_u64 * (1_u64 << attempt);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    delay_ms,
+                    %error,
+                    "SQLite history cleanup encountered a transient lock; retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("history cleanup retry loop always returns")
 }
 
 /// Upsert one OHLCV candle by token, timeframe and its event-time bucket.
