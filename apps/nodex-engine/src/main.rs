@@ -783,6 +783,11 @@ fn start_launch_processor(
                                         }
                                     } else {
                                         terminal_status = "unverified";
+                                        // Roll back a launch row if the canonical approved state could
+                                        // not be committed. This keeps failed approvals out of durable storage.
+                                        if let Err(error) = nodex_persistence::delete_token_launches(&approved_database, &scan_mint).await {
+                                            tracing::error!(%error, mint_address=%scan_mint, "Could not roll back launch row after approval persistence failure");
+                                        }
                                         approved_registry.remove(&scan_mint);
                                         let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
                                             "mint_address":scan_mint,
