@@ -1,5 +1,6 @@
 mod token_details;
 mod websocket;
+mod storage;
 
 use axum::{
     extract::{
@@ -1165,6 +1166,42 @@ fn start_launch_processor(
     });
 }
 
+async fn storage_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let overview = storage::inspect(&state.database).await;
+    serde_json::to_value(overview)
+        .map(Json)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+async fn cleanup_system_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let before = storage::inspect(&state.database).await;
+    let cleanup_output = storage::cleanup_system_journal()
+        .await
+        .map_err(|error| (StatusCode::FORBIDDEN, error))?;
+    let after = storage::inspect(&state.database).await;
+    let before_bytes = before.system_journal.reported_size_bytes;
+    let after_bytes = after.system_journal.reported_size_bytes;
+    let bytes_freed = before_bytes.zip(after_bytes)
+        .map(|(old, new)| old.saturating_sub(new));
+    Ok(Json(json!({
+        "status": "ok",
+        "category": "system_logs",
+        "cleanup_output": cleanup_output,
+        "storage_before_bytes": before_bytes,
+        "storage_after_bytes": after_bytes,
+        "bytes_freed": bytes_freed,
+        "overview": after
+    })))
+}
+
 async fn health() -> Json<Health> {
     Json(Health {
         status: "ok",
@@ -2251,6 +2288,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/tokens/:mint/state", get(token_state))
         .route("/api/v1/events/recent", get(recent_events))
+        .route("/api/v1/admin/storage/overview", get(storage_overview))
+        .route(
+            "/api/v1/admin/storage/system-journal/cleanup",
+            post(cleanup_system_journal),
+        )
         .route(
             "/api/v1/admin/maintenance/clear-history",
             post(clear_token_and_event_history),
