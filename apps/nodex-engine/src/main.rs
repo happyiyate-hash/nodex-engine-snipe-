@@ -1284,8 +1284,7 @@ async fn clear_token_and_event_history(
         .filter(|key| !key.is_empty())
         .ok_or((
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Maintenance endpoint authentication is unavailable."
-                .to_string(),
+            "Maintenance endpoint authentication is unavailable.".to_string(),
         ))?;
     let supplied_key = headers
         .get("x-nodex-admin-key")
@@ -2019,7 +2018,8 @@ async fn main() -> anyhow::Result<()> {
     let profile_state = Arc::new(RwLock::new(profile));
     let (events, _) = broadcast::channel(8192);
     if let (Some(rpc_client), Some(address)) = (
-        (!config.solana_http_urls.is_empty()).then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
+        (!config.solana_http_urls.is_empty())
+            .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
         wallet_address.clone(),
     ) {
         let profile_for_sync = profile_state.clone();
@@ -2114,7 +2114,8 @@ async fn main() -> anyhow::Result<()> {
         token_registry.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
-    let rpc = (!config.solana_http_urls.is_empty()).then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()));
+    let rpc = (!config.solana_http_urls.is_empty())
+        .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()));
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
