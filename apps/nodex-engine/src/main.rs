@@ -1400,6 +1400,8 @@ async fn update_engine_control(
     Json(request): Json<EngineControlRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
+    // Serialize control transitions against an active maintenance transaction.
+    let _control_write_guard = state.db_write_gate.read().await;
     let mut control = state.control.write().await;
     match request.command.as_str() {
         "start" | "resume" => {
@@ -1508,8 +1510,8 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
     }))
 }
 
-/// Temporary maintenance endpoint. Deletes historical launch rows and raw
-/// upstream notification history only; live subscriptions and monitor state stay running.
+/// Maintenance endpoint. It only runs after all Solana WebSockets are stopped and
+/// after acquiring the exclusive database-write barrier.
 async fn clear_token_and_event_history(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1545,6 +1547,16 @@ async fn clear_token_and_event_history(
     }
 
     let _maintenance_write_guard = state.db_write_gate.write().await;
+    if !state.control.read().await.paused
+        || state.stream_status.read().await.connected
+        || state.pumpswap_status.read().await.connected
+        || state.market_monitor.read().await.is_some()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Engine state changed before maintenance acquired the database barrier. Pause again and retry.".to_string(),
+        ));
+    }
     let (deleted_token_records, deleted_raw_event_records) =
         nodex_persistence::clear_token_and_event_history(&state.database)
             .await
