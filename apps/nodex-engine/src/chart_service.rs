@@ -178,22 +178,6 @@ pub fn start_chart_service(
                             if !previous_candle.closed {
                                 previous_candle.closed = true;
                                 let payload = previous_candle.json(mint, timeframe, duration);
-                                if let Err(error) = nodex_persistence::save_chart_candle(
-                                    &database,
-                                    mint,
-                                    timeframe,
-                                    previous_open,
-                                    &payload,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        %error,
-                                        mint_address = mint,
-                                        timeframe,
-                                        "Could not persist closed chart candle"
-                                    );
-                                }
                                 let _ = events
                                     .send(json!({"type":"chart_candle_closed","data":payload}));
                             }
@@ -225,7 +209,10 @@ pub fn start_chart_service(
                         || last_persisted
                             .get(&key)
                             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5));
-                    if should_persist {
+                    // Persist only closed buckets. Live candle updates are broadcast
+                    // from memory; writing every few seconds for every timeframe/token
+                    // turns price traffic into unnecessary SQLite churn.
+                    if candle.closed && should_persist {
                         if let Err(error) = nodex_persistence::save_chart_candle(
                             &database, mint, timeframe, open_time, &payload,
                         )
@@ -235,7 +222,7 @@ pub fn start_chart_service(
                                 %error,
                                 mint_address = mint,
                                 timeframe,
-                                "Could not persist chart candle update"
+                                "Could not persist closed chart candle update"
                             );
                         } else {
                             last_persisted.insert(key.clone(), std::time::Instant::now());
@@ -254,6 +241,7 @@ pub fn start_chart_service(
                 keys.sort_by_key(|(_, _, open_time)| *open_time);
                 for key in keys.into_iter().take(candles.len().saturating_sub(15_000)) {
                     candles.remove(&key);
+                    last_persisted.remove(&key);
                 }
             }
         }

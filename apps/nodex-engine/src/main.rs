@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -38,9 +38,59 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 // Temporary operator key for the current paper-trading deployment.
-const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
 
 #[derive(Clone)]
+struct BatchTracker {
+    outstanding: Arc<AtomicUsize>,
+    batch_full: Arc<AtomicBool>,
+    completed_batches: watch::Sender<u64>,
+}
+
+impl BatchTracker {
+    fn new(completed_batches: watch::Sender<u64>) -> Self {
+        Self {
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            batch_full: Arc::new(AtomicBool::new(false)),
+            completed_batches,
+        }
+    }
+
+    fn track(&self) -> BatchWorkGuard {
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        BatchWorkGuard { tracker: self.clone() }
+    }
+
+    fn mark_full(&self) {
+        self.batch_full.store(true, Ordering::Release);
+        self.try_complete();
+    }
+
+    fn finish_one(&self) {
+        let previous = self.outstanding.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            self.try_complete();
+        }
+    }
+
+    fn try_complete(&self) {
+        if self.outstanding.load(Ordering::Acquire) == 0
+            && self.batch_full.swap(false, Ordering::AcqRel)
+        {
+            self.completed_batches.send_modify(|batch| *batch = batch.saturating_add(1));
+        }
+    }
+}
+
+struct BatchWorkGuard {
+    tracker: BatchTracker,
+}
+
+impl Drop for BatchWorkGuard {
+    fn drop(&mut self) {
+        self.tracker.finish_one();
+    }
+}
+
 struct AppState {
     events: broadcast::Sender<serde_json::Value>,
     stream_status: Arc<RwLock<StreamStatus>>,
@@ -239,6 +289,13 @@ fn start_pumpswap_activity_processor(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+
+            if notification.get("type").and_then(serde_json::Value::as_str)
+                == Some("discovery_batch_full")
+            {
+                producer_batch_tracker.mark_full();
+                continue;
+            }
 
             if notification
                 .get("method")
@@ -710,11 +767,13 @@ fn start_launch_processor(
     control: Arc<RwLock<EngineControl>>,
     market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     token_registry: TokenRegistry,
+    batch_tracker: BatchTracker,
 ) {
     const LAUNCH_QUEUE_CAPACITY: usize = 256;
     const LAUNCH_WORKER_COUNT: usize = 4;
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64)>(LAUNCH_QUEUE_CAPACITY);
+    let producer_batch_tracker = batch_tracker.clone();
+    let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64, BatchWorkGuard)>(LAUNCH_QUEUE_CAPACITY);
     let work_rx = Arc::new(Mutex::new(work_rx));
 
     for _ in 0..LAUNCH_WORKER_COUNT {
@@ -730,7 +789,7 @@ fn start_launch_processor(
         tokio::spawn(async move {
             loop {
                 let work = { work_rx.lock().await.recv().await };
-                let Some((signature, slot_hint)) = work else {
+                let Some((signature, slot_hint, work_guard)) = work else {
                     break;
                 };
                 if control.read().await.paused {
@@ -858,6 +917,7 @@ fn start_launch_processor(
                         let approved_registry = token_registry.clone();
                         let approved_database = database.clone();
                         tokio::spawn(async move {
+                            let _scan_batch_guard = work_guard;
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
                             let scan_result = match tokio::time::timeout(
@@ -881,11 +941,11 @@ fn start_launch_processor(
                                 Ok(Err(error)) => Err(error.to_string()),
                                 Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
                             };
+                            let mut approved_for_market = false;
                             match scan_result {
                                 Ok(mut report) => {
-                                    // Metadata is an independent operation: it must never keep
-                                    // the security scan in a scanning state.
-                                    if report.metadata.name.is_none() {
+                                    // Resolve display metadata only after the security checks approve the mint.
+                                    if report.metadata.name.is_none() && report.decision == "APPROVED" {
                                         let _ = scan_events.send(json!({"type":"token_metadata_started","data":{
                                             "mint_address":scan_mint,
                                             "provider":"metaplex",
@@ -1030,6 +1090,7 @@ fn start_launch_processor(
                                                 }
                                             };
                                             if approval_persisted {
+                                                approved_for_market = true;
                                                 // Publish APPROVED only after the canonical state is durable,
                                                 // so a frontend subscription cannot race the approval gate.
                                                 let _ = scan_events.send(json!({
@@ -1121,35 +1182,44 @@ fn start_launch_processor(
                                     }}));
                                 }
                             }
-                            // Market observation is independent from trade approval.
-                            // Security decisions gate execution, never token visibility or price collection.
-                            if let Some(monitor) = approved_monitor.read().await.clone() {
-                                match monitor
-                                    .subscribe_pump_fun_bonding_curve(
-                                        &scan_mint,
-                                        &approved_program_id,
-                                    )
-                                    .await
-                                {
-                                    Ok(account_address) => {
-                                        let _ = scan_events.send(
-                                            json!({"type":"market_subscription_requested","data":{
-                                                "mint_address":scan_mint,
-                                                "account_address":account_address,
-                                                "venue":"pump_fun_bonding_curve",
-                                                "status":"pending",
+                            if approved_for_market {
+                                // Only approved tokens enter the continuous market monitor.
+                                if let Some(monitor) = approved_monitor.read().await.clone() {
+                                    match monitor
+                                        .subscribe_pump_fun_bonding_curve(
+                                            &scan_mint,
+                                            &approved_program_id,
+                                        )
+                                        .await
+                                    {
+                                        Ok(account_address) => {
+                                            let _ = scan_events.send(
+                                                json!({"type":"market_subscription_requested","data":{
+                                                    "mint_address":scan_mint,
+                                                    "account_address":account_address,
+                                                    "venue":"pump_fun_bonding_curve",
+                                                    "status":"pending",
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                "severity":"warning","component":"market_monitor_registration",
+                                                "message":error.to_string(),"mint_address":scan_mint,
                                                 "received_at":chrono::Utc::now().to_rfc3339()
-                                            }}),
-                                        );
-                                    }
-                                    Err(error) => {
-                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                            "severity":"warning","component":"market_monitor_registration",
-                                            "message":error.to_string(),"mint_address":scan_mint,
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }}));
+                                            }}));
+                                        }
                                     }
                                 }
+                            } else {
+                                // The UI has already received the scan result. Remove rejected,
+                                // unverified, and failed candidates from durable monitored-token storage.
+                                let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                    "mint_address":scan_mint,
+                                    "reason":"Token did not receive a persisted APPROVED security decision.",
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
                             }
                         });
                     }
@@ -1237,7 +1307,8 @@ fn start_launch_processor(
                 }
             }
 
-            if let Err(error) = work_tx.try_send((signature.clone(), slot)) {
+            let work_guard = producer_batch_tracker.track();
+            if let Err(error) = work_tx.try_send((signature.clone(), slot, work_guard)) {
                 // Do not permanently suppress a signature that could not enter the queue.
                 seen_signatures.lock().await.remove(&signature);
                 let _ = events.send(json!({"type":"diagnostic","data":{
@@ -2043,10 +2114,72 @@ fn spawn_controlled_log_stream(
                 events.clone(),
                 status.clone(),
                 recovery_rpc.clone(),
+                None,
+                None,
             );
             tokio::pin!(stream);
             tokio::select! {
                 _ = &mut stream => {}
+                changed = runtime_enabled.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    if !*runtime_enabled.borrow() {
+                        *status.write().await = StreamStatus::default();
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn spawn_batched_discovery_stream(
+    ws_urls: Vec<String>,
+    program_id: String,
+    events: broadcast::Sender<serde_json::Value>,
+    status: Arc<RwLock<StreamStatus>>,
+    recovery_rpc: Option<SolanaRpc>,
+    mut runtime_enabled: watch::Receiver<bool>,
+    mut completed_batches: watch::Receiver<u64>,
+) {
+    let checkpoint = Arc::new(Mutex::new(None::<(u64, String)>));
+    tokio::spawn(async move {
+        loop {
+            while !*runtime_enabled.borrow() {
+                if runtime_enabled.changed().await.is_err() {
+                    return;
+                }
+            }
+            let batch_before = *completed_batches.borrow();
+            let stream = run_logs_stream(
+                ws_urls.clone(),
+                program_id.clone(),
+                events.clone(),
+                status.clone(),
+                recovery_rpc.clone(),
+                Some(100),
+                Some(checkpoint.clone()),
+            );
+            tokio::pin!(stream);
+            tokio::select! {
+                _ = &mut stream => {
+                    // The discovery socket has closed at the 100-notification limit.
+                    // The ordered discovery_batch_full event is handled by the launch processor
+                    // after all preceding launch notifications have entered the worker queue.
+                    loop {
+                        if *completed_batches.borrow() > batch_before {
+                            let _ = events.send(json!({"type":"discovery_batch_completed","data":{
+                                "batch":*completed_batches.borrow(),
+                                "limit":100,
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            break;
+                        }
+                        if completed_batches.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                }
                 changed = runtime_enabled.changed() => {
                     if changed.is_err() {
                         return;
@@ -2251,6 +2384,8 @@ async fn main() -> anyhow::Result<()> {
     let (runtime_enabled, runtime_receiver) = watch::channel(false);
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
+    let (completed_batches_tx, completed_batches_rx) = watch::channel(0_u64);
+    let batch_tracker = BatchTracker::new(completed_batches_tx);
     if let Some(launch_rpc) = rpc.clone() {
         start_launch_processor(
             events.subscribe(),
@@ -2261,6 +2396,7 @@ async fn main() -> anyhow::Result<()> {
             control.clone(),
             market_monitor.clone(),
             token_registry.clone(),
+            batch_tracker.clone(),
         );
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
@@ -2292,60 +2428,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Persist raw upstream log notifications independently of browser subscribers.
-    // Batch writes avoid one SQLite transaction/fsync per Solana notification.
-    let mut persistence_receiver = events.subscribe();
-    let persistence_db = db.clone();
-    tokio::spawn(async move {
-        let mut pending = Vec::<serde_json::Value>::with_capacity(100);
-        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(250));
-        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        flush_tick.tick().await;
-        loop {
-            tokio::select! {
-                event = persistence_receiver.recv() => match event {
-                    Ok(event) => {
-                        if event.get("method").and_then(serde_json::Value::as_str)
-                            == Some("logsNotification")
-                        {
-                            pending.push(event);
-                            if pending.len() == 100 {
-                                match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
-                                    Ok(()) => pending.clear(),
-                                    Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
-                                }
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(
-                            dropped_notifications = count,
-                            pending_notifications = pending.len(),
-                            "Raw Solana event persistence subscriber lagged; recovered notifications may be backfilled after reconnect"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-                _ = flush_tick.tick() => {
-                    if !pending.is_empty() {
-                        match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
-                            Ok(()) => pending.clear(),
-                            Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
-                        }
-                    }
-                }
-            }
-        }
-    });
+    // Raw Solana notification JSON is intentionally transient. Only decoded,
+    // deduplicated launch/token state is persisted; retaining every provider
+    // notification creates unbounded storage growth without helping the UI.
 
     if !config.solana_ws_urls.is_empty() {
-        spawn_controlled_log_stream(
+        spawn_batched_discovery_stream(
             config.solana_ws_urls.clone(),
             config.pump_fun_program_id.clone(),
             events.clone(),
             stream_status.clone(),
             rpc.clone(),
             runtime_receiver.clone(),
+            completed_batches_rx,
         );
     } else {
         tracing::warn!("Helius not configured; set HELIUS_API_KEY or SOLANA_RPC_WS_URL");
@@ -2359,7 +2454,7 @@ async fn main() -> anyhow::Result<()> {
         rpc,
         database: db.clone(),
         control,
-        admin_api_key: Some(NODEX_ADMIN_API_KEY.to_owned()),
+        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok(),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
         runtime_enabled,
         market_monitor,

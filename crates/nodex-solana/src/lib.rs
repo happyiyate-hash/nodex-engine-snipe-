@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1460,6 +1460,11 @@ async fn backfill_logs_gap(
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        if program_id != PUMPSWAP_PROGRAM_ID
+            && !logs.iter().any(|line| line.to_ascii_lowercase().contains("instruction: create"))
+        {
+            continue;
+        }
         let slot = transaction
             .get("slot")
             .and_then(Value::as_u64)
@@ -1496,18 +1501,25 @@ pub async fn run_logs_stream(
     sender: broadcast::Sender<Value>,
     status: std::sync::Arc<tokio::sync::RwLock<StreamStatus>>,
     rpc: Option<SolanaRpc>,
+    notification_limit: Option<usize>,
+    checkpoint: Option<std::sync::Arc<tokio::sync::Mutex<Option<(u64, String)>>>>,
 ) {
     let mut reconnect_count = 0_u64;
     let mut next_endpoint = 0usize;
-    let mut last_seen_signature: Option<(u64, String)> = None;
+    let mut last_seen_signature: Option<(u64, String)> = match &checkpoint {
+        Some(checkpoint) => checkpoint.lock().await.clone(),
+        None => None,
+    };
     let mut recovery_incomplete = false;
+    let mut batch_notifications = 0usize;
+    let mut batch_signatures = HashSet::<String>::new();
     if ws_urls.is_empty() {
         warn!("No Solana WebSocket endpoints are configured");
         return;
     }
     loop {
         let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
-        if let Err(error) = connect_and_subscribe(
+        let result = connect_and_subscribe(
             &active_url,
             &program_id,
             &sender,
@@ -1515,9 +1527,25 @@ pub async fn run_logs_stream(
             rpc.as_ref(),
             &mut last_seen_signature,
             &mut recovery_incomplete,
+            notification_limit,
+            &mut batch_notifications,
+            &mut batch_signatures,
         )
-        .await
-        {
+        .await;
+        match result {
+            Ok(true) => {
+                let _ = sender.send(json!({"type":"discovery_batch_full","data":{
+                    "limit":notification_limit.unwrap_or_default(),
+                    "notifications":batch_notifications,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }}));
+                if let Some(checkpoint) = &checkpoint {
+                    *checkpoint.lock().await = last_seen_signature.clone();
+                }
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
             reconnect_count = reconnect_count.saturating_add(1);
             next_endpoint = (next_endpoint + 1) % ws_urls.len();
             let error_message = format!("{error:#}");
@@ -1575,7 +1603,10 @@ async fn connect_and_subscribe(
     rpc: Option<&SolanaRpc>,
     last_seen_signature: &mut Option<(u64, String)>,
     recovery_incomplete: &mut bool,
-) -> Result<()> {
+    notification_limit: Option<usize>,
+    batch_notifications: &mut usize,
+    batch_signatures: &mut HashSet<String>,
+) -> Result<bool> {
     let (mut socket, _) = connect_async(ws_url)
         .await
         .context("connecting to Solana WebSocket")?;
@@ -1695,7 +1726,42 @@ async fn connect_and_subscribe(
                         let mut current = status.write().await;
                         current.last_message_at = Some(chrono::Utc::now().to_rfc3339());
                     }
+                    let is_create_notification = tagged
+                        .pointer("/params/result/value/logs")
+                        .and_then(Value::as_array)
+                        .is_some_and(|logs| logs.iter().any(|line| {
+                            line.as_str().is_some_and(|line| {
+                                line.to_ascii_lowercase().contains("instruction: create")
+                            })
+                        }));
+                    // The Pump.fun subscription is used only for creation launches.
+                    // Buy/sell activity is already handled by the independent PumpSwap
+                    // market stream and must not enter the discovery decoder queue.
+                    if program_id != PUMPSWAP_PROGRAM_ID && !is_create_notification {
+                        continue;
+                    }
+                    let signature = tagged
+                        .pointer("/params/result/value/signature")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                     let _ = sender.send(tagged);
+                    if notification_limit.is_some()
+                        && program_id != PUMPSWAP_PROGRAM_ID
+                        && is_create_notification
+                    {
+                        if let Some(signature) = signature {
+                            if batch_signatures.insert(signature) {
+                                *batch_notifications += 1;
+                                if *batch_notifications >= notification_limit.unwrap_or(usize::MAX) {
+                                    let _ = socket.close(None).await;
+                                    let mut current = status.write().await;
+                                    current.connected = false;
+                                    current.subscription_id = None;
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
@@ -1715,7 +1781,7 @@ async fn connect_and_subscribe(
     };
     let reconnect_count = status.read().await.reconnect_count;
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":false,"reconnect_count":reconnect_count,"program_id":program_id,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
