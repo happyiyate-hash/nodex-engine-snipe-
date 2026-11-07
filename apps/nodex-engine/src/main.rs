@@ -874,7 +874,7 @@ fn start_launch_processor(
                             match tokio::time::timeout(
                                 Duration::from_secs(15),
                                 scan_rpc.scan_creator_history(
-                                    &creator_address_for_scan,
+                                    creator_address_for_scan.as_deref().unwrap_or_default(),
                                     &launch_signature_for_scan,
                                     &approved_program_id,
                                 ),
@@ -1301,6 +1301,7 @@ async fn update_engine_control(
 }
 
 async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let trading_settings = state.trading_settings.read().await.clone();
     let stream = state.stream_status.read().await.clone();
     let pumpswap_stream = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
@@ -1501,7 +1502,6 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     // separate balances and are never added together.
     let positions = state.portfolio_positions.read().await.clone();
     let paper_wallet = state.wallet.read().await.clone();
-    let trading_settings = state.trading_settings.read().await.clone();
     let mut profile = state.profile.read().await.clone();
 
     let open_positions: Vec<serde_json::Value> = positions

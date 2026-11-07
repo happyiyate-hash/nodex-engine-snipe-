@@ -1,5 +1,6 @@
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
+use nodex_trading::paper_wallet::PaperWallet;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     Row, SqlitePool,
@@ -450,4 +451,79 @@ pub async fn load_chart_candles(
         .collect::<std::result::Result<Vec<serde_json::Value>, _>>()?;
     candles.reverse();
     Ok(candles)
+}
+
+
+/// Return the newest persisted launches, newest first.
+pub async fn list_recent_launches(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM token_launches ORDER BY detected_at DESC LIMIT ?",
+    )
+    .bind(limit.clamp(1, 500) as i64)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .collect()
+}
+
+/// Restore the persisted paper wallet without mixing it with the on-chain wallet.
+pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>> {
+    let row = sqlx::query(
+        "SELECT starting_balance_lamports, available_balance_lamports, invested_balance_lamports, locked_rent_lamports, total_network_fees_lamports, total_priority_fees_lamports, total_swap_fees_lamports, total_rent_refunded_lamports FROM paper_wallets WHERE id = 'default'",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(PaperWallet {
+            starting_balance_lamports: u64::try_from(row.get::<i64, _>("starting_balance_lamports"))?,
+            available_balance_lamports: u64::try_from(row.get::<i64, _>("available_balance_lamports"))?,
+            invested_balance_lamports: u64::try_from(row.get::<i64, _>("invested_balance_lamports"))?,
+            locked_rent_lamports: u64::try_from(row.get::<i64, _>("locked_rent_lamports"))?,
+            total_network_fees_lamports: u64::try_from(row.get::<i64, _>("total_network_fees_lamports"))?,
+            total_priority_fees_lamports: u64::try_from(row.get::<i64, _>("total_priority_fees_lamports"))?,
+            total_swap_fees_lamports: u64::try_from(row.get::<i64, _>("total_swap_fees_lamports"))?,
+            total_rent_refunded_lamports: u64::try_from(row.get::<i64, _>("total_rent_refunded_lamports"))?,
+        })
+    })
+    .transpose()
+}
+
+/// Persist the single engine paper wallet using an atomic upsert.
+pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO paper_wallets (
+            id, starting_balance_lamports, available_balance_lamports,
+            invested_balance_lamports, locked_rent_lamports,
+            total_network_fees_lamports, total_priority_fees_lamports,
+            total_swap_fees_lamports, total_rent_refunded_lamports, updated_at
+        ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            starting_balance_lamports=excluded.starting_balance_lamports,
+            available_balance_lamports=excluded.available_balance_lamports,
+            invested_balance_lamports=excluded.invested_balance_lamports,
+            locked_rent_lamports=excluded.locked_rent_lamports,
+            total_network_fees_lamports=excluded.total_network_fees_lamports,
+            total_priority_fees_lamports=excluded.total_priority_fees_lamports,
+            total_swap_fees_lamports=excluded.total_swap_fees_lamports,
+            total_rent_refunded_lamports=excluded.total_rent_refunded_lamports,
+            updated_at=excluded.updated_at"#,
+    )
+    .bind(i64::try_from(wallet.starting_balance_lamports)?)
+    .bind(i64::try_from(wallet.available_balance_lamports)?)
+    .bind(i64::try_from(wallet.invested_balance_lamports)?)
+    .bind(i64::try_from(wallet.locked_rent_lamports)?)
+    .bind(i64::try_from(wallet.total_network_fees_lamports)?)
+    .bind(i64::try_from(wallet.total_priority_fees_lamports)?)
+    .bind(i64::try_from(wallet.total_swap_fees_lamports)?)
+    .bind(i64::try_from(wallet.total_rent_refunded_lamports)?)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
