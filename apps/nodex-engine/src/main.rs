@@ -1043,13 +1043,15 @@ fn start_launch_processor(
                                     .await
                                 {
                                     Ok(account_address) => {
-                                        let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
-                                            "mint_address":scan_mint,
-                                            "account_address":account_address,
-                                            "venue":"pump_fun_bonding_curve",
-                                            "status":"pending",
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }}));
+                                        let _ = scan_events.send(
+                                            json!({"type":"market_subscription_requested","data":{
+                                                "mint_address":scan_mint,
+                                                "account_address":account_address,
+                                                "venue":"pump_fun_bonding_curve",
+                                                "status":"pending",
+                                                "received_at":chrono::Utc::now().to_rfc3339()
+                                            }}),
+                                        );
                                     }
                                     Err(error) => {
                                         let _ = scan_events.send(json!({"type":"diagnostic","data":{
