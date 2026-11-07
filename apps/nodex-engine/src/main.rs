@@ -408,52 +408,79 @@ impl DiscoveryMetadata {
 /// from HTTPS URLs and redirects are disabled to reduce SSRF and untrusted redirect risk.
 async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Result<DiscoveryMetadata> {
     let mut result = DiscoveryMetadata::partial();
-    if let Some((_owner, data, _slot)) = rpc.get_account_data(mint).await? {
-        if data.len() >= 82 {
-            result.decimals = Some(data[44]);
+
+    // Each metadata source is best-effort and independent: one unavailable RPC call
+    // must not erase fields successfully resolved by another source.
+    match rpc.get_account_data(mint).await {
+        Ok(Some((owner, data, _slot))) if data.len() >= 82 => {
+            const SPL_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+            const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnB9J3q6k7";
+            if owner == SPL_TOKEN || owner == TOKEN_2022 {
+                result.decimals = Some(data[44]);
+            }
         }
+        Ok(_) => {}
+        Err(error) => tracing::debug!(%error, mint_address=%mint, "Mint account metadata lookup failed"),
     }
 
-    if let Some(metadata) = rpc.resolve_metaplex_metadata(mint).await? {
-        result.name = metadata.name;
-        result.symbol = metadata.symbol;
-        result.metadata_uri = metadata.uri;
+    match rpc.resolve_metaplex_metadata(mint).await {
+        Ok(Some(metadata)) => {
+            result.name = metadata.name;
+            result.symbol = metadata.symbol;
+            result.metadata_uri = metadata.uri;
+        }
+        Ok(None) => {}
+        Err(error) => tracing::debug!(%error, mint_address=%mint, "Metaplex metadata lookup failed"),
     }
 
     if let Some(uri) = result.metadata_uri.as_deref() {
         if let Ok(url) = reqwest::Url::parse(uri) {
             let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-            let safe_scheme = url.scheme() == "https";
-            let unsafe_host = host == "localhost" || host.ends_with(".localhost")
-                || host.ends_with(".local") || host == "127.0.0.1" || host == "::1"
-                || host.starts_with("10.") || host.starts_with("192.168.")
-                || host.starts_with("169.254.") || host.starts_with("172.16.")
-                || host.starts_with("172.17.") || host.starts_with("172.18.")
-                || host.starts_with("172.19.") || host.starts_with("172.2")
-                || host.starts_with("172.30.") || host.starts_with("172.31.");
-            if safe_scheme && !unsafe_host {
+            let ip_literal = host.parse::<std::net::IpAddr>().is_ok();
+            let unsafe_host = ip_literal || host == "localhost" || host.ends_with(".localhost")
+                || host.ends_with(".local");
+            if url.scheme() == "https" && !unsafe_host {
                 let client = reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(Duration::from_secs(5))
                     .build()?;
-                if let Ok(response) = client.get(url).header(reqwest::header::ACCEPT, "application/json").send().await {
+                if let Ok(mut response) = client.get(url)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .send().await
+                {
                     if response.status().is_success()
                         && response.content_length().map(|length| length <= 262_144).unwrap_or(true)
                     {
-                        if let Ok(bytes) = response.bytes().await {
-                            if bytes.len() <= 262_144 {
-                                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                                    result.logo_url = value.get("image").or_else(|| value.get("image_url"))
-                                        .and_then(serde_json::Value::as_str)
+                        let mut bytes = Vec::new();
+                        let mut within_limit = true;
+                        loop {
+                            match response.chunk().await {
+                                Ok(Some(chunk)) => {
+                                    if bytes.len().saturating_add(chunk.len()) > 262_144 {
+                                        within_limit = false;
+                                        break;
+                                    }
+                                    bytes.extend_from_slice(&chunk);
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    within_limit = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if within_limit {
+                            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                result.logo_url = value.get("image").or_else(|| value.get("image_url"))
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                if result.name.is_none() {
+                                    result.name = value.get("name").and_then(serde_json::Value::as_str)
                                         .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
-                                    if result.name.is_none() {
-                                        result.name = value.get("name").and_then(serde_json::Value::as_str)
-                                            .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
-                                    }
-                                    if result.symbol.is_none() {
-                                        result.symbol = value.get("symbol").and_then(serde_json::Value::as_str)
-                                            .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
-                                    }
+                                }
+                                if result.symbol.is_none() {
+                                    result.symbol = value.get("symbol").and_then(serde_json::Value::as_str)
+                                        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
                                 }
                             }
                         }
@@ -463,11 +490,15 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
         }
     }
 
-    result.status = if result.name.is_some() || result.symbol.is_some() || result.decimals.is_some() || result.logo_url.is_some() {
-        if result.name.is_some() && result.symbol.is_some() && result.decimals.is_some() && result.logo_url.is_some() {
-            "complete"
-        } else { "partial" }
-    } else { "unavailable" };
+    result.status = if result.name.is_some() && result.symbol.is_some()
+        && result.decimals.is_some() && result.logo_url.is_some() {
+        "complete"
+    } else if result.name.is_some() || result.symbol.is_some()
+        || result.decimals.is_some() || result.metadata_uri.is_some() || result.logo_url.is_some() {
+        "partial"
+    } else {
+        "unavailable"
+    };
     Ok(result)
 }
 
