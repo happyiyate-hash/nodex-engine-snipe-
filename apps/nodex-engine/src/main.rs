@@ -1528,8 +1528,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
         paper_wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let available_balance_sol =
         paper_wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let locked_rent_sol =
-        paper_wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let locked_rent_sol = paper_wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let invested_balance_sol =
         paper_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
 
