@@ -804,6 +804,9 @@ fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
+                if control.read().await.paused {
+                    continue;
+                }
                 match nodex_persistence::save_launch(&database, &launch).await {
                     Ok(true) => {
                         let mint_address = launch.mint_address.clone();
@@ -860,6 +863,7 @@ fn start_launch_processor(
                         let approved_program_id = program_id.clone();
                         let approved_registry = token_registry.clone();
                         let approved_database = database.clone();
+                        let scan_control = control.clone();
                         tokio::spawn(async move {
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
@@ -884,6 +888,9 @@ fn start_launch_processor(
                                 Ok(Err(error)) => Err(error.to_string()),
                                 Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
                             };
+                            if scan_control.read().await.paused {
+                                return;
+                            }
                             match scan_result {
                                 Ok(mut report) => {
                                     // Metadata is an independent operation: it must never keep
@@ -961,6 +968,9 @@ fn start_launch_processor(
                                             .insert("total_supply_raw".into(), json!(supply));
                                     }
                                     if !identity_patch.is_empty() {
+                                        if scan_control.read().await.paused {
+                                            return;
+                                        }
                                         match approved_registry.upsert_patch(
                                             &scan_mint,
                                             json!({"identity":identity_patch}),
@@ -993,6 +1003,9 @@ fn start_launch_processor(
                                                 tracing::warn!(%error, mint_address=%scan_mint, "Could not update canonical token identity")
                                             }
                                         }
+                                    }
+                                    if scan_control.read().await.paused {
+                                        return;
                                     }
                                     let decision = report.decision.clone();
                                     let mut terminal_status = match decision.as_str() {
