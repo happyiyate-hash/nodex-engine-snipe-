@@ -1,6 +1,6 @@
+mod storage;
 mod token_details;
 mod websocket;
-mod storage;
 
 use axum::{
     extract::{
@@ -1189,7 +1189,8 @@ async fn cleanup_system_journal(
     let after = storage::inspect(&state.database).await;
     let before_bytes = before.system_journal.reported_size_bytes;
     let after_bytes = after.system_journal.reported_size_bytes;
-    let bytes_freed = before_bytes.zip(after_bytes)
+    let bytes_freed = before_bytes
+        .zip(after_bytes)
         .map(|(old, new)| old.saturating_sub(new));
     Ok(Json(json!({
         "status": "ok",
