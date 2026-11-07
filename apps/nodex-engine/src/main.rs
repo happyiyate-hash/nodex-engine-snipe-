@@ -386,6 +386,91 @@ fn start_token_state_projector(
 }
 
 #[allow(clippy::too_many_arguments)]
+
+#[derive(Debug, Clone)]
+struct DiscoveryMetadata {
+    name: Option<String>,
+    symbol: Option<String>,
+    decimals: Option<u8>,
+    metadata_uri: Option<String>,
+    logo_url: Option<String>,
+    status: &'static str,
+}
+
+impl DiscoveryMetadata {
+    fn partial() -> Self {
+        Self { name: None, symbol: None, decimals: None, metadata_uri: None, logo_url: None, status: "unavailable" }
+    }
+}
+
+/// Resolve the token's display identity before publishing new_token_detected.
+/// Missing optional fields never block discovery. Off-chain metadata is fetched only
+/// from HTTPS URLs and redirects are disabled to reduce SSRF and untrusted redirect risk.
+async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Result<DiscoveryMetadata> {
+    let mut result = DiscoveryMetadata::partial();
+    if let Some((_owner, data, _slot)) = rpc.get_account_data(mint).await? {
+        if data.len() >= 82 {
+            result.decimals = Some(data[44]);
+        }
+    }
+
+    if let Some(metadata) = rpc.resolve_metaplex_metadata(mint).await? {
+        result.name = metadata.name;
+        result.symbol = metadata.symbol;
+        result.metadata_uri = metadata.uri;
+    }
+
+    if let Some(uri) = result.metadata_uri.as_deref() {
+        if let Ok(url) = reqwest::Url::parse(uri) {
+            let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+            let safe_scheme = url.scheme() == "https";
+            let unsafe_host = host == "localhost" || host.ends_with(".localhost")
+                || host.ends_with(".local") || host == "127.0.0.1" || host == "::1"
+                || host.starts_with("10.") || host.starts_with("192.168.")
+                || host.starts_with("169.254.") || host.starts_with("172.16.")
+                || host.starts_with("172.17.") || host.starts_with("172.18.")
+                || host.starts_with("172.19.") || host.starts_with("172.2")
+                || host.starts_with("172.30.") || host.starts_with("172.31.");
+            if safe_scheme && !unsafe_host {
+                let client = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(5))
+                    .build()?;
+                if let Ok(response) = client.get(url).header(reqwest::header::ACCEPT, "application/json").send().await {
+                    if response.status().is_success()
+                        && response.content_length().map(|length| length <= 262_144).unwrap_or(true)
+                    {
+                        if let Ok(bytes) = response.bytes().await {
+                            if bytes.len() <= 262_144 {
+                                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                    result.logo_url = value.get("image").or_else(|| value.get("image_url"))
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                    if result.name.is_none() {
+                                        result.name = value.get("name").and_then(serde_json::Value::as_str)
+                                            .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                    }
+                                    if result.symbol.is_none() {
+                                        result.symbol = value.get("symbol").and_then(serde_json::Value::as_str)
+                                            .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result.status = if result.name.is_some() || result.symbol.is_some() || result.decimals.is_some() || result.logo_url.is_some() {
+        if result.name.is_some() && result.symbol.is_some() && result.decimals.is_some() && result.logo_url.is_some() {
+            "complete"
+        } else { "partial" }
+    } else { "unavailable" };
+    Ok(result)
+}
+
 fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
@@ -399,6 +484,8 @@ fn start_launch_processor(
     const LAUNCH_QUEUE_CAPACITY: usize = 256;
     const LAUNCH_WORKER_COUNT: usize = 4;
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
+    // Prevent concurrent discovery/metadata/scan pipelines for the same mint.
+    let inflight_mints = Arc::new(Mutex::new(HashSet::<String>::new()));
     let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64)>(LAUNCH_QUEUE_CAPACITY);
     let work_rx = Arc::new(Mutex::new(work_rx));
 
@@ -412,6 +499,7 @@ fn start_launch_processor(
         let control = control.clone();
         let market_monitor = market_monitor.clone();
         let token_registry = token_registry.clone();
+        let inflight_mints = inflight_mints.clone();
         tokio::spawn(async move {
             loop {
                 let work = { work_rx.lock().await.recv().await };
@@ -486,378 +574,261 @@ fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
-                match nodex_persistence::save_launch(&database, &launch).await {
-                    Ok(true) => {
-                        let mint_address = launch.mint_address.clone();
-                        let creator_address = launch.creator_address.clone();
-                        // Register the token immediately. Scanner and market workers
-                        // can now update independent domains of the same canonical record.
-                        let initial_state = token_registry.upsert_patch(
-                            &mint_address,
-                            json!({
-                                "identity": {"mint_address": mint_address.clone()},
-                                "discovery": {
-                                    "source": "pump_fun",
-                                    "creator_address": creator_address.clone(),
-                                    "signature": launch.signature.clone(),
-                                    "slot": launch.slot,
-                                    "detected_at": launch.detected_at.clone()
-                                },
-                                "security": {"status": "pending"},
-                                "market": {"status": "starting"}
-                            }),
-                        );
-                        match initial_state {
-                            Ok(snapshot) => {
-                                if let Err(error) =
-                                    nodex_persistence::save_token_state(&database, &snapshot).await
-                                {
-                                    let _ = events.send(json!({"type":"diagnostic","data":{
-                                        "severity":"error","component":"token_state_persistence",
-                                        "message":error.to_string(),"mint_address":mint_address.clone(),
-                                        "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
-                                }
-                                let _ = events
-                                    .send(json!({"type":"token_state_updated","data":snapshot}));
+                let mint_address = launch.mint_address.clone();
+                {
+                    let mut inflight = inflight_mints.lock().await;
+                    if !inflight.insert(mint_address.clone()) {
+                        continue;
+                    }
+                }
+                // A previously approved token is already durable; do not restart its lifecycle.
+                if token_registry.get(&mint_address).is_some() {
+                    inflight_mints.lock().await.remove(&mint_address);
+                    continue;
+                }
+
+                // Resolve identity before announcing discovery or starting security analysis.
+                let metadata_result = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    resolve_discovery_metadata(&rpc, &mint_address),
+                ).await;
+                let metadata = match metadata_result {
+                    Ok(Ok(metadata)) => metadata,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, mint_address=%mint_address, "Initial token metadata resolution failed; continuing with partial discovery");
+                        DiscoveryMetadata::partial()
+                    }
+                    Err(_) => {
+                        tracing::warn!(mint_address=%mint_address, "Initial token metadata resolution timed out; continuing with partial discovery");
+                        DiscoveryMetadata::partial()
+                    }
+                };
+
+                let creator_address = launch.creator_address.clone();
+                let mut identity = serde_json::Map::new();
+                identity.insert("mint_address".into(), json!(mint_address));
+                if let Some(value) = metadata.name.as_ref() { identity.insert("name".into(), json!(value)); }
+                if let Some(value) = metadata.symbol.as_ref() { identity.insert("symbol".into(), json!(value)); }
+                if let Some(value) = metadata.decimals { identity.insert("decimals".into(), json!(value)); }
+                if let Some(value) = metadata.metadata_uri.as_ref() { identity.insert("metadata_uri".into(), json!(value)); }
+                if let Some(value) = metadata.logo_url.as_ref() { identity.insert("logo_url".into(), json!(value)); }
+
+                let initial_state = token_registry.upsert_patch(
+                    &mint_address,
+                    json!({
+                        "identity": identity,
+                        "discovery": {
+                            "source": "pump_fun",
+                            "creator_address": creator_address,
+                            "signature": launch.signature,
+                            "slot": launch.slot,
+                            "detected_at": launch.detected_at,
+                            "metadata_status": metadata.status
+                        },
+                        "security": {"status": "pending"},
+                        "market": {"status": "not_started"}
+                    }),
+                );
+                match initial_state {
+                    Ok(snapshot) => {
+                        // This is intentionally runtime-only. No launch or token row is written yet.
+                        let _ = events.send(json!({
+                            "type":"new_token_detected",
+                            "data":{
+                                "mint_address":mint_address,
+                                "name":metadata.name,
+                                "symbol":metadata.symbol,
+                                "decimals":metadata.decimals,
+                                "logo_url":metadata.logo_url,
+                                "metadata_uri":metadata.metadata_uri,
+                                "metadata_status":metadata.status,
+                                "scan_status":"pending",
+                                "discovery":snapshot.data.get("discovery").cloned().unwrap_or(Value::Null)
                             }
-                            Err(error) => {
-                                let _ = events.send(json!({"type":"diagnostic","data":{
-                                    "severity":"error","component":"token_registry",
-                                    "message":error,"mint_address":mint_address.clone(),
-                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                }}));
-                            }
-                        }
+                        }));
                         let _ = events.send(json!({"type":"launch_detected","data":launch}));
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
-                        let scan_rpc = rpc.clone();
-                        let scan_events = events.clone();
-                        let scan_mint = mint_address.clone();
-                        let approved_monitor = market_monitor.clone();
-                        let approved_program_id = program_id.clone();
-                        let approved_registry = token_registry.clone();
-                        let approved_database = database.clone();
-                        tokio::spawn(async move {
-                            let progress_events = scan_events.clone();
-                            let progress_mint = scan_mint.clone();
-                            let scan_result = match tokio::time::timeout(
-                                Duration::from_secs(45),
-                                scan_rpc.scan_token_security_with_progress(
-                                    &scan_mint,
-                                    move |stage, progress, message| {
-                                        let _ = progress_events.send(
-                                            json!({"type":"token_scan_progress","data":{
-                                                "mint_address":progress_mint,
-                                                "stage":stage,
-                                                "progress":progress,
-                                                "message":message,
-                                                "received_at":chrono::Utc::now().to_rfc3339()
-                                            }}),
-                                        );
-                                    },
-                                ),
-                            ).await {
-                                Ok(Ok(report)) => Ok(report),
-                                Ok(Err(error)) => Err(error.to_string()),
-                                Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, mint_address=%mint_address, "Could not create in-memory pending token state");
+                        inflight_mints.lock().await.remove(&mint_address);
+                        continue;
+                    }
+                }
+
+                let scan_rpc = rpc.clone();
+                let scan_events = events.clone();
+                let scan_mint = mint_address.clone();
+                let approved_monitor = market_monitor.clone();
+                let approved_program_id = program_id.clone();
+                let approved_registry = token_registry.clone();
+                let approved_database = database.clone();
+                let inflight_mints_for_scan = inflight_mints.clone();
+                tokio::spawn(async move {
+                    let progress_events = scan_events.clone();
+                    let progress_mint = scan_mint.clone();
+                    let scan_result = match tokio::time::timeout(
+                        Duration::from_secs(45),
+                        scan_rpc.scan_token_security_with_progress(
+                            &scan_mint,
+                            move |stage, progress, message| {
+                                let _ = progress_events.send(
+                                    json!({"type":"token_scan_progress","data":{
+                                        "mint_address":progress_mint,
+                                        "stage":stage,
+                                        "progress":progress,
+                                        "message":message,
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}),
+                                );
+                            },
+                        ),
+                    ).await {
+                        Ok(Ok(report)) => Ok(report),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
+                    };
+                    let mut token_approved = false;
+                    match scan_result {
+                        Ok(mut report) => {
+                            // Keep the pre-scan identity authoritative when the scanner has no better value.
+                            if report.metadata.name.is_none() { report.metadata.name = metadata.name.clone(); }
+                            if report.metadata.symbol.is_none() { report.metadata.symbol = metadata.symbol.clone(); }
+                            if report.metadata.uri.is_none() { report.metadata.uri = metadata.metadata_uri.clone(); }
+                            let mut identity_patch = serde_json::Map::new();
+                            if let Some(name) = report.metadata.name.as_ref() { identity_patch.insert("name".into(), json!(name)); }
+                            if let Some(symbol) = report.metadata.symbol.as_ref() { identity_patch.insert("symbol".into(), json!(symbol)); }
+                            if let Some(uri) = report.metadata.uri.as_ref() { identity_patch.insert("metadata_uri".into(), json!(uri)); }
+                            if let Some(decimals) = report.decimals { identity_patch.insert("decimals".into(), json!(decimals)); }
+                            if let Some(supply) = report.supply_raw.as_ref() { identity_patch.insert("total_supply_raw".into(), json!(supply)); }
+                            if let Some(logo) = metadata.logo_url.as_ref() { identity_patch.insert("logo_url".into(), json!(logo)); }
+                            if !identity_patch.is_empty() {
+                                let _ = approved_registry.upsert_patch(&scan_mint, json!({"identity":identity_patch}));
+                            }
+
+                            let decision = report.decision.clone();
+                            let mut terminal_status = match decision.as_str() {
+                                "REJECTED" => "rejected",
+                                "APPROVED" => "completed",
+                                _ => "unverified",
                             };
-                            let mut token_approved = false;
-                            match scan_result {
-                                Ok(mut report) => {
-                                    // Metadata is an independent operation: it must never keep
-                                    // the security scan in a scanning state.
-                                    if report.metadata.name.is_none() {
-                                        let _ = scan_events.send(json!({"type":"token_metadata_started","data":{
-                                            "mint_address":scan_mint,
-                                            "provider":"metaplex",
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }}));
-                                        match tokio::time::timeout(
-                                            Duration::from_secs(8),
-                                            scan_rpc.resolve_metaplex_metadata(&scan_mint),
-                                        ).await {
-                                            Ok(Ok(Some(metadata))) => {
-                                                report.metadata = metadata;
-                                            }
-                                            Ok(Ok(None)) => {
-                                                let _ = scan_events.send(json!({"type":"token_metadata_failed","data":{
-                                                    "mint_address":scan_mint,
-                                                    "provider":"metaplex",
-                                                    "reason":"No Metaplex metadata account was found.",
-                                                    "status":"not_found",
-                                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                                }}));
-                                            }
-                                            Ok(Err(error)) => {
-                                                let message = error.to_string();
-                                                tracing::warn!(%message, mint_address=%scan_mint, "Metaplex metadata lookup failed");
-                                                let _ = scan_events.send(json!({"type":"token_metadata_failed","data":{
-                                                    "mint_address":scan_mint,
-                                                    "provider":"metaplex",
-                                                    "reason":message,
-                                                    "status":"failed",
-                                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                                }}));
-                                                let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                    "severity":"warning","component":"token_metadata_resolver",
-                                                    "message":message,"mint_address":scan_mint,
-                                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                                }}));
-                                            }
-                                            Err(_) => {
-                                                let message = "Metaplex metadata lookup timed out after 8 seconds".to_string();
-                                                let _ = scan_events.send(json!({"type":"token_metadata_failed","data":{
-                                                    "mint_address":scan_mint,
-                                                    "provider":"metaplex",
-                                                    "reason":message,
-                                                    "status":"timeout",
-                                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                                }}));
-                                                let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                    "severity":"warning","component":"token_metadata_resolver",
-                                                    "message":message,"mint_address":scan_mint,
-                                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                                }}));
-                                            }
+                            match decision.as_str() {
+                                "APPROVED" => {
+                                    let launch_saved = match nodex_persistence::save_launch(&approved_database, &launch).await {
+                                        Ok(true) => true,
+                                        Ok(false) => true,
+                                        Err(error) => {
+                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                "severity":"error","component":"launch_persistence",
+                                                "message":error.to_string(),"mint_address":scan_mint
+                                            }}));
+                                            false
                                         }
-                                    }
-                                    let mut identity_patch = serde_json::Map::new();
-                                    if let Some(name) = report.metadata.name.as_ref() {
-                                        identity_patch.insert("name".into(), json!(name));
-                                    }
-                                    if let Some(symbol) = report.metadata.symbol.as_ref() {
-                                        identity_patch.insert("symbol".into(), json!(symbol));
-                                    }
-                                    if let Some(uri) = report.metadata.uri.as_ref() {
-                                        identity_patch.insert("metadata_uri".into(), json!(uri));
-                                    }
-                                    if let Some(decimals) = report.decimals {
-                                        identity_patch.insert("decimals".into(), json!(decimals));
-                                    }
-                                    if let Some(supply) = report.supply_raw.as_ref() {
-                                        identity_patch
-                                            .insert("total_supply_raw".into(), json!(supply));
-                                    }
-                                    if !identity_patch.is_empty() {
-                                        match approved_registry.upsert_patch(
-                                            &scan_mint,
-                                            json!({"identity":identity_patch}),
-                                        ) {
-                                            Ok(snapshot) => {
-                                                if let Err(error) =
-                                                    nodex_persistence::save_token_state(
-                                                        &approved_database,
-                                                        &snapshot,
-                                                    )
-                                                    .await
-                                                {
-                                                    tracing::warn!(%error, mint_address=%scan_mint, "Could not persist resolved token identity");
-                                                }
-                                                let _ = scan_events.send(json!({
-                                                    "type":"token_metadata_updated",
-                                                    "data":{
-                                                        "mint_address":scan_mint,
-                                                        "name":report.metadata.name,
-                                                        "symbol":report.metadata.symbol,
-                                                        "metadata_uri":report.metadata.uri,
-                                                        "decimals":report.decimals,
-                                                        "total_supply_raw":report.supply_raw,
-                                                        "source":report.metadata.source,
-                                                        "status":report.metadata.status
-                                                    }
-                                                }));
-                                            }
-                                            Err(error) => {
-                                                tracing::warn!(%error, mint_address=%scan_mint, "Could not update canonical token identity")
-                                            }
-                                        }
-                                    }
-                                    let decision = report.decision.clone();
-                                    let mut terminal_status = match decision.as_str() {
-                                        "REJECTED" => "rejected",
-                                        "APPROVED" => "completed",
-                                        _ => "unverified",
                                     };
-                                    match decision.as_str() {
-                                        "APPROVED" => {
-                                            let approved_state = approved_registry.upsert_patch(
-                                                &scan_mint,
-                                                json!({"security":report.clone()}),
-                                            );
-                                            let approval_persisted = match approved_state {
-                                                Ok(snapshot) => {
-                                                    match nodex_persistence::save_token_state(
-                                                        &approved_database,
-                                                        &snapshot,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(()) => true,
-                                                        Err(error) => {
-                                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                                "severity":"error","component":"token_approval_persistence",
-                                                                "message":error.to_string(),"mint_address":scan_mint
-                                                            }}));
-                                                            false
-                                                        }
-                                                    }
-                                                }
-                                                Err(error) => {
-                                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                        "severity":"error","component":"token_approval_registry",
-                                                        "message":error,"mint_address":scan_mint
-                                                    }}));
-                                                    false
-                                                }
-                                            };
-                                            if approval_persisted {
-                                                token_approved = true;
-                                                // Publish APPROVED only after the canonical state is durable,
-                                                // so a frontend subscription cannot race the approval gate.
-                                                let _ = scan_events.send(json!({
-                                                    "type":"token_scan_update",
-                                                    "data":report.clone()
-                                                }));
-                                            } else {
-                                                terminal_status = "unverified";
-                                                approved_registry.remove(&scan_mint);
-                                                let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                                    "mint_address":scan_mint,
-                                                    "reason":"Approved token state could not be committed."
-                                                }}));
-                                                let _ = scan_events.send(json!({
-                                                    "type":"token_approval_pending",
-                                                    "data":{
-                                                        "mint_address":scan_mint,
-                                                        "decision":"UNVERIFIED",
-                                                        "reason":"Security checks passed, but the approved token state could not be persisted. Activation is blocked."
-                                                    }
-                                                }));
-                                            }
-                                        }
-                                        "REJECTED" => {
-                                            // Rejected tokens are transient: remove their pending
-                                            // registry state and let the projector clean up any
-                                            // legacy launch/state rows created during migration.
-                                            approved_registry.remove(&scan_mint);
-                                            let _ = scan_events.send(json!({
-                                                "type":"token_scan_update",
-                                                "data":report.clone()
-                                            }));
-                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                                "mint_address":scan_mint,
-                                                "reason":report.decision_reason
+                                    let approved_state = if launch_saved {
+                                        approved_registry.upsert_patch(&scan_mint, json!({
+                                            "security":report.clone(),
+                                            "market":{"status":"starting"}
+                                        }))
+                                    } else { Err("Approved launch could not be persisted".to_string()) };
+                                    let approval_persisted = match approved_state {
+                                        Ok(snapshot) => nodex_persistence::save_token_state(&approved_database, &snapshot).await.is_ok(),
+                                        Err(error) => {
+                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                "severity":"error","component":"token_approval_registry",
+                                                "message":error,"mint_address":scan_mint
                                             }}));
-                                            let _ = scan_events.send(
-                                                json!({"type":"token_approval_pending","data":{
-                                                    "mint_address":scan_mint,
-                                                    "decision":"REJECTED",
-                                                    "reason":report.decision_reason
-                                                }}),
-                                            );
+                                            false
                                         }
-                                        _ => {
-                                            approved_registry.remove(&scan_mint);
-                                            let _ = scan_events.send(json!({
-                                                "type":"token_scan_update",
-                                                "data":report.clone()
-                                            }));
-                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                                "mint_address":scan_mint,
-                                                "reason":"Token did not receive an explicit APPROVED decision."
-                                            }}));
-                                            let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
-                                                "mint_address":scan_mint,
-                                                "decision":decision,
-                                                "reason":"Token remains isolated until an explicit APPROVED decision is produced."
-                                            }}));
+                                    };
+                                    if approval_persisted {
+                                        token_approved = true;
+                                        let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                        if let Some(snapshot) = approved_registry.get(&scan_mint) {
+                                            let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
                                         }
+                                    } else {
+                                        terminal_status = "unverified";
+                                        approved_registry.remove(&scan_mint);
+                                        let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                            "mint_address":scan_mint,
+                                            "reason":"Approved token state could not be committed."
+                                        }}));
                                     }
-                                    let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
+                                }
+                                "REJECTED" => {
+                                    approved_registry.remove(&scan_mint);
+                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                        "mint_address":scan_mint,"reason":report.decision_reason
+                                    }}));
+                                    let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
+                                        "mint_address":scan_mint,"decision":"REJECTED","reason":report.decision_reason
+                                    }}));
+                                }
+                                _ => {
+                                    approved_registry.remove(&scan_mint);
+                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
                                         "mint_address":scan_mint,
-                                        "decision":decision,
-                                        "status":terminal_status,
-                                        "progress":100,
-                                        "message":"Security scan finished.",
+                                        "reason":"Token did not receive an explicit APPROVED decision."
+                                    }}));
+                                    let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
+                                        "mint_address":scan_mint,"decision":decision,
+                                        "reason":"Token remains isolated until an explicit APPROVED decision is produced."
+                                    }}));
+                                }
+                            }
+                            let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
+                                "mint_address":scan_mint,"decision":decision,"status":terminal_status,
+                                "progress":100,"message":"Security scan finished.",
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                        }
+                        Err(error) => {
+                            approved_registry.remove(&scan_mint);
+                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                "severity":"error","component":"token_security_scanner",
+                                "message":error,"mint_address":scan_mint,
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            let _ = scan_events.send(json!({"type":"token_scan_failed","data":{
+                                "mint_address":scan_mint,"decision":"UNVERIFIED",
+                                "decision_reason":error,"status":"failed",
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                "mint_address":scan_mint,"reason":error
+                            }}));
+                        }
+                    }
+                    if token_approved {
+                        if let Some(monitor) = approved_monitor.read().await.clone() {
+                            match monitor.subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id).await {
+                                Ok(account_address) => {
+                                    let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
+                                        "mint_address":scan_mint,"account_address":account_address,
+                                        "venue":"pump_fun_bonding_curve","status":"pending",
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}));
                                 }
                                 Err(error) => {
-                                    approved_registry.remove(&scan_mint);
                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                        "severity":"error","component":"token_security_scanner",
-                                        "message":error,"mint_address":scan_mint,
+                                        "severity":"warning","component":"market_monitor_registration",
+                                        "message":error.to_string(),"mint_address":scan_mint,
                                         "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
-                                    let _ = scan_events.send(json!({"type":"token_scan_failed","data":{
-                                        "mint_address":scan_mint,
-                                        "decision":"UNVERIFIED",
-                                        "decision_reason":error,
-                                        "status":"failed",
-                                        "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
-                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":{
-                                        "mint_address":scan_mint,"decision":"UNVERIFIED",
-                                        "decision_reason":error,
-                                        "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
-                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                        "mint_address":scan_mint,
-                                        "reason":error
                                     }}));
                                 }
                             }
-                            // Only durably approved tokens receive a Core price subscription.
-                            if token_approved {
-                                if let Some(monitor) = approved_monitor.read().await.clone() {
-                                    match monitor
-                                    .subscribe_pump_fun_bonding_curve(
-                                        &scan_mint,
-                                        &approved_program_id,
-                                    )
-                                    .await
-                                {
-                                    Ok(account_address) => {
-                                        let _ = scan_events.send(
-                                            json!({"type":"market_subscription_requested","data":{
-                                                "mint_address":scan_mint,
-                                                "account_address":account_address,
-                                                "venue":"pump_fun_bonding_curve",
-                                                "status":"pending",
-                                                "received_at":chrono::Utc::now().to_rfc3339()
-                                            }}),
-                                        );
-                                    }
-                                    Err(error) => {
-                                        let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                            "severity":"warning","component":"market_monitor_registration",
-                                            "message":error.to_string(),"mint_address":scan_mint,
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }}));
-                                    }
-                                    }
-                                }
-                            }
-                        });
+                        }
                     }
-                    Ok(false) => {
-                        // Duplicate launch signature: it has already been persisted.
-                    }
-                    Err(error) => {
-                        let _ = events.send(json!({"type":"diagnostic","data":{
-                            "severity":"error",
-                            "component":"launch_persistence",
-                            "message":error.to_string(),
-                            "signature":signature,
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }}));
-                    }
-                }
+                    inflight_mints_for_scan.lock().await.remove(&scan_mint);
+                });
+
             }
         });
     }
