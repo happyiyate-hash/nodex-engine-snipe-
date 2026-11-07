@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -41,6 +41,58 @@ use tracing_subscriber::EnvFilter;
 const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
 
 #[derive(Clone)]
+#[derive(Clone)]
+struct BatchTracker {
+    outstanding: Arc<AtomicUsize>,
+    batch_full: Arc<AtomicBool>,
+    completed_batches: watch::Sender<u64>,
+}
+
+impl BatchTracker {
+    fn new(completed_batches: watch::Sender<u64>) -> Self {
+        Self {
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            batch_full: Arc::new(AtomicBool::new(false)),
+            completed_batches,
+        }
+    }
+
+    fn track(&self) -> BatchWorkGuard {
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        BatchWorkGuard { tracker: self.clone() }
+    }
+
+    fn mark_full(&self) {
+        self.batch_full.store(true, Ordering::Release);
+        self.try_complete();
+    }
+
+    fn finish_one(&self) {
+        let previous = self.outstanding.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            self.try_complete();
+        }
+    }
+
+    fn try_complete(&self) {
+        if self.outstanding.load(Ordering::Acquire) == 0
+            && self.batch_full.swap(false, Ordering::AcqRel)
+        {
+            self.completed_batches.send_modify(|batch| *batch = batch.saturating_add(1));
+        }
+    }
+}
+
+struct BatchWorkGuard {
+    tracker: BatchTracker,
+}
+
+impl Drop for BatchWorkGuard {
+    fn drop(&mut self) {
+        self.tracker.finish_one();
+    }
+}
+
 struct AppState {
     events: broadcast::Sender<serde_json::Value>,
     stream_status: Arc<RwLock<StreamStatus>>,
@@ -239,6 +291,13 @@ fn start_pumpswap_activity_processor(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+
+            if notification.get("type").and_then(serde_json::Value::as_str)
+                == Some("discovery_batch_full")
+            {
+                producer_batch_tracker.mark_full();
+                continue;
+            }
 
             if notification
                 .get("method")
@@ -710,11 +769,14 @@ fn start_launch_processor(
     control: Arc<RwLock<EngineControl>>,
     market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     token_registry: TokenRegistry,
+    batch_tracker: BatchTracker,
 ) {
     const LAUNCH_QUEUE_CAPACITY: usize = 256;
     const LAUNCH_WORKER_COUNT: usize = 4;
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64)>(LAUNCH_QUEUE_CAPACITY);
+    let worker_batch_tracker = batch_tracker.clone();
+    let producer_batch_tracker = batch_tracker.clone();
+    let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64, BatchWorkGuard)>(LAUNCH_QUEUE_CAPACITY);
     let work_rx = Arc::new(Mutex::new(work_rx));
 
     for _ in 0..LAUNCH_WORKER_COUNT {
@@ -730,7 +792,7 @@ fn start_launch_processor(
         tokio::spawn(async move {
             loop {
                 let work = { work_rx.lock().await.recv().await };
-                let Some((signature, slot_hint)) = work else {
+                let Some((signature, slot_hint, work_guard)) = work else {
                     break;
                 };
                 if control.read().await.paused {
@@ -858,6 +920,7 @@ fn start_launch_processor(
                         let approved_registry = token_registry.clone();
                         let approved_database = database.clone();
                         tokio::spawn(async move {
+                            let _scan_batch_guard = work_guard;
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
                             let scan_result = match tokio::time::timeout(
@@ -1237,7 +1300,8 @@ fn start_launch_processor(
                 }
             }
 
-            if let Err(error) = work_tx.try_send((signature.clone(), slot)) {
+            let work_guard = producer_batch_tracker.track();
+            if let Err(error) = work_tx.try_send((signature.clone(), slot, work_guard)) {
                 // Do not permanently suppress a signature that could not enter the queue.
                 seen_signatures.lock().await.remove(&signature);
                 let _ = events.send(json!({"type":"diagnostic","data":{
@@ -2060,6 +2124,63 @@ fn spawn_controlled_log_stream(
     });
 }
 
+fn spawn_batched_discovery_stream(
+    ws_urls: Vec<String>,
+    program_id: String,
+    events: broadcast::Sender<serde_json::Value>,
+    status: Arc<RwLock<StreamStatus>>,
+    recovery_rpc: Option<SolanaRpc>,
+    mut runtime_enabled: watch::Receiver<bool>,
+    mut completed_batches: watch::Receiver<u64>,
+) {
+    tokio::spawn(async move {
+        loop {
+            while !*runtime_enabled.borrow() {
+                if runtime_enabled.changed().await.is_err() {
+                    return;
+                }
+            }
+            let batch_before = *completed_batches.borrow();
+            let stream = run_logs_stream(
+                ws_urls.clone(),
+                program_id.clone(),
+                events.clone(),
+                status.clone(),
+                recovery_rpc.clone(),
+                Some(100),
+            );
+            tokio::pin!(stream);
+            tokio::select! {
+                _ = &mut stream => {
+                    // The discovery socket has closed at the 100-notification limit.
+                    // Do not reconnect until all queued decoding and scanning work finishes.
+                    loop {
+                        if *completed_batches.borrow() > batch_before {
+                            let _ = events.send(json!({"type":"discovery_batch_completed","data":{
+                                "batch":*completed_batches.borrow(),
+                                "limit":100,
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            break;
+                        }
+                        if completed_batches.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                changed = runtime_enabled.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    if !*runtime_enabled.borrow() {
+                        *status.write().await = StreamStatus::default();
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -2251,6 +2372,8 @@ async fn main() -> anyhow::Result<()> {
     let (runtime_enabled, runtime_receiver) = watch::channel(false);
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
+    let (completed_batches_tx, completed_batches_rx) = watch::channel(0_u64);
+    let batch_tracker = BatchTracker::new(completed_batches_tx);
     if let Some(launch_rpc) = rpc.clone() {
         start_launch_processor(
             events.subscribe(),
@@ -2261,6 +2384,7 @@ async fn main() -> anyhow::Result<()> {
             control.clone(),
             market_monitor.clone(),
             token_registry.clone(),
+            batch_tracker.clone(),
         );
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
@@ -2339,13 +2463,14 @@ async fn main() -> anyhow::Result<()> {
     });
 
     if !config.solana_ws_urls.is_empty() {
-        spawn_controlled_log_stream(
+        spawn_batched_discovery_stream(
             config.solana_ws_urls.clone(),
             config.pump_fun_program_id.clone(),
             events.clone(),
             stream_status.clone(),
             rpc.clone(),
             runtime_receiver.clone(),
+            completed_batches_rx,
         );
     } else {
         tracing::warn!("Helius not configured; set HELIUS_API_KEY or SOLANA_RPC_WS_URL");
