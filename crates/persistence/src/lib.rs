@@ -6,6 +6,7 @@ use sqlx::{
     Row, SqlitePool,
 };
 use std::str::FromStr;
+use sha2::{Digest, Sha256};
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str(database_url)?
@@ -51,8 +52,30 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS solana_raw_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT, signature TEXT, slot INTEGER,
-            event_json TEXT NOT NULL, received_at TEXT NOT NULL
+            event_hash TEXT, event_json TEXT NOT NULL, received_at TEXT NOT NULL
         )"#,
+    )
+    .execute(&pool)
+    .await?;
+    // Existing databases predate event_hash. Add it without dropping historical data.
+    let raw_event_columns = sqlx::query("PRAGMA table_info(solana_raw_events)")
+        .fetch_all(&pool)
+        .await?;
+    let has_event_hash = raw_event_columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "event_hash");
+    if !has_event_hash {
+        sqlx::query("ALTER TABLE solana_raw_events ADD COLUMN event_hash TEXT")
+            .execute(&pool)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_solana_raw_events_event_hash ON solana_raw_events(event_hash) WHERE event_hash IS NOT NULL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_solana_raw_events_received_at ON solana_raw_events(received_at)",
     )
     .execute(&pool)
     .await?;
@@ -326,16 +349,31 @@ pub async fn save_raw_solana_events(pool: &SqlitePool, events: &[serde_json::Val
         let slot = event
             .pointer("/params/result/context/slot")
             .and_then(|value| value.as_i64());
+        let event_json = serde_json::to_string(event)?;
+        // Hash the complete notification: the same transaction signature can
+        // legitimately appear in different subscriptions with different payloads.
+        let event_hash = format!("{:x}", Sha256::digest(event_json.as_bytes()));
         sqlx::query(
-            "INSERT INTO solana_raw_events (signature, slot, event_json, received_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO solana_raw_events (signature, slot, event_hash, event_json, received_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(signature)
         .bind(slot)
-        .bind(serde_json::to_string(event)?)
+        .bind(event_hash)
+        .bind(event_json)
         .bind(chrono::Utc::now().to_rfc3339())
         .execute(&mut *transaction)
         .await?;
     }
+    // Keep raw diagnostics useful but bounded. Never touch token snapshots,
+    // candles, paper positions, wallets, or the paper-trading ledger.
+    let retention_cutoff =
+        (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+    sqlx::query(
+        "DELETE FROM solana_raw_events WHERE received_at < ? OR id NOT IN (SELECT id FROM solana_raw_events ORDER BY id DESC LIMIT 20000)",
+    )
+    .bind(retention_cutoff)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
