@@ -992,6 +992,11 @@ fn start_launch_processor(
                                         }
                                     }
                                     let decision = report.decision.clone();
+                                    let mut terminal_status = match decision.as_str() {
+                                        "REJECTED" => "rejected",
+                                        "APPROVED" => "completed",
+                                        _ => "unverified",
+                                    };
                                     match decision.as_str() {
                                         "APPROVED" => {
                                             let approved_state = approved_registry.upsert_patch(
@@ -1032,6 +1037,7 @@ fn start_launch_processor(
                                                     "data":report.clone()
                                                 }));
                                             } else {
+                                                terminal_status = "unverified";
                                                 approved_registry.remove(&scan_mint);
                                                 let _ = scan_events.send(json!({
                                                     "type":"token_approval_pending",
@@ -1086,11 +1092,6 @@ fn start_launch_processor(
                                             }}));
                                         }
                                     }
-                                    let terminal_status = match decision.as_str() {
-                                        "APPROVED" => "completed",
-                                        "REJECTED" => "rejected",
-                                        _ => "unverified",
-                                    };
                                     let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
                                         "mint_address":scan_mint,
                                         "decision":decision,
