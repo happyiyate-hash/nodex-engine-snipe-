@@ -37,6 +37,9 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+// Temporary operator key for the current paper-trading deployment.
+const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
+
 #[derive(Clone)]
 struct AppState {
     events: broadcast::Sender<serde_json::Value>,
@@ -1126,7 +1129,7 @@ fn verify_operator_key(state: &AppState, headers: &HeaderMap) -> Result<(), (Sta
         .filter(|key| !key.is_empty())
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
-            "Operator API is disabled: set NODEX_ADMIN_API_KEY on the backend.".to_string(),
+            "Operator API authentication is unavailable.".to_string(),
         ))?;
     let provided = headers
         .get("x-nodex-admin-key")
@@ -1281,7 +1284,7 @@ async fn clear_token_and_event_history(
         .filter(|key| !key.is_empty())
         .ok_or((
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Maintenance endpoint is disabled: set NODEX_ADMIN_API_KEY on the backend first."
+            "Maintenance endpoint authentication is unavailable."
                 .to_string(),
         ))?;
     let supplied_key = headers
@@ -2225,9 +2228,7 @@ async fn main() -> anyhow::Result<()> {
         rpc,
         database: db.clone(),
         control,
-        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
+        admin_api_key: Some(NODEX_ADMIN_API_KEY.to_owned()),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
         runtime_enabled,
         market_monitor,
