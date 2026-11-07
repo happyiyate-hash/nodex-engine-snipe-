@@ -423,18 +423,26 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
         Err(error) => tracing::debug!(%error, mint_address=%mint, "Mint account metadata lookup failed"),
     }
 
-    match rpc.resolve_metaplex_metadata(mint).await {
-        Ok(Some(metadata)) => {
+    match rpc.resolve_token_metadata(mint).await {
+        Ok(metadata) => {
             result.name = metadata.name;
             result.symbol = metadata.symbol;
             result.metadata_uri = metadata.uri;
         }
-        Ok(None) => {}
-        Err(error) => tracing::debug!(%error, mint_address=%mint, "Metaplex metadata lookup failed"),
+        Err(error) => tracing::debug!(%error, mint_address=%mint, "Token-program metadata lookup failed"),
     }
 
     if let Some(uri) = result.metadata_uri.as_deref() {
-        if let Ok(url) = reqwest::Url::parse(uri) {
+        // Normalize common decentralized-storage URI schemes to HTTPS gateways.
+        // The original metadata URI remains unchanged in the event/state.
+        let fetch_uri = if let Some(path) = uri.strip_prefix("ipfs://") {
+            format!("https://ipfs.io/ipfs/{}", path.trim_start_matches("ipfs/"))
+        } else if let Some(path) = uri.strip_prefix("ar://") {
+            format!("https://arweave.net/{}", path.trim_start_matches('/'))
+        } else {
+            uri.to_owned()
+        };
+        if let Ok(url) = reqwest::Url::parse(&fetch_uri) {
             let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
             let ip_literal = host.parse::<std::net::IpAddr>().is_ok();
             let unsafe_host = ip_literal || host == "localhost" || host.ends_with(".localhost")
