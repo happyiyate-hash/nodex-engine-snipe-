@@ -1,5 +1,5 @@
-mod chart_service;
 mod token_details;
+mod websocket;
 
 use axum::{
     extract::{
@@ -15,13 +15,10 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
-    decode_pump_fun_create, decode_pump_swap_activity_logs, decode_pump_swap_pool_account,
-    derive_pump_swap_pool_address, run_logs_stream, start_market_monitor, MarketMonitor,
-    PumpSwapActivityEvent, PumpSwapPoolAccount, SolanaRpc, StreamStatus, PUMPSWAP_PROGRAM_ID,
-    WRAPPED_SOL_MINT,
+    decode_pump_fun_create, run_logs_stream, start_market_monitor, MarketMonitor, SolanaRpc,
+    StreamStatus,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
-use nodex_trading::volume::{RollingTradeVolume, TradeSide, WindowVolumeMetrics};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_keypair::Keypair;
@@ -33,16 +30,15 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
-
-// Temporary operator key for the current paper-trading deployment.
-const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
 
 #[derive(Clone)]
 struct AppState {
     events: broadcast::Sender<serde_json::Value>,
+    gateway: websocket::Gateway,
+    database_changes: tokio::sync::mpsc::Sender<serde_json::Value>,
     stream_status: Arc<RwLock<StreamStatus>>,
     pumpswap_status: Arc<RwLock<StreamStatus>>,
     wallet: Arc<RwLock<PaperWallet>>,
@@ -57,6 +53,7 @@ struct AppState {
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
+    portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,252 +199,6 @@ struct Health {
     service: &'static str,
 }
 
-fn volume_window_json(metrics: WindowVolumeMetrics) -> serde_json::Value {
-    json!({
-        "buy_volume_raw": metrics.buy_volume_raw.to_string(),
-        "sell_volume_raw": metrics.sell_volume_raw.to_string(),
-        "total_volume_raw": metrics.total_volume_raw.to_string(),
-        "buy_pressure_pct": metrics.buy_pressure_pct,
-        "buy_trade_count": metrics.buy_trade_count,
-        "sell_trade_count": metrics.sell_trade_count
-    })
-}
-
-fn start_pumpswap_activity_processor(
-    mut receiver: broadcast::Receiver<serde_json::Value>,
-    events: broadcast::Sender<serde_json::Value>,
-    control: Arc<RwLock<EngineControl>>,
-    rpc: Option<SolanaRpc>,
-    registry: TokenRegistry,
-) {
-    let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
-    tokio::spawn(async move {
-        let mut resolved_pools = HashMap::<String, PumpSwapPoolAccount>::new();
-        let mut pool_retry_after = HashMap::<String, i64>::new();
-        let mut pool_volumes = HashMap::<String, RollingTradeVolume>::new();
-        loop {
-            let notification = match receiver.recv().await {
-                Ok(value) => value,
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    let _ = events.send(json!({"type":"diagnostic","data":{
-                        "severity":"warning","component":"pumpswap_activity_processor",
-                        "message":"PumpSwap activity consumer lagged; a bounded notification gap may exist.",
-                        "dropped_notifications":count,
-                        "received_at":chrono::Utc::now().to_rfc3339()
-                    }}));
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-
-            if notification
-                .get("method")
-                .and_then(serde_json::Value::as_str)
-                != Some("logsNotification")
-                || notification
-                    .get("nodex_program_id")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(PUMPSWAP_PROGRAM_ID)
-                || {
-                    let current = control.read().await;
-                    current.paused || !current.token_discovery_enabled
-                }
-            {
-                continue;
-            }
-
-            let Some(value) = notification.pointer("/params/result/value") else {
-                continue;
-            };
-            if !value.get("err").is_some_and(serde_json::Value::is_null) {
-                continue;
-            }
-            let Some(signature) = value
-                .get("signature")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            {
-                let mut seen = seen_signatures.lock().await;
-                if !seen.insert(signature.clone()) {
-                    continue;
-                }
-                if seen.len() > 20_000 {
-                    seen.clear();
-                    seen.insert(signature.clone());
-                }
-            }
-
-            let Some(logs) = value.get("logs").and_then(serde_json::Value::as_array) else {
-                continue;
-            };
-            let logs: Vec<String> = logs
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            let slot = notification
-                .pointer("/params/result/context/slot")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or_default();
-
-            match decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID) {
-                Ok(decoded) => {
-                    for (event_index, event) in decoded.into_iter().enumerate() {
-                        let (kind, timestamp, pool, user, base_amount, quote_amount) = match event {
-                            PumpSwapActivityEvent::Buy {
-                                timestamp,
-                                pool,
-                                user,
-                                base_amount,
-                                quote_amount,
-                            } => ("buy", timestamp, pool, user, base_amount, quote_amount),
-                            PumpSwapActivityEvent::Sell {
-                                timestamp,
-                                pool,
-                                user,
-                                base_amount,
-                                quote_amount,
-                            } => ("sell", timestamp, pool, user, base_amount, quote_amount),
-                            PumpSwapActivityEvent::Deposit {
-                                timestamp,
-                                pool,
-                                user,
-                                base_amount,
-                                quote_amount,
-                            } => ("deposit", timestamp, pool, user, base_amount, quote_amount),
-                            PumpSwapActivityEvent::Withdraw {
-                                timestamp,
-                                pool,
-                                user,
-                                base_amount,
-                                quote_amount,
-                            } => ("withdraw", timestamp, pool, user, base_amount, quote_amount),
-                        };
-                        let pool_details = if let Some(cached) = resolved_pools.get(&pool) {
-                            Some(cached.clone())
-                        } else if let Some(rpc_client) = rpc.as_ref() {
-                            let now = chrono::Utc::now().timestamp_millis();
-                            let retry_allowed = pool_retry_after
-                                .get(&pool)
-                                .is_none_or(|retry_at| now >= *retry_at);
-                            if retry_allowed {
-                                pool_retry_after.insert(pool.clone(), now.saturating_add(10_000));
-                                match rpc_client.get_account_data(&pool).await {
-                                    Ok(Some((owner, raw, _))) if owner == PUMPSWAP_PROGRAM_ID => {
-                                        match decode_pump_swap_pool_account(&raw) {
-                                            Ok(decoded) => {
-                                                match derive_pump_swap_pool_address(&decoded) {
-                                                    Ok(derived) if derived == pool => {
-                                                        resolved_pools
-                                                            .insert(pool.clone(), decoded.clone());
-                                                        pool_retry_after.remove(&pool);
-                                                        Some(decoded)
-                                                    }
-                                                    _ => None,
-                                                }
-                                            }
-                                            Err(_) => None,
-                                        }
-                                    }
-                                    _ => None,
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        let Some(pool_details) = pool_details else {
-                            continue;
-                        };
-                        // Observe PumpSwap only for tokens already discovered by NodeX.
-                        // Security approval gates execution, not read-only market visibility.
-                        if registry.get(&pool_details.base_mint).is_none() {
-                            continue;
-                        }
-                        let pool_details = Some(pool_details);
-                        let pair_status = if pool_details.is_some() {
-                            "resolved"
-                        } else {
-                            "unresolved"
-                        };
-                        let quote_mint = pool_details
-                            .as_ref()
-                            .map(|details| details.quote_mint.as_str());
-                        let quote_unit = if quote_mint == Some(WRAPPED_SOL_MINT) {
-                            "lamports"
-                        } else {
-                            "raw_quote_asset_units"
-                        };
-                        let _ = events.send(json!({"type":"pumpswap_activity","data":{
-                            "venue":"pump_swap",
-                            "event_type":kind,
-                            "event_index":event_index,
-                            "signature":signature,
-                            "slot":slot,
-                            "timestamp":timestamp,
-                            "pool_address":pool,
-                            "pool_pair_status":pair_status,
-                            "base_mint":pool_details.as_ref().map(|details| details.base_mint.clone()),
-                            "mint_address":pool_details.as_ref().map(|details| details.base_mint.clone()),
-                            "quote_mint":pool_details.as_ref().map(|details| details.quote_mint.clone()),
-                            "pool_creator":pool_details.as_ref().map(|details| details.creator.clone()),
-                            "user_address":user,
-                            "base_amount_raw":base_amount.to_string(),
-                            "quote_amount_raw":quote_amount.to_string(),
-                            "quote_amount_unit":quote_unit,
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }}));
-                        if pool_details.is_some() {
-                            let side = match kind {
-                                "buy" => Some(TradeSide::Buy),
-                                "sell" => Some(TradeSide::Sell),
-                                _ => None,
-                            };
-                            if let Some(side) = side {
-                                let now_ms = chrono::Utc::now().timestamp_millis();
-                                let event_time_ms = timestamp.saturating_mul(1_000);
-                                let volume = pool_volumes.entry(pool.clone()).or_default();
-                                if volume.record(event_time_ms, side, quote_amount, now_ms) {
-                                    let window_30s = volume.metrics(now_ms, 30);
-                                    let window_1m = volume.metrics(now_ms, 60);
-                                    let window_5m = volume.metrics(now_ms, 300);
-                                    let _ = events.send(json!({
-                                        "type":"pumpswap_volume_update",
-                                        "data":{
-                                            "venue":"pump_swap",
-                                            "pool_address":pool,
-                                            "base_mint":pool_details.as_ref().map(|details| details.base_mint.clone()),
-                                            "mint_address":pool_details.as_ref().map(|details| details.base_mint.clone()),
-                                            "quote_mint":pool_details.as_ref().map(|details| details.quote_mint.clone()),
-                                            "quote_amount_unit":quote_unit,
-                                            "window_30s":volume_window_json(window_30s),
-                                            "window_1m":volume_window_json(window_1m),
-                                            "window_5m":volume_window_json(window_5m),
-                                            "calculation":"quote-volume-weighted-buy-pressure",
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = events.send(json!({"type":"diagnostic","data":{
-                        "severity":"warning","component":"pumpswap_activity_decoder",
-                        "message":error.to_string(),"signature":signature,"slot":slot,
-                        "received_at":chrono::Utc::now().to_rfc3339()
-                    }}));
-                }
-            }
-        }
-    });
-}
-
 /// Projects independent worker events into the canonical shared token state.
 /// Workers remain decoupled: they publish domain events and this projector updates
 /// only the matching domain of the token record.
@@ -457,7 +208,9 @@ fn start_token_state_projector(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
+    portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
     control: Arc<RwLock<EngineControl>>,
+    database_changes: mpsc::Sender<serde_json::Value>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -497,6 +250,12 @@ fn start_token_state_projector(
                 }}));
                 continue;
             }
+            // The approved-token persistence path already commits the final scan report.
+            // Never let the projector persist rejected/unverified reports a second time.
+            if kind == "token_scan_update" {
+                continue;
+            }
+            let transient_scan_event = matches!(kind, "token_scan_started" | "token_scan_progress");
             let domain_patch = match kind {
                 "token_scan_started" => json!({"security":{"status":"scanning"}}),
                 "token_scan_progress" => json!({"security":{
@@ -515,11 +274,19 @@ fn start_token_state_projector(
             };
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
-                    if let Err(error) =
-                        nodex_persistence::save_token_state(&database, &snapshot).await
-                    {
-                        tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
+                    // Scan progress is transient runtime state. Do not write it to SQLite.
+                    if transient_scan_event {
                         continue;
+                    }
+                    // Price ticks are runtime state, not durable history. Persist only
+                    // non-price state transitions; Analytics owns chart history separately.
+                    if kind != "market_price_update" {
+                        if let Err(error) =
+                            nodex_persistence::save_token_state(&database, &snapshot).await
+                        {
+                            tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
+                            continue;
+                        }
                     }
                     if kind == "market_price_update" {
                         let event_timestamp_ms = data
@@ -536,17 +303,11 @@ fn start_token_state_projector(
                                 "market_patch":data.clone()
                             }
                         }));
-                    } else if kind == "pumpswap_volume_update" {
-                        let _ = events.send(json!({
-                            "type":"token_statistics_update",
-                            "data":{
-                                "mint_address":mint,
-                                "state_version":snapshot.version,
-                                "statistics_patch":data.clone()
-                            }
-                        }));
                     } else {
-                        let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                        // The SQLite reader receives this only after save_token_state succeeded.
+                        let _ = database_changes
+                            .send(json!({"type":"token_state_updated","data":snapshot}))
+                            .await;
                     }
                     if kind == "market_price_update"
                         && control.read().await.position_monitoring_enabled
@@ -554,141 +315,65 @@ fn start_token_state_projector(
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
                         {
-                            match nodex_persistence::load_portfolio_positions(&database).await {
-                                Ok(mut positions) => {
-                                    for position in positions.iter_mut().filter(|position| {
-                                        position
-                                            .get("mint_address")
-                                            .and_then(serde_json::Value::as_str)
-                                            == Some(mint)
-                                            && position
-                                                .get("status")
-                                                .and_then(serde_json::Value::as_str)
-                                                == Some("open")
-                                    }) {
-                                        let quantity = position
-                                            .get("token_quantity")
-                                            .or_else(|| position.get("quantity"))
-                                            .and_then(serde_json::Value::as_f64)
-                                            .unwrap_or(0.0);
-                                        let cost_basis = position
-                                            .get("cost_basis_sol")
-                                            .or_else(|| position.get("invested_sol"))
-                                            .and_then(serde_json::Value::as_f64)
-                                            .unwrap_or(0.0);
-                                        let current_value = quantity * price_sol;
-                                        let pnl = current_value - cost_basis;
-                                        if let Some(object) = position.as_object_mut() {
-                                            object.insert(
-                                                "current_price_sol".into(),
-                                                json!(price_sol),
-                                            );
-                                            object.insert(
-                                                "current_value_sol".into(),
-                                                json!(current_value),
-                                            );
-                                            object.insert("unrealized_pnl_sol".into(), json!(pnl));
-                                            object.insert(
-                                                "unrealized_pnl_pct".into(),
-                                                json!(if cost_basis > 0.0 {
-                                                    pnl / cost_basis * 100.0
-                                                } else {
-                                                    0.0
-                                                }),
-                                            );
-                                            object.insert(
-                                                "marked_at".into(),
-                                                json!(chrono::Utc::now().to_rfc3339()),
-                                            );
-                                        }
-                                        let position_id = position
-                                            .get("position_id")
-                                            .and_then(serde_json::Value::as_str)
-                                            .unwrap_or(mint);
-                                        if let Err(error) =
-                                            nodex_persistence::save_portfolio_position(
-                                                &database,
-                                                position_id,
-                                                mint,
-                                                "open",
-                                                position,
-                                            )
-                                            .await
-                                        {
-                                            tracing::error!(%error, mint_address = mint, position_id, "Could not persist marked portfolio position");
-                                        } else {
-                                            let _ = events.send(json!({
-                                                "type":"position_updated",
-                                                "data":position.clone()
-                                            }));
-                                        }
-                                    }
-                                    let refreshed =
-                                        match nodex_persistence::load_portfolio_positions(&database)
-                                            .await
-                                        {
-                                            Ok(items) => items,
-                                            Err(error) => {
-                                                tracing::error!(%error, "Could not reload marked portfolio positions");
-                                                Vec::new()
-                                            }
-                                        };
-                                    let open: Vec<serde_json::Value> = refreshed
-                                        .iter()
-                                        .filter(|item| {
-                                            item.get("status").and_then(serde_json::Value::as_str)
-                                                == Some("open")
-                                        })
-                                        .cloned()
-                                        .collect();
-                                    let sum = |items: &[serde_json::Value], field: &str| -> f64 {
-                                        items
-                                            .iter()
-                                            .filter_map(|item| {
-                                                item.get(field).and_then(serde_json::Value::as_f64)
-                                            })
-                                            .sum()
-                                    };
-                                    let position_count = open.len();
-                                    let portfolio = json!({
-                                        "total_value_sol": sum(&open, "current_value_sol"),
-                                        "total_invested_sol": sum(&open, "cost_basis_sol"),
-                                        "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
-                                        "realized_pnl_sol": sum(&refreshed, "realized_pnl_sol"),
-                                        "positions": open,
-                                        "position_count": position_count
-                                    });
-                                    let mut current_profile = profile.write().await;
-                                    if let Some(object) = current_profile.as_object_mut() {
-                                        object.insert("portfolio".into(), portfolio.clone());
-                                    }
-                                    let profile_snapshot = current_profile.clone();
-                                    drop(current_profile);
-                                    if let Err(error) = nodex_persistence::save_profile(
-                                        &database,
-                                        &profile_snapshot,
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(%error, "Could not persist recalculated profile portfolio");
-                                    } else {
-                                        let _ = events.send(json!({
-                                            "type":"portfolio_summary_updated",
-                                            "data":{
-                                                "total_value_sol":portfolio["total_value_sol"],
-                                                "total_invested_sol":portfolio["total_invested_sol"],
-                                                "unrealized_pnl_sol":portfolio["unrealized_pnl_sol"],
-                                                "realized_pnl_sol":portfolio["realized_pnl_sol"],
-                                                "position_count":portfolio["position_count"],
-                                                "updated_at":chrono::Utc::now().to_rfc3339()
-                                            }
-                                        }));
-                                    }
+                            // Mark open positions in memory. Never read/write SQLite for every tick.
+                            let mut positions = portfolio_positions.write().await;
+                            for position in positions.iter_mut().filter(|position| {
+                                position.get("mint_address").and_then(serde_json::Value::as_str) == Some(mint)
+                                    && position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                            }) {
+                                let quantity = position.get("token_quantity")
+                                    .or_else(|| position.get("quantity"))
+                                    .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                let cost_basis = position.get("cost_basis_sol")
+                                    .or_else(|| position.get("invested_sol"))
+                                    .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                let current_value = quantity * price_sol;
+                                let pnl = current_value - cost_basis;
+                                if let Some(object) = position.as_object_mut() {
+                                    object.insert("current_price_sol".into(), json!(price_sol));
+                                    object.insert("current_value_sol".into(), json!(current_value));
+                                    object.insert("unrealized_pnl_sol".into(), json!(pnl));
+                                    object.insert("unrealized_pnl_pct".into(), json!(
+                                        if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 }
+                                    ));
+                                    object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
                                 }
-                                Err(error) => {
-                                    tracing::error!(%error, "Could not load portfolio positions for market mark")
-                                }
+                                let _ = events.send(json!({"type":"position_updated","data":position.clone()}));
                             }
+                            let open: Vec<serde_json::Value> = positions.iter()
+                                .filter(|item| item.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+                                .cloned().collect();
+                            let sum = |items: &[serde_json::Value], field: &str| -> f64 {
+                                items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
+                            };
+                            let position_count = open.len();
+                            let portfolio = json!({
+                                "total_value_sol": sum(&open, "current_value_sol"),
+                                "total_invested_sol": sum(&open, "cost_basis_sol"),
+                                "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
+                                "realized_pnl_sol": sum(&positions, "realized_pnl_sol"),
+                                "positions": open,
+                                "position_count": position_count
+                            });
+                            drop(positions);
+                            let mut current_profile = profile.write().await;
+                            if let Some(object) = current_profile.as_object_mut() {
+                                object.insert("portfolio".into(), portfolio.clone());
+                            }
+                            let profile_snapshot = current_profile.clone();
+                            drop(current_profile);
+                            let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                            let _ = events.send(json!({
+                                "type":"portfolio_summary_updated",
+                                "data":{
+                                    "total_value_sol":portfolio["total_value_sol"],
+                                    "total_invested_sol":portfolio["total_invested_sol"],
+                                    "unrealized_pnl_sol":portfolio["unrealized_pnl_sol"],
+                                    "realized_pnl_sol":portfolio["realized_pnl_sol"],
+                                    "position_count":portfolio["position_count"],
+                                    "updated_at":chrono::Utc::now().to_rfc3339()
+                                }
+                            }));
                         }
                     }
                 }
@@ -881,6 +566,7 @@ fn start_launch_processor(
                                 Ok(Err(error)) => Err(error.to_string()),
                                 Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
                             };
+                            let mut token_approved = false;
                             match scan_result {
                                 Ok(mut report) => {
                                     // Metadata is an independent operation: it must never keep
@@ -1030,6 +716,7 @@ fn start_launch_processor(
                                                 }
                                             };
                                             if approval_persisted {
+                                                token_approved = true;
                                                 // Publish APPROVED only after the canonical state is durable,
                                                 // so a frontend subscription cannot race the approval gate.
                                                 let _ = scan_events.send(json!({
@@ -1039,6 +726,10 @@ fn start_launch_processor(
                                             } else {
                                                 terminal_status = "unverified";
                                                 approved_registry.remove(&scan_mint);
+                                                let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                    "mint_address":scan_mint,
+                                                    "reason":"Approved token state could not be committed."
+                                                }}));
                                                 let _ = scan_events.send(json!({
                                                     "type":"token_approval_pending",
                                                     "data":{
@@ -1050,28 +741,18 @@ fn start_launch_processor(
                                             }
                                         }
                                         "REJECTED" => {
-                                            let rejected_state = approved_registry.upsert_patch(
-                                                &scan_mint,
-                                                json!({"security":report.clone()}),
-                                            );
-                                            if let Ok(snapshot) = rejected_state {
-                                                if let Err(error) =
-                                                    nodex_persistence::save_token_state(
-                                                        &approved_database,
-                                                        &snapshot,
-                                                    )
-                                                    .await
-                                                {
-                                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                                        "severity":"error","component":"token_scan_persistence",
-                                                        "message":error.to_string(),"mint_address":scan_mint
-                                                    }}));
-                                                }
-                                            }
+                                            // Rejected tokens are transient: remove their pending
+                                            // registry state and let the projector clean up any
+                                            // legacy launch/state rows created during migration.
+                                            approved_registry.remove(&scan_mint);
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
                                             }));
+                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                "mint_address":scan_mint,
+                                                "reason":report.decision_reason
+                                            }}));
                                             let _ = scan_events.send(
                                                 json!({"type":"token_approval_pending","data":{
                                                     "mint_address":scan_mint,
@@ -1081,10 +762,15 @@ fn start_launch_processor(
                                             );
                                         }
                                         _ => {
+                                            approved_registry.remove(&scan_mint);
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
                                             }));
+                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                "mint_address":scan_mint,
+                                                "reason":"Token did not receive an explicit APPROVED decision."
+                                            }}));
                                             let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
                                                 "mint_address":scan_mint,
                                                 "decision":decision,
@@ -1102,6 +788,7 @@ fn start_launch_processor(
                                     }}));
                                 }
                                 Err(error) => {
+                                    approved_registry.remove(&scan_mint);
                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                         "severity":"error","component":"token_security_scanner",
                                         "message":error,"mint_address":scan_mint,
@@ -1119,12 +806,16 @@ fn start_launch_processor(
                                         "decision_reason":error,
                                         "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
                                     }}));
+                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                        "mint_address":scan_mint,
+                                        "reason":error
+                                    }}));
                                 }
                             }
-                            // Market observation is independent from trade approval.
-                            // Security decisions gate execution, never token visibility or price collection.
-                            if let Some(monitor) = approved_monitor.read().await.clone() {
-                                match monitor
+                            // Only durably approved tokens receive a Core price subscription.
+                            if token_approved {
+                                if let Some(monitor) = approved_monitor.read().await.clone() {
+                                    match monitor
                                     .subscribe_pump_fun_bonding_curve(
                                         &scan_mint,
                                         &approved_program_id,
@@ -1148,6 +839,7 @@ fn start_launch_processor(
                                             "message":error.to_string(),"mint_address":scan_mint,
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }}));
+                                    }
                                     }
                                 }
                             }
@@ -1319,9 +1011,10 @@ async fn update_trading_config(
         )
     })?;
     *state.trading_settings.write().await = settings.clone();
-    let _ = state
-        .events
-        .send(json!({"type":"trading_config_updated","data":settings}));
+    // This notification is emitted only after the SQLite upsert has committed.
+    let _ = state.database_changes
+        .send(json!({"type":"trading_config_updated","data":settings}))
+        .await;
     Ok(Json(json!({"status":"ok","config":settings})))
 }
 
@@ -1586,34 +1279,21 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
 /// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
 /// paper-trading funds and positions remain separate accounting domains.
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let positions = state.portfolio_positions.read().await.clone();
     let mut profile = state.profile.read().await.clone();
-    let positions = match nodex_persistence::load_portfolio_positions(&state.database).await {
-        Ok(positions) => positions,
-        Err(error) => {
-            tracing::error!(%error, "Could not load portfolio positions for profile response");
-            Vec::new()
-        }
-    };
-    let open_positions: Vec<serde_json::Value> = positions
-        .iter()
-        .filter(|position| {
-            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-        })
-        .cloned()
-        .collect();
+    let open_positions: Vec<serde_json::Value> = positions.iter()
+        .filter(|position| position.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+        .cloned().collect();
     let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
-        items
-            .iter()
-            .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
-            .sum()
+        items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
     };
-    let position_count = open_positions.len();
     let portfolio = json!({
         "total_value_sol": sum_field(&open_positions, "current_value_sol"),
+        "total_invested_sol": sum_field(&open_positions, "cost_basis_sol"),
         "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
         "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
         "positions": open_positions,
-        "position_count": position_count
+        "position_count": open_positions.len()
     });
     if let Some(object) = profile.as_object_mut() {
         object.insert("portfolio".into(), portfolio);
@@ -1655,50 +1335,9 @@ fn is_token_detail_event(event_type: &str) -> bool {
 }
 
 fn is_frontend_event(value: &serde_json::Value) -> bool {
-    matches!(
-        value.get("type").and_then(serde_json::Value::as_str),
-        Some("connection_status")
-            | Some("engine_state")
-            | Some("trading_config_updated")
-            | Some("launch_detected")
-            | Some("token_removed")
-            | Some("token_approval_pending")
-            | Some("token_scan_started")
-            | Some("token_scan_update")
-            | Some("token_scan_progress")
-            | Some("token_scan_completed")
-            | Some("token_scan_failed")
-            | Some("token_metadata_started")
-            | Some("token_metadata_failed")
-            | Some("token_metadata_updated")
-            | Some("token_state_updated")
-            | Some("profile_updated")
-            | Some("market_price_update")
-            | Some("token_market_update")
-            | Some("token_statistics_update")
-            | Some("chart_candle_update")
-            | Some("chart_candle_closed")
-            | Some("position_updated")
-            | Some("portfolio_summary_updated")
-            | Some("paper_buy_executed")
-            | Some("paper_buy_failed")
-            | Some("strategy_rejected_token")
-            | Some("diagnostic")
-            | Some("provider_status")
-            | Some("market_account_update")
-            | Some("market_curve_completed")
-            | Some("market_monitor_status")
-            | Some("market_subscription_requested")
-            | Some("market_subscription_active")
-            | Some("creator_history_started")
-            | Some("creator_history_update")
-            | Some("stream_warning")
-            | Some("reconnect_recovery_status")
-            | Some("pumpswap_activity")
-            | Some("pumpswap_volume_update")
-            | Some("command_rejected")
-    )
+    websocket::is_frontend_event(value)
 }
+
 
 async fn issue_ws_ticket(
     State(state): State<AppState>,
@@ -1767,7 +1406,7 @@ async fn ws_handler(
 async fn client_socket(socket: WebSocket, state: AppState) {
     static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
     let (mut sender, mut receiver_socket) = socket.split();
-    let mut receiver = state.events.subscribe();
+    let mut receiver = state.gateway.subscribe();
     let mut subscribed_tokens = HashSet::<String>::new();
     let status = state.stream_status.read().await.clone();
     let pumpswap_status = state.pumpswap_status.read().await.clone();
@@ -2145,7 +1784,12 @@ async fn main() -> anyhow::Result<()> {
     }
     nodex_persistence::save_profile(&db, &profile).await?;
     let profile_state = Arc::new(RwLock::new(profile));
+    let portfolio_positions = Arc::new(RwLock::new(
+        nodex_persistence::load_portfolio_positions(&db).await?,
+    ));
     let (events, _) = broadcast::channel(8192);
+    let (database_changes, database_change_receiver) = mpsc::channel(512);
+    let gateway = websocket::Gateway::start(events.subscribe(), database_change_receiver, 4096);
     if let (Some(rpc_client), Some(address)) = (
         (!config.solana_http_urls.is_empty())
             .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
@@ -2153,7 +1797,7 @@ async fn main() -> anyhow::Result<()> {
     ) {
         let profile_for_sync = profile_state.clone();
         let database_for_sync = db.clone();
-        let events_for_sync = events.clone();
+        let database_changes_for_sync = database_changes.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2190,8 +1834,8 @@ async fn main() -> anyhow::Result<()> {
                         {
                             tracing::error!(%error, "Could not persist synchronized wallet profile");
                         } else {
-                            let _ = events_for_sync
-                                .send(json!({"type":"profile_updated","data":snapshot}));
+                            let _ = database_changes_for_sync
+                                .send(json!({"type":"profile_updated","data":snapshot})).await;
                         }
                     }
                     Err(error) => {
@@ -2233,14 +1877,9 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
         token_registry.clone(),
         profile_state.clone(),
+        portfolio_positions.clone(),
         control.clone(),
-    );
-    // Candles are generated only for tokens whose security decision is APPROVED.
-    chart_service::start_chart_service(
-        events.subscribe(),
-        events.clone(),
-        db.clone(),
-        token_registry.clone(),
+        database_changes.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = (!config.solana_http_urls.is_empty())
@@ -2270,73 +1909,11 @@ async fn main() -> anyhow::Result<()> {
         }}));
     }
 
-    // PumpSwap activity uses its own program-level subscription. The provider's
-    // mentions filter accepts one program address per subscription.
-    start_pumpswap_activity_processor(
-        events.subscribe(),
-        events.clone(),
-        control.clone(),
-        rpc.clone(),
-        token_registry.clone(),
-    );
-
+    // PumpSwap activity/volume analytics are intentionally outside the slim core engine.
+    // Keep the compatibility status field idle until the separate analytics service owns it.
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
-    if !config.solana_ws_urls.is_empty() {
-        spawn_controlled_log_stream(
-            config.solana_ws_urls.clone(),
-            PUMPSWAP_PROGRAM_ID.to_owned(),
-            events.clone(),
-            pumpswap_status.clone(),
-            rpc.clone(),
-            runtime_receiver.clone(),
-        );
-    }
 
-    // Persist raw upstream log notifications independently of browser subscribers.
-    // Batch writes avoid one SQLite transaction/fsync per Solana notification.
-    let mut persistence_receiver = events.subscribe();
-    let persistence_db = db.clone();
-    tokio::spawn(async move {
-        let mut pending = Vec::<serde_json::Value>::with_capacity(100);
-        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(250));
-        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        flush_tick.tick().await;
-        loop {
-            tokio::select! {
-                event = persistence_receiver.recv() => match event {
-                    Ok(event) => {
-                        if event.get("method").and_then(serde_json::Value::as_str)
-                            == Some("logsNotification")
-                        {
-                            pending.push(event);
-                            if pending.len() == 100 {
-                                match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
-                                    Ok(()) => pending.clear(),
-                                    Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
-                                }
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(
-                            dropped_notifications = count,
-                            pending_notifications = pending.len(),
-                            "Raw Solana event persistence subscriber lagged; recovered notifications may be backfilled after reconnect"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-                _ = flush_tick.tick() => {
-                    if !pending.is_empty() {
-                        match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
-                            Ok(()) => pending.clear(),
-                            Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
-                        }
-                    }
-                }
-            }
-        }
-    });
+    // Raw upstream JSON notifications are transient and are not written to SQLite.
 
     if !config.solana_ws_urls.is_empty() {
         spawn_controlled_log_stream(
@@ -2353,13 +1930,15 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         events,
+        gateway,
+        database_changes,
         stream_status,
         pumpswap_status,
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
         database: db.clone(),
         control,
-        admin_api_key: Some(NODEX_ADMIN_API_KEY.to_owned()),
+        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok(),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
         runtime_enabled,
         market_monitor,
@@ -2367,6 +1946,7 @@ async fn main() -> anyhow::Result<()> {
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
         profile: profile_state,
+        portfolio_positions,
     };
     let app = Router::new()
         .route("/health", get(health))

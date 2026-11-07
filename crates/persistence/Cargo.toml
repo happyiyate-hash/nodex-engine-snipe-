@@ -10,5 +10,4 @@ chrono.workspace = true
 nodex-core = { path = "../nodex-core" }
 nodex-trading = { path = "../nodex-trading" }
 serde_json.workspace = true
-sha2.workspace = true
 sqlx.workspace = true
