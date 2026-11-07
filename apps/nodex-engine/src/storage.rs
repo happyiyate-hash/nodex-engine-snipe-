@@ -225,4 +225,3 @@ mod tests {
         assert!(parse_df(output).is_none());
     }
 }
-
