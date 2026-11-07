@@ -74,6 +74,7 @@ pub fn start_chart_service(
     events: broadcast::Sender<Value>,
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
+    control: std::sync::Arc<tokio::sync::RwLock<crate::EngineControl>>,
 ) {
     tokio::spawn(async move {
         let mut candles = HashMap::<(String, String, i64), Candle>::new();
@@ -90,6 +91,9 @@ pub fn start_chart_service(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+            if control.read().await.paused {
+                continue;
+            }
             let kind = event
                 .get("type")
                 .and_then(Value::as_str)
