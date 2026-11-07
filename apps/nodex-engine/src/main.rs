@@ -878,7 +878,7 @@ fn start_launch_processor(
                                     if report.metadata.name.is_none() {
                                         match scan_rpc.resolve_metaplex_metadata(&scan_mint).await {
                                             Ok(Some(metadata)) => report.metadata = metadata,
-                                            Ok(None) => {},
+                                            Ok(None) => {}
                                             Err(error) => {
                                                 tracing::debug!(%error, mint_address=%scan_mint, "Metaplex metadata PDA was unavailable");
                                             }
@@ -898,7 +898,8 @@ fn start_launch_processor(
                                         identity_patch.insert("decimals".into(), json!(decimals));
                                     }
                                     if let Some(supply) = report.supply_raw.as_ref() {
-                                        identity_patch.insert("total_supply_raw".into(), json!(supply));
+                                        identity_patch
+                                            .insert("total_supply_raw".into(), json!(supply));
                                     }
                                     if !identity_patch.is_empty() {
                                         match approved_registry.upsert_patch(
@@ -906,9 +907,13 @@ fn start_launch_processor(
                                             json!({"identity":identity_patch}),
                                         ) {
                                             Ok(snapshot) => {
-                                                if let Err(error) = nodex_persistence::save_token_state(
-                                                    &approved_database, &snapshot
-                                                ).await {
+                                                if let Err(error) =
+                                                    nodex_persistence::save_token_state(
+                                                        &approved_database,
+                                                        &snapshot,
+                                                    )
+                                                    .await
+                                                {
                                                     tracing::warn!(%error, mint_address=%scan_mint, "Could not persist resolved token identity");
                                                 }
                                                 let _ = scan_events.send(json!({
@@ -925,7 +930,9 @@ fn start_launch_processor(
                                                     }
                                                 }));
                                             }
-                                            Err(error) => tracing::warn!(%error, mint_address=%scan_mint, "Could not update canonical token identity"),
+                                            Err(error) => {
+                                                tracing::warn!(%error, mint_address=%scan_mint, "Could not update canonical token identity")
+                                            }
                                         }
                                     }
                                     let decision = report.decision.clone();
@@ -968,7 +975,6 @@ fn start_launch_processor(
                                                     "type":"token_scan_update",
                                                     "data":report.clone()
                                                 }));
-
                                             } else {
                                                 approved_registry.remove(&scan_mint);
                                                 let _ = scan_events.send(json!({
@@ -987,9 +993,13 @@ fn start_launch_processor(
                                                 json!({"security":report.clone()}),
                                             );
                                             if let Ok(snapshot) = rejected_state {
-                                                if let Err(error) = nodex_persistence::save_token_state(
-                                                    &approved_database, &snapshot
-                                                ).await {
+                                                if let Err(error) =
+                                                    nodex_persistence::save_token_state(
+                                                        &approved_database,
+                                                        &snapshot,
+                                                    )
+                                                    .await
+                                                {
                                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                                         "severity":"error","component":"token_scan_persistence",
                                                         "message":error.to_string(),"mint_address":scan_mint
@@ -1000,11 +1010,13 @@ fn start_launch_processor(
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
                                             }));
-                                            let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
-                                                "mint_address":scan_mint,
-                                                "decision":"REJECTED",
-                                                "reason":report.decision_reason
-                                            }}));
+                                            let _ = scan_events.send(
+                                                json!({"type":"token_approval_pending","data":{
+                                                    "mint_address":scan_mint,
+                                                    "decision":"REJECTED",
+                                                    "reason":report.decision_reason
+                                                }}),
+                                            );
                                         }
                                         _ => {
                                             let _ = scan_events.send(json!({
