@@ -41,7 +41,6 @@ use tracing_subscriber::EnvFilter;
 const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
 
 #[derive(Clone)]
-#[derive(Clone)]
 struct BatchTracker {
     outstanding: Arc<AtomicUsize>,
     batch_full: Arc<AtomicBool>,
