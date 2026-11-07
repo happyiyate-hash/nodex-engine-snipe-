@@ -178,22 +178,6 @@ pub fn start_chart_service(
                             if !previous_candle.closed {
                                 previous_candle.closed = true;
                                 let payload = previous_candle.json(mint, timeframe, duration);
-                                if let Err(error) = nodex_persistence::save_chart_candle(
-                                    &database,
-                                    mint,
-                                    timeframe,
-                                    previous_open,
-                                    &payload,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        %error,
-                                        mint_address = mint,
-                                        timeframe,
-                                        "Could not persist closed chart candle"
-                                    );
-                                }
                                 let _ = events
                                     .send(json!({"type":"chart_candle_closed","data":payload}));
                             }
