@@ -59,7 +59,11 @@ impl EngineConfig {
         }
 
         Self {
-            bind_addr: std::env::var("NODEX_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into()),
+            bind_addr: std::env::var("NODEX_BIND_ADDR").unwrap_or_else(|_| {
+                std::env::var("PORT")
+                    .map(|port| format!("0.0.0.0:{port}"))
+                    .unwrap_or_else(|_| "127.0.0.1:8080".into())
+            }),
             database_url: std::env::var("NODEX_DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite://nodex.db".into()),
             mode: EngineMode::Paper,
