@@ -85,16 +85,17 @@ pub fn decode_pump_swap_activity_logs(
 
 #[derive(Debug, Clone)]
 pub struct SolanaRpc {
-    http_url: String,
+    http_urls: Vec<String>,
     client: reqwest::Client,
 }
 
 impl SolanaRpc {
     pub fn new(http_url: impl Into<String>) -> Self {
-        Self {
-            http_url: http_url.into(),
-            client: reqwest::Client::new(),
-        }
+        Self::new_with_urls(vec![http_url.into()])
+    }
+
+    pub fn new_with_urls(http_urls: Vec<String>) -> Self {
+        Self { http_urls, client: reqwest::Client::new() }
     }
 
     /// Read the confirmed native SOL balance for a public wallet address.
@@ -109,24 +110,37 @@ impl SolanaRpc {
     }
 
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
-        let response = self
-            .client
-            .post(&self.http_url)
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
-            .send()
-            .await
-            .context("sending Solana JSON-RPC request")?
-            .error_for_status()
-            .context("Solana RPC returned HTTP error")?
-            .json::<RpcResponse<T>>()
-            .await
-            .context("decoding Solana JSON-RPC response")?;
-        if let Some(error) = response.error {
-            return Err(anyhow!("Solana RPC {method} error: {}", error.message));
+        let mut last_error = None;
+        for (index, url) in self.http_urls.iter().enumerate() {
+            let response = match self.client.post(url)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+                .send().await {
+                Ok(response) => response,
+                Err(error) => { last_error = Some(anyhow!("Solana RPC request failed: {error}")); continue; }
+            };
+            let status = response.status();
+            if !status.is_success() {
+                last_error = Some(anyhow!("Solana RPC returned HTTP {status}"));
+                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 { continue; }
+                return Err(last_error.expect("error was set"));
+            }
+            let decoded = response.json::<RpcResponse<T>>().await
+                .context("decoding Solana JSON-RPC response")?;
+            if let Some(error) = decoded.error {
+                let message = error.message;
+                let limited = message.to_ascii_lowercase().contains("rate")
+                    || message.to_ascii_lowercase().contains("too many")
+                    || message.contains("429");
+                last_error = Some(anyhow!("Solana RPC {method} error: {message}"));
+                if limited && index + 1 < self.http_urls.len() { continue; }
+                return Err(last_error.expect("error was set"));
+            }
+            if let Some(result) = decoded.result {
+                return Ok(result);
+            }
+            return Err(anyhow!("Solana RPC {method} returned no result"));
         }
-        response
-            .result
-            .ok_or_else(|| anyhow!("Solana RPC {method} returned no result"))
+        Err(last_error.unwrap_or_else(|| anyhow!("No Solana HTTP RPC endpoints are configured")))
     }
 
     /// Fetch one confirmed account's owner and raw bytes for verified program-account decoding.
@@ -527,22 +541,31 @@ impl SolanaRpc {
     /// Fetches a confirmed transaction in raw JSON form, including version-0 transactions.
     /// A null result is returned as None because RPC nodes may not have indexed it yet.
     pub async fn get_transaction(&self, signature: &str) -> Result<Option<Value>> {
-        let response = self.client
-            .post(&self.http_url)
-            .json(&json!({
-                "jsonrpc":"2.0", "id":1, "method":"getTransaction",
-                "params":[signature, {"encoding":"json","commitment":"confirmed","maxSupportedTransactionVersion":1}]
-            }))
-            .send().await.context("sending Solana getTransaction request")?
-            .error_for_status().context("Solana getTransaction returned HTTP error")?
-            .json::<RpcResponse<Value>>().await.context("decoding getTransaction response")?;
-        if let Some(error) = response.error {
-            return Err(anyhow!(
-                "Solana RPC getTransaction error: {}",
-                error.message
-            ));
+        let mut last_error = None;
+        for (index, url) in self.http_urls.iter().enumerate() {
+            let response = match self.client.post(url)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"getTransaction","params":[signature,{"encoding":"json","commitment":"confirmed","maxSupportedTransactionVersion":1}]}))
+                .send().await {
+                Ok(response) => response,
+                Err(error) => { last_error = Some(anyhow!("sending Solana getTransaction request: {error}")); continue; }
+            };
+            let status = response.status();
+            if !status.is_success() {
+                last_error = Some(anyhow!("Solana getTransaction returned HTTP {status}"));
+                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 { continue; }
+                return Err(last_error.expect("error was set"));
+            }
+            let decoded = response.json::<RpcResponse<Value>>().await.context("decoding getTransaction response")?;
+            if let Some(error) = decoded.error {
+                let message = error.message;
+                let limited = message.to_ascii_lowercase().contains("rate") || message.to_ascii_lowercase().contains("too many") || message.contains("429");
+                last_error = Some(anyhow!("Solana RPC getTransaction error: {message}"));
+                if limited && index + 1 < self.http_urls.len() { continue; }
+                return Err(last_error.expect("error was set"));
+            }
+            return Ok(decoded.result.filter(|value| !value.is_null()));
         }
-        Ok(response.result.filter(|value| !value.is_null()))
+        Err(last_error.unwrap_or_else(|| anyhow!("No Solana HTTP RPC endpoints are configured")))
     }
 }
 
@@ -1330,18 +1353,24 @@ async fn backfill_logs_gap(
 
 /// Forwards raw logsNotification JSON. The mentions filter accepts exactly one pubkey.
 pub async fn run_logs_stream(
-    ws_url: String,
+    ws_urls: Vec<String>,
     program_id: String,
     sender: broadcast::Sender<Value>,
     status: std::sync::Arc<tokio::sync::RwLock<StreamStatus>>,
     rpc: Option<SolanaRpc>,
 ) {
     let mut reconnect_count = 0_u64;
+    let mut next_endpoint = 0usize;
     let mut last_seen_signature: Option<(u64, String)> = None;
     let mut recovery_incomplete = false;
+    if ws_urls.is_empty() {
+        warn!("No Solana WebSocket endpoints are configured");
+        return;
+    }
     loop {
+        let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
         if let Err(error) = connect_and_subscribe(
-            &ws_url,
+            &active_url,
             &program_id,
             &sender,
             &status,
@@ -1352,6 +1381,7 @@ pub async fn run_logs_stream(
         .await
         {
             reconnect_count = reconnect_count.saturating_add(1);
+            next_endpoint = (next_endpoint + 1) % ws_urls.len();
             let error_message = format!("{error:#}");
             warn!(error = %error_message, reconnect_count, "Solana WebSocket stream ended; reconnecting");
             status.write().await.last_error = Some(error_message.clone());
