@@ -712,6 +712,10 @@ fn start_launch_processor(
                                             } else {
                                                 terminal_status = "unverified";
                                                 approved_registry.remove(&scan_mint);
+                                                let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                    "mint_address":scan_mint,
+                                                    "reason":"Approved token state could not be committed."
+                                                }}));
                                                 let _ = scan_events.send(json!({
                                                     "type":"token_approval_pending",
                                                     "data":{
