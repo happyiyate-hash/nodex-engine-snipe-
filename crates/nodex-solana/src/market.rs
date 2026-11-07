@@ -651,6 +651,7 @@ async fn connect_market_stream(
                 };
                 let subscription = match command {
                     MarketCommand::Stop(acknowledge) => {
+                        let _ = sink.send(Message::Close(None)).await;
                         let _ = acknowledge.send(());
                         return Ok(false);
                     },
