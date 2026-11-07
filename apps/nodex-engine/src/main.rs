@@ -1497,8 +1497,14 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
 /// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
 /// paper-trading funds and positions remain separate accounting domains.
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // Assemble one consistent dashboard snapshot from the engine's authoritative
+    // in-memory state. The on-chain wallet and paper wallet are deliberately
+    // separate balances and are never added together.
     let positions = state.portfolio_positions.read().await.clone();
+    let paper_wallet = state.wallet.read().await.clone();
+    let trading_settings = state.trading_settings.read().await.clone();
     let mut profile = state.profile.read().await.clone();
+
     let open_positions: Vec<serde_json::Value> = positions
         .iter()
         .filter(|position| {
@@ -1512,15 +1518,57 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
             .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
             .sum()
     };
+
+    let total_value_sol = sum_field(&open_positions, "current_value_sol");
+    let total_invested_sol = sum_field(&open_positions, "cost_basis_sol");
+    let unrealized_pnl_sol = sum_field(&open_positions, "unrealized_pnl_sol");
+    let realized_pnl_sol = sum_field(&positions, "realized_pnl_sol");
+    let total_pnl_sol = unrealized_pnl_sol + realized_pnl_sol;
+    let starting_balance_sol =
+        paper_wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let available_balance_sol =
+        paper_wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let locked_rent_sol =
+        paper_wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let invested_balance_sol =
+        paper_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+
+    // Paper-account equity includes unspent funds, marked open positions, and
+    // recoverable rent reserves. Fees already debited from available funds are
+    // not counted a second time.
+    let portfolio_balance_sol = available_balance_sol + total_value_sol + locked_rent_sol;
+    let unrealized_pnl_pct = if total_invested_sol > 0.0 {
+        unrealized_pnl_sol / total_invested_sol * 100.0
+    } else {
+        0.0
+    };
+    let total_pnl_pct = if starting_balance_sol > 0.0 {
+        total_pnl_sol / starting_balance_sol * 100.0
+    } else {
+        0.0
+    };
+
     let portfolio = json!({
-        "total_value_sol": sum_field(&open_positions, "current_value_sol"),
-        "total_invested_sol": sum_field(&open_positions, "cost_basis_sol"),
-        "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
-        "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
+        "portfolio_balance_sol": portfolio_balance_sol,
+        "total_portfolio_value_sol": portfolio_balance_sol,
+        "total_value_sol": total_value_sol,
+        "available_balance_sol": available_balance_sol,
+        "invested_balance_sol": invested_balance_sol,
+        "locked_rent_sol": locked_rent_sol,
+        "starting_balance_sol": starting_balance_sol,
+        "total_invested_sol": total_invested_sol,
+        "unrealized_pnl_sol": unrealized_pnl_sol,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
+        "realized_pnl_sol": realized_pnl_sol,
+        "total_pnl_sol": total_pnl_sol,
+        "total_pnl_pct": total_pnl_pct,
         "positions": open_positions,
         "position_count": open_positions.len()
     });
+
     if let Some(object) = profile.as_object_mut() {
+        object.insert("paper_wallet".into(), json!(paper_wallet));
+        object.insert("trading_settings".into(), json!(trading_settings));
         object.insert("portfolio".into(), portfolio);
     }
     Json(profile)
