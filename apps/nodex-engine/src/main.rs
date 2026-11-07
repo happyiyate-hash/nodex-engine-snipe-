@@ -2093,6 +2093,7 @@ fn spawn_controlled_log_stream(
     recovery_rpc: Option<SolanaRpc>,
     mut runtime_enabled: watch::Receiver<bool>,
 ) {
+    let checkpoint = Arc::new(Mutex::new(None::<(u64, String)>));
     tokio::spawn(async move {
         loop {
             while !*runtime_enabled.borrow() {
@@ -2106,6 +2107,7 @@ fn spawn_controlled_log_stream(
                 events.clone(),
                 status.clone(),
                 recovery_rpc.clone(),
+                None,
                 None,
             );
             tokio::pin!(stream);
@@ -2148,6 +2150,7 @@ fn spawn_batched_discovery_stream(
                 status.clone(),
                 recovery_rpc.clone(),
                 Some(100),
+                Some(checkpoint.clone()),
             );
             tokio::pin!(stream);
             tokio::select! {
