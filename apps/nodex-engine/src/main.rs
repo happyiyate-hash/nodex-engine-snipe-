@@ -318,33 +318,61 @@ fn start_token_state_projector(
                             // Mark open positions in memory. Never read/write SQLite for every tick.
                             let mut positions = portfolio_positions.write().await;
                             for position in positions.iter_mut().filter(|position| {
-                                position.get("mint_address").and_then(serde_json::Value::as_str) == Some(mint)
-                                    && position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                                position
+                                    .get("mint_address")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some(mint)
+                                    && position.get("status").and_then(serde_json::Value::as_str)
+                                        == Some("open")
                             }) {
-                                let quantity = position.get("token_quantity")
+                                let quantity = position
+                                    .get("token_quantity")
                                     .or_else(|| position.get("quantity"))
-                                    .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                                let cost_basis = position.get("cost_basis_sol")
+                                    .and_then(serde_json::Value::as_f64)
+                                    .unwrap_or(0.0);
+                                let cost_basis = position
+                                    .get("cost_basis_sol")
                                     .or_else(|| position.get("invested_sol"))
-                                    .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                    .and_then(serde_json::Value::as_f64)
+                                    .unwrap_or(0.0);
                                 let current_value = quantity * price_sol;
                                 let pnl = current_value - cost_basis;
                                 if let Some(object) = position.as_object_mut() {
                                     object.insert("current_price_sol".into(), json!(price_sol));
                                     object.insert("current_value_sol".into(), json!(current_value));
                                     object.insert("unrealized_pnl_sol".into(), json!(pnl));
-                                    object.insert("unrealized_pnl_pct".into(), json!(
-                                        if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 }
-                                    ));
-                                    object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+                                    object.insert(
+                                        "unrealized_pnl_pct".into(),
+                                        json!(if cost_basis > 0.0 {
+                                            pnl / cost_basis * 100.0
+                                        } else {
+                                            0.0
+                                        }),
+                                    );
+                                    object.insert(
+                                        "marked_at".into(),
+                                        json!(chrono::Utc::now().to_rfc3339()),
+                                    );
                                 }
-                                let _ = events.send(json!({"type":"position_updated","data":position.clone()}));
+                                let _ = events.send(
+                                    json!({"type":"position_updated","data":position.clone()}),
+                                );
                             }
-                            let open: Vec<serde_json::Value> = positions.iter()
-                                .filter(|item| item.get("status").and_then(serde_json::Value::as_str) == Some("open"))
-                                .cloned().collect();
+                            let open: Vec<serde_json::Value> = positions
+                                .iter()
+                                .filter(|item| {
+                                    item.get("status").and_then(serde_json::Value::as_str)
+                                        == Some("open")
+                                })
+                                .cloned()
+                                .collect();
                             let sum = |items: &[serde_json::Value], field: &str| -> f64 {
-                                items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
+                                items
+                                    .iter()
+                                    .filter_map(|item| {
+                                        item.get(field).and_then(serde_json::Value::as_f64)
+                                    })
+                                    .sum()
                             };
                             let position_count = open.len();
                             let portfolio = json!({
@@ -362,7 +390,8 @@ fn start_token_state_projector(
                             }
                             let profile_snapshot = current_profile.clone();
                             drop(current_profile);
-                            let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                            let _ = events
+                                .send(json!({"type":"profile_updated","data":profile_snapshot}));
                             let _ = events.send(json!({
                                 "type":"portfolio_summary_updated",
                                 "data":{
@@ -386,7 +415,6 @@ fn start_token_state_projector(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 #[derive(Debug, Clone)]
 struct DiscoveryMetadata {
     name: Option<String>,
@@ -399,14 +427,24 @@ struct DiscoveryMetadata {
 
 impl DiscoveryMetadata {
     fn partial() -> Self {
-        Self { name: None, symbol: None, decimals: None, metadata_uri: None, logo_url: None, status: "unavailable" }
+        Self {
+            name: None,
+            symbol: None,
+            decimals: None,
+            metadata_uri: None,
+            logo_url: None,
+            status: "unavailable",
+        }
     }
 }
 
 /// Resolve the token's display identity before publishing new_token_detected.
 /// Missing optional fields never block discovery. Off-chain metadata is fetched only
 /// from HTTPS URLs and redirects are disabled to reduce SSRF and untrusted redirect risk.
-async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Result<DiscoveryMetadata> {
+async fn resolve_discovery_metadata(
+    rpc: &SolanaRpc,
+    mint: &str,
+) -> anyhow::Result<DiscoveryMetadata> {
     let mut result = DiscoveryMetadata::partial();
 
     // Each metadata source is best-effort and independent: one unavailable RPC call
@@ -420,7 +458,9 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
             }
         }
         Ok(_) => {}
-        Err(error) => tracing::debug!(%error, mint_address=%mint, "Mint account metadata lookup failed"),
+        Err(error) => {
+            tracing::debug!(%error, mint_address=%mint, "Mint account metadata lookup failed")
+        }
     }
 
     match rpc.resolve_token_metadata(mint).await {
@@ -429,7 +469,9 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
             result.symbol = metadata.symbol;
             result.metadata_uri = metadata.uri;
         }
-        Err(error) => tracing::debug!(%error, mint_address=%mint, "Token-program metadata lookup failed"),
+        Err(error) => {
+            tracing::debug!(%error, mint_address=%mint, "Token-program metadata lookup failed")
+        }
     }
 
     if let Some(uri) = result.metadata_uri.as_deref() {
@@ -445,19 +487,26 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
         if let Ok(url) = reqwest::Url::parse(&fetch_uri) {
             let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
             let ip_literal = host.parse::<std::net::IpAddr>().is_ok();
-            let unsafe_host = ip_literal || host == "localhost" || host.ends_with(".localhost")
+            let unsafe_host = ip_literal
+                || host == "localhost"
+                || host.ends_with(".localhost")
                 || host.ends_with(".local");
             if url.scheme() == "https" && !unsafe_host {
                 let client = reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(Duration::from_secs(5))
                     .build()?;
-                if let Ok(mut response) = client.get(url)
+                if let Ok(mut response) = client
+                    .get(url)
                     .header(reqwest::header::ACCEPT, "application/json")
-                    .send().await
+                    .send()
+                    .await
                 {
                     if response.status().is_success()
-                        && response.content_length().map(|length| length <= 262_144).unwrap_or(true)
+                        && response
+                            .content_length()
+                            .map(|length| length <= 262_144)
+                            .unwrap_or(true)
                     {
                         let mut bytes = Vec::new();
                         let mut within_limit = true;
@@ -479,16 +528,28 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
                         }
                         if within_limit {
                             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                                result.logo_url = value.get("image").or_else(|| value.get("image_url"))
+                                result.logo_url = value
+                                    .get("image")
+                                    .or_else(|| value.get("image_url"))
                                     .and_then(serde_json::Value::as_str)
-                                    .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_owned);
                                 if result.name.is_none() {
-                                    result.name = value.get("name").and_then(serde_json::Value::as_str)
-                                        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                    result.name = value
+                                        .get("name")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                        .map(str::to_owned);
                                 }
                                 if result.symbol.is_none() {
-                                    result.symbol = value.get("symbol").and_then(serde_json::Value::as_str)
-                                        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+                                    result.symbol = value
+                                        .get("symbol")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                        .map(str::to_owned);
                                 }
                             }
                         }
@@ -498,11 +559,18 @@ async fn resolve_discovery_metadata(rpc: &SolanaRpc, mint: &str) -> anyhow::Resu
         }
     }
 
-    result.status = if result.name.is_some() && result.symbol.is_some()
-        && result.decimals.is_some() && result.logo_url.is_some() {
+    result.status = if result.name.is_some()
+        && result.symbol.is_some()
+        && result.decimals.is_some()
+        && result.logo_url.is_some()
+    {
         "complete"
-    } else if result.name.is_some() || result.symbol.is_some()
-        || result.decimals.is_some() || result.metadata_uri.is_some() || result.logo_url.is_some() {
+    } else if result.name.is_some()
+        || result.symbol.is_some()
+        || result.decimals.is_some()
+        || result.metadata_uri.is_some()
+        || result.logo_url.is_some()
+    {
         "partial"
     } else {
         "unavailable"
@@ -629,7 +697,8 @@ fn start_launch_processor(
                 let metadata_result = tokio::time::timeout(
                     Duration::from_secs(10),
                     resolve_discovery_metadata(&rpc, &mint_address),
-                ).await;
+                )
+                .await;
                 let metadata = match metadata_result {
                     Ok(Ok(metadata)) => metadata,
                     Ok(Err(error)) => {
@@ -647,11 +716,21 @@ fn start_launch_processor(
                 let launch_signature_for_scan = launch.signature.clone();
                 let mut identity = serde_json::Map::new();
                 identity.insert("mint_address".into(), json!(mint_address));
-                if let Some(value) = metadata.name.as_ref() { identity.insert("name".into(), json!(value)); }
-                if let Some(value) = metadata.symbol.as_ref() { identity.insert("symbol".into(), json!(value)); }
-                if let Some(value) = metadata.decimals { identity.insert("decimals".into(), json!(value)); }
-                if let Some(value) = metadata.metadata_uri.as_ref() { identity.insert("metadata_uri".into(), json!(value)); }
-                if let Some(value) = metadata.logo_url.as_ref() { identity.insert("logo_url".into(), json!(value)); }
+                if let Some(value) = metadata.name.as_ref() {
+                    identity.insert("name".into(), json!(value));
+                }
+                if let Some(value) = metadata.symbol.as_ref() {
+                    identity.insert("symbol".into(), json!(value));
+                }
+                if let Some(value) = metadata.decimals {
+                    identity.insert("decimals".into(), json!(value));
+                }
+                if let Some(value) = metadata.metadata_uri.as_ref() {
+                    identity.insert("metadata_uri".into(), json!(value));
+                }
+                if let Some(value) = metadata.logo_url.as_ref() {
+                    identity.insert("logo_url".into(), json!(value));
+                }
 
                 let initial_state = token_registry.upsert_patch(
                     &mint_address,
@@ -686,7 +765,8 @@ fn start_launch_processor(
                                 "discovery":snapshot.data.get("discovery").cloned().unwrap_or(serde_json::Value::Null)
                             }
                         }));
-                        let mut legacy_launch = serde_json::to_value(&launch).unwrap_or_else(|_| json!({}));
+                        let mut legacy_launch =
+                            serde_json::to_value(&launch).unwrap_or_else(|_| json!({}));
                         if let Some(object) = legacy_launch.as_object_mut() {
                             object.insert("name".into(), json!(metadata.name));
                             object.insert("symbol".into(), json!(metadata.symbol));
@@ -738,7 +818,9 @@ fn start_launch_processor(
                                 );
                             },
                         ),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(Ok(report)) => Ok(report),
                         Ok(Err(error)) => Err(error.to_string()),
                         Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
@@ -747,18 +829,37 @@ fn start_launch_processor(
                     match scan_result {
                         Ok(mut report) => {
                             // Keep the pre-scan identity authoritative when the scanner has no better value.
-                            if report.metadata.name.is_none() { report.metadata.name = metadata.name.clone(); }
-                            if report.metadata.symbol.is_none() { report.metadata.symbol = metadata.symbol.clone(); }
-                            if report.metadata.uri.is_none() { report.metadata.uri = metadata.metadata_uri.clone(); }
+                            if report.metadata.name.is_none() {
+                                report.metadata.name = metadata.name.clone();
+                            }
+                            if report.metadata.symbol.is_none() {
+                                report.metadata.symbol = metadata.symbol.clone();
+                            }
+                            if report.metadata.uri.is_none() {
+                                report.metadata.uri = metadata.metadata_uri.clone();
+                            }
                             let mut identity_patch = serde_json::Map::new();
-                            if let Some(name) = report.metadata.name.as_ref() { identity_patch.insert("name".into(), json!(name)); }
-                            if let Some(symbol) = report.metadata.symbol.as_ref() { identity_patch.insert("symbol".into(), json!(symbol)); }
-                            if let Some(uri) = report.metadata.uri.as_ref() { identity_patch.insert("metadata_uri".into(), json!(uri)); }
-                            if let Some(decimals) = report.decimals { identity_patch.insert("decimals".into(), json!(decimals)); }
-                            if let Some(supply) = report.supply_raw.as_ref() { identity_patch.insert("total_supply_raw".into(), json!(supply)); }
-                            if let Some(logo) = metadata.logo_url.as_ref() { identity_patch.insert("logo_url".into(), json!(logo)); }
+                            if let Some(name) = report.metadata.name.as_ref() {
+                                identity_patch.insert("name".into(), json!(name));
+                            }
+                            if let Some(symbol) = report.metadata.symbol.as_ref() {
+                                identity_patch.insert("symbol".into(), json!(symbol));
+                            }
+                            if let Some(uri) = report.metadata.uri.as_ref() {
+                                identity_patch.insert("metadata_uri".into(), json!(uri));
+                            }
+                            if let Some(decimals) = report.decimals {
+                                identity_patch.insert("decimals".into(), json!(decimals));
+                            }
+                            if let Some(supply) = report.supply_raw.as_ref() {
+                                identity_patch.insert("total_supply_raw".into(), json!(supply));
+                            }
+                            if let Some(logo) = metadata.logo_url.as_ref() {
+                                identity_patch.insert("logo_url".into(), json!(logo));
+                            }
                             if !identity_patch.is_empty() {
-                                let _ = approved_registry.upsert_patch(&scan_mint, json!({"identity":identity_patch}));
+                                let _ = approved_registry
+                                    .upsert_patch(&scan_mint, json!({"identity":identity_patch}));
                             }
 
                             // Creator history is evidence, not a standalone verdict. A bounded sample
@@ -777,7 +878,9 @@ fn start_launch_processor(
                                     &launch_signature_for_scan,
                                     &approved_program_id,
                                 ),
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(Ok(creator_report)) => {
                                     let status = creator_report.status.clone();
                                     let detail = format!(
@@ -789,7 +892,12 @@ fn start_launch_processor(
                                     );
                                     report.checks.push(nodex_solana::SecurityCheck {
                                         name: "creator_history".into(),
-                                        status: if status == "unverified" { "unverified" } else { "partial" }.into(),
+                                        status: if status == "unverified" {
+                                            "unverified"
+                                        } else {
+                                            "partial"
+                                        }
+                                        .into(),
                                         severity: "high".into(),
                                         detail,
                                     });
@@ -821,7 +929,12 @@ fn start_launch_processor(
                             };
                             match decision.as_str() {
                                 "APPROVED" => {
-                                    let launch_saved = match nodex_persistence::save_launch(&approved_database, &launch).await {
+                                    let launch_saved = match nodex_persistence::save_launch(
+                                        &approved_database,
+                                        &launch,
+                                    )
+                                    .await
+                                    {
                                         Ok(true) => true,
                                         Ok(false) => true,
                                         Err(error) => {
@@ -833,13 +946,23 @@ fn start_launch_processor(
                                         }
                                     };
                                     let approved_state = if launch_saved {
-                                        approved_registry.upsert_patch(&scan_mint, json!({
-                                            "security":report.clone(),
-                                            "market":{"status":"starting"}
-                                        }))
-                                    } else { Err("Approved launch could not be persisted") };
+                                        approved_registry.upsert_patch(
+                                            &scan_mint,
+                                            json!({
+                                                "security":report.clone(),
+                                                "market":{"status":"starting"}
+                                            }),
+                                        )
+                                    } else {
+                                        Err("Approved launch could not be persisted")
+                                    };
                                     let approval_persisted = match approved_state {
-                                        Ok(snapshot) => nodex_persistence::save_token_state(&approved_database, &snapshot).await.is_ok(),
+                                        Ok(snapshot) => nodex_persistence::save_token_state(
+                                            &approved_database,
+                                            &snapshot,
+                                        )
+                                        .await
+                                        .is_ok(),
                                         Err(error) => {
                                             let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                                 "severity":"error","component":"token_approval_registry",
@@ -858,7 +981,13 @@ fn start_launch_processor(
                                         terminal_status = "unverified";
                                         // Roll back a launch row if the canonical approved state could
                                         // not be committed. This keeps failed approvals out of durable storage.
-                                        if let Err(error) = nodex_persistence::delete_token_launches(&approved_database, &scan_mint).await {
+                                        if let Err(error) =
+                                            nodex_persistence::delete_token_launches(
+                                                &approved_database,
+                                                &scan_mint,
+                                            )
+                                            .await
+                                        {
                                             tracing::error!(%error, mint_address=%scan_mint, "Could not roll back launch row after approval persistence failure");
                                         }
                                         approved_registry.remove(&scan_mint);
@@ -870,17 +999,23 @@ fn start_launch_processor(
                                 }
                                 "REJECTED" => {
                                     approved_registry.remove(&scan_mint);
-                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
-                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                        "mint_address":scan_mint,"reason":report.decision_reason
-                                    }}));
+                                    let _ = scan_events.send(
+                                        json!({"type":"token_scan_update","data":report.clone()}),
+                                    );
+                                    let _ = scan_events.send(
+                                        json!({"type":"token_rejected_cleanup","data":{
+                                            "mint_address":scan_mint,"reason":report.decision_reason
+                                        }}),
+                                    );
                                     let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
                                         "mint_address":scan_mint,"decision":"REJECTED","reason":report.decision_reason
                                     }}));
                                 }
                                 _ => {
                                     approved_registry.remove(&scan_mint);
-                                    let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                    let _ = scan_events.send(
+                                        json!({"type":"token_scan_update","data":report.clone()}),
+                                    );
                                     let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
                                         "mint_address":scan_mint,
                                         "reason":"Token did not receive an explicit APPROVED decision."
@@ -909,14 +1044,18 @@ fn start_launch_processor(
                                 "decision_reason":error,"status":"failed",
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
-                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                "mint_address":scan_mint,"reason":error
-                            }}));
+                            let _ =
+                                scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                    "mint_address":scan_mint,"reason":error
+                                }}));
                         }
                     }
                     if token_approved {
                         if let Some(monitor) = approved_monitor.read().await.clone() {
-                            match monitor.subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id).await {
+                            match monitor
+                                .subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id)
+                                .await
+                            {
                                 Ok(account_address) => {
                                     let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
                                         "mint_address":scan_mint,"account_address":account_address,
@@ -936,7 +1075,6 @@ fn start_launch_processor(
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
-
             }
         });
     }
@@ -1091,7 +1229,8 @@ async fn update_trading_config(
     })?;
     *state.trading_settings.write().await = settings.clone();
     // This notification is emitted only after the SQLite upsert has committed.
-    let _ = state.database_changes
+    let _ = state
+        .database_changes
         .send(json!({"type":"trading_config_updated","data":settings}))
         .await;
     Ok(Json(json!({"status":"ok","config":settings})))
@@ -1360,11 +1499,18 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let positions = state.portfolio_positions.read().await.clone();
     let mut profile = state.profile.read().await.clone();
-    let open_positions: Vec<serde_json::Value> = positions.iter()
-        .filter(|position| position.get("status").and_then(serde_json::Value::as_str) == Some("open"))
-        .cloned().collect();
+    let open_positions: Vec<serde_json::Value> = positions
+        .iter()
+        .filter(|position| {
+            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+        })
+        .cloned()
+        .collect();
     let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
-        items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
+        items
+            .iter()
+            .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
+            .sum()
     };
     let portfolio = json!({
         "total_value_sol": sum_field(&open_positions, "current_value_sol"),
@@ -1416,7 +1562,6 @@ fn is_token_detail_event(event_type: &str) -> bool {
 fn is_frontend_event(value: &serde_json::Value) -> bool {
     websocket::is_frontend_event(value)
 }
-
 
 async fn issue_ws_ticket(
     State(state): State<AppState>,
@@ -1914,7 +2059,8 @@ async fn main() -> anyhow::Result<()> {
                             tracing::error!(%error, "Could not persist synchronized wallet profile");
                         } else {
                             let _ = database_changes_for_sync
-                                .send(json!({"type":"profile_updated","data":snapshot})).await;
+                                .send(json!({"type":"profile_updated","data":snapshot}))
+                                .await;
                         }
                     }
                     Err(error) => {
