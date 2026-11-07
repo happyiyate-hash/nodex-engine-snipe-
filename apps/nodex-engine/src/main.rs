@@ -1886,10 +1886,11 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 
 async fn ensure_market_monitor(state: &AppState) {
     let mut monitor = state.market_monitor.write().await;
-    if monitor.is_none() {
-        if !state.solana_ws_urls.is_empty() {
-            *monitor = Some(start_market_monitor(state.solana_ws_urls.clone(), state.events.clone()));
-        }
+    if monitor.is_none() && !state.solana_ws_urls.is_empty() {
+        *monitor = Some(start_market_monitor(
+            state.solana_ws_urls.clone(),
+            state.events.clone(),
+        ));
     }
 }
 
