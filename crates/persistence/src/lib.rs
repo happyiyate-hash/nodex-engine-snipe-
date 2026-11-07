@@ -453,12 +453,8 @@ pub async fn load_chart_candles(
     Ok(candles)
 }
 
-
 /// Return the newest persisted launches, newest first.
-pub async fn list_recent_launches(
-    pool: &SqlitePool,
-    limit: u32,
-) -> Result<Vec<serde_json::Value>> {
+pub async fn list_recent_launches(pool: &SqlitePool, limit: u32) -> Result<Vec<serde_json::Value>> {
     let rows = sqlx::query_scalar::<_, String>(
         "SELECT payload_json FROM token_launches ORDER BY detected_at DESC LIMIT ?",
     )
@@ -481,14 +477,26 @@ pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>>
 
     row.map(|row| {
         Ok(PaperWallet {
-            starting_balance_lamports: u64::try_from(row.get::<i64, _>("starting_balance_lamports"))?,
-            available_balance_lamports: u64::try_from(row.get::<i64, _>("available_balance_lamports"))?,
-            invested_balance_lamports: u64::try_from(row.get::<i64, _>("invested_balance_lamports"))?,
+            starting_balance_lamports: u64::try_from(
+                row.get::<i64, _>("starting_balance_lamports"),
+            )?,
+            available_balance_lamports: u64::try_from(
+                row.get::<i64, _>("available_balance_lamports"),
+            )?,
+            invested_balance_lamports: u64::try_from(
+                row.get::<i64, _>("invested_balance_lamports"),
+            )?,
             locked_rent_lamports: u64::try_from(row.get::<i64, _>("locked_rent_lamports"))?,
-            total_network_fees_lamports: u64::try_from(row.get::<i64, _>("total_network_fees_lamports"))?,
-            total_priority_fees_lamports: u64::try_from(row.get::<i64, _>("total_priority_fees_lamports"))?,
+            total_network_fees_lamports: u64::try_from(
+                row.get::<i64, _>("total_network_fees_lamports"),
+            )?,
+            total_priority_fees_lamports: u64::try_from(
+                row.get::<i64, _>("total_priority_fees_lamports"),
+            )?,
             total_swap_fees_lamports: u64::try_from(row.get::<i64, _>("total_swap_fees_lamports"))?,
-            total_rent_refunded_lamports: u64::try_from(row.get::<i64, _>("total_rent_refunded_lamports"))?,
+            total_rent_refunded_lamports: u64::try_from(
+                row.get::<i64, _>("total_rent_refunded_lamports"),
+            )?,
         })
     })
     .transpose()
