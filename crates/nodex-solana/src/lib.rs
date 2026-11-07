@@ -1719,11 +1719,15 @@ async fn connect_and_subscribe(
                         .and_then(Value::as_array)
                         .is_some_and(|logs| logs.iter().any(|line| {
                             line.as_str().is_some_and(|line| {
-                                let normalized = line.to_ascii_lowercase();
-                                normalized.contains("instruction: create")
-                                    || normalized.contains("instruction: create_v2")
+                                line.to_ascii_lowercase().contains("instruction: create")
                             })
                         }));
+                    // The Pump.fun subscription is used only for creation launches.
+                    // Buy/sell activity is already handled by the independent PumpSwap
+                    // market stream and must not enter the discovery decoder queue.
+                    if program_id != PUMPSWAP_PROGRAM_ID && !is_create_notification {
+                        continue;
+                    }
                     let signature = tagged
                         .pointer("/params/result/value/signature")
                         .and_then(Value::as_str)
