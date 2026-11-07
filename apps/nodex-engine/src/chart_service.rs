@@ -75,6 +75,7 @@ pub fn start_chart_service(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
     control: std::sync::Arc<tokio::sync::RwLock<crate::EngineControl>>,
+    db_write_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     tokio::spawn(async move {
         let mut candles = HashMap::<(String, String, i64), Candle>::new();
@@ -182,6 +183,10 @@ pub fn start_chart_service(
                             if !previous_candle.closed {
                                 previous_candle.closed = true;
                                 let payload = previous_candle.json(mint, timeframe, duration);
+                                let _write_guard = db_write_gate.read().await;
+                                if control.read().await.paused {
+                                    continue;
+                                }
                                 if let Err(error) = nodex_persistence::save_chart_candle(
                                     &database,
                                     mint,
@@ -230,6 +235,10 @@ pub fn start_chart_service(
                             .get(&key)
                             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5));
                     if should_persist {
+                        let _write_guard = db_write_gate.read().await;
+                        if control.read().await.paused {
+                            continue;
+                        }
                         if let Err(error) = nodex_persistence::save_chart_candle(
                             &database, mint, timeframe, open_time, &payload,
                         )
