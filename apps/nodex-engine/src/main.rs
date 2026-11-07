@@ -487,6 +487,10 @@ fn start_token_state_projector(
                 continue;
             };
             if kind == "token_rejected_cleanup" {
+                let _write_guard = db_write_gate.read().await;
+                if control.read().await.paused {
+                    continue;
+                }
                 if let Err(error) = nodex_persistence::delete_token_state(&database, mint).await {
                     tracing::error!(%error, mint_address=mint, "Could not remove rejected token state");
                 }
@@ -520,6 +524,7 @@ fn start_token_state_projector(
             };
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
+                    let _write_guard = db_write_gate.read().await;
                     if control.read().await.paused {
                         continue;
                     }
@@ -613,6 +618,7 @@ fn start_token_state_projector(
                                             .get("position_id")
                                             .and_then(serde_json::Value::as_str)
                                             .unwrap_or(mint);
+                                        let _write_guard = db_write_gate.read().await;
                                         if control.read().await.paused {
                                             continue;
                                         }
@@ -675,6 +681,7 @@ fn start_token_state_projector(
                                     }
                                     let profile_snapshot = current_profile.clone();
                                     drop(current_profile);
+                                    let _write_guard = db_write_gate.read().await;
                                     if control.read().await.paused {
                                         continue;
                                     }
@@ -816,6 +823,7 @@ fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
+                let _write_guard = db_write_gate.read().await;
                 if control.read().await.paused {
                     continue;
                 }
@@ -845,6 +853,7 @@ fn start_launch_processor(
                         );
                         match initial_state {
                             Ok(snapshot) => {
+                                let _write_guard = db_write_gate.read().await;
                                 if control.read().await.paused {
                                     continue;
                                 }
@@ -882,6 +891,7 @@ fn start_launch_processor(
                         let approved_registry = token_registry.clone();
                         let approved_database = database.clone();
                         let scan_control = control.clone();
+                        let scan_gate = db_write_gate.clone();
                         tokio::spawn(async move {
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
@@ -994,6 +1004,10 @@ fn start_launch_processor(
                                             json!({"identity":identity_patch}),
                                         ) {
                                             Ok(snapshot) => {
+                                                let _write_guard = scan_gate.read().await;
+                                                if scan_control.read().await.paused {
+                                                    return;
+                                                }
                                                 if let Err(error) =
                                                     nodex_persistence::save_token_state(
                                                         &approved_database,
@@ -1039,6 +1053,10 @@ fn start_launch_processor(
                                             );
                                             let approval_persisted = match approved_state {
                                                 Ok(snapshot) => {
+                                                    let _write_guard = scan_gate.read().await;
+                                                    if scan_control.read().await.paused {
+                                                        return;
+                                                    }
                                                     match nodex_persistence::save_token_state(
                                                         &approved_database,
                                                         &snapshot,
@@ -1089,6 +1107,10 @@ fn start_launch_processor(
                                                 json!({"security":report.clone()}),
                                             );
                                             if let Ok(snapshot) = rejected_state {
+                                                let _write_guard = scan_gate.read().await;
+                                                if scan_control.read().await.paused {
+                                                    return;
+                                                }
                                                 if let Err(error) =
                                                     nodex_persistence::save_token_state(
                                                         &approved_database,
