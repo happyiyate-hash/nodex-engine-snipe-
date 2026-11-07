@@ -1386,17 +1386,37 @@ async fn update_engine_control(
     if snapshot.paused {
         let monitor = state.market_monitor.write().await.take();
         if let Some(monitor) = monitor {
-            if let Err(error) = monitor.stop().await {
-                tracing::warn!(%error, "Could not stop market-account WebSocket monitor");
-            }
+            tokio::time::timeout(Duration::from_secs(10), monitor.stop())
+                .await
+                .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE,
+                    "Pause requested, but market WebSocket shutdown has not been acknowledged yet. Do not clear history; retry status check.".to_string()))?
+                .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Pause requested, but market WebSocket shutdown failed: {error}")))?;
         }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pump_fun_disconnected = !state.stream_status.read().await.connected;
+                let pumpswap_disconnected = !state.pumpswap_status.read().await.connected;
+                if pump_fun_disconnected && pumpswap_disconnected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE,
+            "Pause requested, but Solana log streams have not confirmed disconnection. Do not clear history yet.".to_string()))?;
     } else {
         ensure_market_monitor(&state).await;
     }
     let _ = state
         .events
         .send(json!({"type":"engine_state","data":snapshot}));
-    Ok(Json(json!({"status":"ok","engine":snapshot})))
+    let maintenance_ready = snapshot.paused
+        && !state.stream_status.read().await.connected
+        && !state.pumpswap_status.read().await.connected
+        && state.market_monitor.read().await.is_none();
+    Ok(Json(json!({"status":"ok","engine":snapshot,"maintenance_ready":maintenance_ready})))
 }
 
 async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -1404,7 +1424,12 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
     let pumpswap_stream = state.pumpswap_status.read().await.clone();
     let control = state.control.read().await.clone();
     let trading_settings = state.trading_settings.read().await.clone();
+    let maintenance_ready = control.paused
+        && !stream.connected
+        && !pumpswap_stream.connected
+        && state.market_monitor.read().await.is_none();
     Json(json!({
+        "maintenance_ready": maintenance_ready,
         "mode": control.mode,
         "paused": control.paused,
         "token_discovery_enabled": control.token_discovery_enabled,
@@ -1446,10 +1471,14 @@ async fn clear_token_and_event_history(
         ));
     }
 
-    if !state.control.read().await.paused {
+    let paused = state.control.read().await.paused;
+    let streams_disconnected = !state.stream_status.read().await.connected
+        && !state.pumpswap_status.read().await.connected;
+    let market_monitor_stopped = state.market_monitor.read().await.is_none();
+    if !paused || !streams_disconnected || !market_monitor_stopped {
         return Err((
             StatusCode::CONFLICT,
-            "Pause the engine before clearing history.".to_string(),
+            "Maintenance is not ready. Pause the engine and wait until all Solana WebSockets are disconnected before clearing history.".to_string(),
         ));
     }
 
