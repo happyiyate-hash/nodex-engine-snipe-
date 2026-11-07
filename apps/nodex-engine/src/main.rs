@@ -990,9 +990,10 @@ async fn update_trading_config(
         )
     })?;
     *state.trading_settings.write().await = settings.clone();
-    let _ = state
-        .events
-        .send(json!({"type":"trading_config_updated","data":settings}));
+    // This notification is emitted only after the SQLite upsert has committed.
+    let _ = state.database_changes
+        .send(json!({"type":"trading_config_updated","data":settings}))
+        .await;
     Ok(Json(json!({"status":"ok","config":settings})))
 }
 
@@ -1316,53 +1317,6 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
     websocket::is_frontend_event(value)
 }
 
-/*
-fn legacy_is_frontend_event(value: &serde_json::Value) -> bool {
-    matches!(
-        value.get("type").and_then(serde_json::Value::as_str),
-        Some("connection_status")
-            | Some("engine_state")
-            | Some("trading_config_updated")
-            | Some("launch_detected")
-            | Some("token_removed")
-            | Some("token_approval_pending")
-            | Some("token_scan_started")
-            | Some("token_scan_update")
-            | Some("token_scan_progress")
-            | Some("token_scan_completed")
-            | Some("token_scan_failed")
-            | Some("token_metadata_started")
-            | Some("token_metadata_failed")
-            | Some("token_metadata_updated")
-            | Some("token_state_updated")
-            | Some("profile_updated")
-            | Some("market_price_update")
-            | Some("token_market_update")
-            | Some("token_statistics_update")
-            | Some("chart_candle_update")
-            | Some("chart_candle_closed")
-            | Some("position_updated")
-            | Some("portfolio_summary_updated")
-            | Some("paper_buy_executed")
-            | Some("paper_buy_failed")
-            | Some("strategy_rejected_token")
-            | Some("diagnostic")
-            | Some("provider_status")
-            | Some("market_account_update")
-            | Some("market_curve_completed")
-            | Some("market_monitor_status")
-            | Some("market_subscription_requested")
-            | Some("market_subscription_active")
-            | Some("creator_history_started")
-            | Some("creator_history_update")
-            | Some("stream_warning")
-            | Some("reconnect_recovery_status")
-            | Some("pumpswap_activity")
-            | Some("pumpswap_volume_update")
-            | Some("command_rejected")
-    )
-}
-*/
 
 async fn issue_ws_ticket(
     State(state): State<AppState>,
