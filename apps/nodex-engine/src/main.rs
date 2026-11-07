@@ -735,14 +735,14 @@ fn start_launch_processor(
                                             // registry state and let the projector clean up any
                                             // legacy launch/state rows created during migration.
                                             approved_registry.remove(&scan_mint);
-                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                                "mint_address":scan_mint,
-                                                "reason":report.decision_reason
-                                            }}));
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
                                             }));
+                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                "mint_address":scan_mint,
+                                                "reason":report.decision_reason
+                                            }}));
                                             let _ = scan_events.send(
                                                 json!({"type":"token_approval_pending","data":{
                                                     "mint_address":scan_mint,
@@ -753,14 +753,14 @@ fn start_launch_processor(
                                         }
                                         _ => {
                                             approved_registry.remove(&scan_mint);
-                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                                "mint_address":scan_mint,
-                                                "reason":"Token did not receive an explicit APPROVED decision."
-                                            }}));
                                             let _ = scan_events.send(json!({
                                                 "type":"token_scan_update",
                                                 "data":report.clone()
                                             }));
+                                            let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                                "mint_address":scan_mint,
+                                                "reason":"Token did not receive an explicit APPROVED decision."
+                                            }}));
                                             let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
                                                 "mint_address":scan_mint,
                                                 "decision":decision,
@@ -779,10 +779,6 @@ fn start_launch_processor(
                                 }
                                 Err(error) => {
                                     approved_registry.remove(&scan_mint);
-                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                        "mint_address":scan_mint,
-                                        "reason":error
-                                    }}));
                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                         "severity":"error","component":"token_security_scanner",
                                         "message":error,"mint_address":scan_mint,
@@ -799,6 +795,10 @@ fn start_launch_processor(
                                         "mint_address":scan_mint,"decision":"UNVERIFIED",
                                         "decision_reason":error,
                                         "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
+                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
+                                        "mint_address":scan_mint,
+                                        "reason":error
                                     }}));
                                 }
                             }
