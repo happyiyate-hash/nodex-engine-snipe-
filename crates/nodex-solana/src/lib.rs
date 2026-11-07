@@ -1460,6 +1460,11 @@ async fn backfill_logs_gap(
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        if program_id != PUMPSWAP_PROGRAM_ID
+            && !logs.iter().any(|line| line.to_ascii_lowercase().contains("instruction: create"))
+        {
+            continue;
+        }
         let slot = transaction
             .get("slot")
             .and_then(Value::as_u64)
