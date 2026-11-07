@@ -860,8 +860,9 @@ fn start_launch_processor(
                         tokio::spawn(async move {
                             let progress_events = scan_events.clone();
                             let progress_mint = scan_mint.clone();
-                            match scan_rpc
-                                .scan_token_security_with_progress(
+                            let scan_result = match tokio::time::timeout(
+                                Duration::from_secs(45),
+                                scan_rpc.scan_token_security_with_progress(
                                     &scan_mint,
                                     move |stage, progress, message| {
                                         let _ = progress_events.send(
@@ -874,18 +875,68 @@ fn start_launch_processor(
                                             }}),
                                         );
                                     },
-                                )
-                                .await
-                            {
+                                ),
+                            ).await {
+                                Ok(Ok(report)) => Ok(report),
+                                Ok(Err(error)) => Err(error.to_string()),
+                                Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
+                            };
+                            match scan_result {
                                 Ok(mut report) => {
-                                    // Resolve canonical Metaplex metadata for standard SPL
-                                    // tokens; embedded Token-2022 metadata remains preferred.
+                                    // Metadata is an independent operation: it must never keep
+                                    // the security scan in a scanning state.
                                     if report.metadata.name.is_none() {
-                                        match scan_rpc.resolve_metaplex_metadata(&scan_mint).await {
-                                            Ok(Some(metadata)) => report.metadata = metadata,
-                                            Ok(None) => {}
-                                            Err(error) => {
-                                                tracing::debug!(%error, mint_address=%scan_mint, "Metaplex metadata PDA was unavailable");
+                                        let _ = scan_events.send(json!({"type":"token_metadata_started","data":{
+                                            "mint_address":scan_mint,
+                                            "provider":"metaplex",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }}));
+                                        match tokio::time::timeout(
+                                            Duration::from_secs(8),
+                                            scan_rpc.resolve_metaplex_metadata(&scan_mint),
+                                        ).await {
+                                            Ok(Ok(Some(metadata))) => {
+                                                report.metadata = metadata;
+                                            }
+                                            Ok(Ok(None)) => {
+                                                let _ = scan_events.send(json!({"type":"token_metadata_failed","data":{
+                                                    "mint_address":scan_mint,
+                                                    "provider":"metaplex",
+                                                    "reason":"No Metaplex metadata account was found.",
+                                                    "status":"not_found",
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}));
+                                            }
+                                            Ok(Err(error)) => {
+                                                let message = error.to_string();
+                                                tracing::warn!(%message, mint_address=%scan_mint, "Metaplex metadata lookup failed");
+                                                let _ = scan_events.send(json!({"type":"token_metadata_failed","data":{
+                                                    "mint_address":scan_mint,
+                                                    "provider":"metaplex",
+                                                    "reason":message,
+                                                    "status":"failed",
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}));
+                                                let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                    "severity":"warning","component":"token_metadata_resolver",
+                                                    "message":message,"mint_address":scan_mint,
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}));
+                                            }
+                                            Err(_) => {
+                                                let message = "Metaplex metadata lookup timed out after 8 seconds".to_string();
+                                                let _ = scan_events.send(json!({"type":"token_metadata_failed","data":{
+                                                    "mint_address":scan_mint,
+                                                    "provider":"metaplex",
+                                                    "reason":message,
+                                                    "status":"timeout",
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}));
+                                                let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                                    "severity":"warning","component":"token_metadata_resolver",
+                                                    "message":message,"mint_address":scan_mint,
+                                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                                }}));
                                             }
                                         }
                                     }
@@ -1035,16 +1086,36 @@ fn start_launch_processor(
                                             }}));
                                         }
                                     }
+                                    let terminal_status = match decision.as_str() {
+                                        "APPROVED" => "completed",
+                                        "REJECTED" => "rejected",
+                                        _ => "unverified",
+                                    };
+                                    let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
+                                        "mint_address":scan_mint,
+                                        "decision":decision,
+                                        "status":terminal_status,
+                                        "progress":100,
+                                        "message":"Security scan finished.",
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
                                 }
                                 Err(error) => {
                                     let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                         "severity":"error","component":"token_security_scanner",
-                                        "message":error.to_string(),"mint_address":scan_mint,
+                                        "message":error,"mint_address":scan_mint,
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}));
+                                    let _ = scan_events.send(json!({"type":"token_scan_failed","data":{
+                                        "mint_address":scan_mint,
+                                        "decision":"UNVERIFIED",
+                                        "decision_reason":error,
+                                        "status":"failed",
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}));
                                     let _ = scan_events.send(json!({"type":"token_scan_update","data":{
                                         "mint_address":scan_mint,"decision":"UNVERIFIED",
-                                        "decision_reason":"Scanner failed; token remains isolated and no market or metadata service may use it.",
+                                        "decision_reason":error,
                                         "status":"unverified","received_at":chrono::Utc::now().to_rfc3339()
                                     }}));
                                 }
@@ -1594,6 +1665,10 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("token_scan_started")
             | Some("token_scan_update")
             | Some("token_scan_progress")
+            | Some("token_scan_completed")
+            | Some("token_scan_failed")
+            | Some("token_metadata_started")
+            | Some("token_metadata_failed")
             | Some("token_metadata_updated")
             | Some("token_state_updated")
             | Some("profile_updated")
