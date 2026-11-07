@@ -210,6 +210,7 @@ fn start_token_state_projector(
     profile: Arc<RwLock<serde_json::Value>>,
     portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
     control: Arc<RwLock<EngineControl>>,
+    database_changes: mpsc::Sender<serde_json::Value>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -293,7 +294,10 @@ fn start_token_state_projector(
                             }
                         }));
                     } else {
-                        let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                        // The SQLite reader receives this only after save_token_state succeeded.
+                        let _ = database_changes
+                            .send(json!({"type":"token_state_updated","data":snapshot}))
+                            .await;
                     }
                     if kind == "market_price_update"
                         && control.read().await.position_monitoring_enabled
@@ -1865,6 +1869,7 @@ async fn main() -> anyhow::Result<()> {
         profile_state.clone(),
         portfolio_positions.clone(),
         control.clone(),
+        database_changes.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = (!config.solana_http_urls.is_empty())
