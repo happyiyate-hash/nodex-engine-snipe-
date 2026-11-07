@@ -250,6 +250,12 @@ fn start_token_state_projector(
                 }}));
                 continue;
             }
+            // The approved-token persistence path already commits the final scan report.
+            // Never let the projector persist rejected/unverified reports a second time.
+            if kind == "token_scan_update" {
+                continue;
+            }
+            let transient_scan_event = matches!(kind, "token_scan_started" | "token_scan_progress");
             let domain_patch = match kind {
                 "token_scan_started" => json!({"security":{"status":"scanning"}}),
                 "token_scan_progress" => json!({"security":{
@@ -268,6 +274,10 @@ fn start_token_state_projector(
             };
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
+                    // Scan progress is transient runtime state. Do not write it to SQLite.
+                    if transient_scan_event {
+                        continue;
+                    }
                     // Price ticks are runtime state, not durable history. Persist only
                     // non-price state transitions; Analytics owns chart history separately.
                     if kind != "market_price_update" {
