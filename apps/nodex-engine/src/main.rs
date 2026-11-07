@@ -332,13 +332,14 @@ fn start_token_state_projector(
                             let sum = |items: &[serde_json::Value], field: &str| -> f64 {
                                 items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
                             };
+                            let position_count = open.len();
                             let portfolio = json!({
                                 "total_value_sol": sum(&open, "current_value_sol"),
                                 "total_invested_sol": sum(&open, "cost_basis_sol"),
                                 "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
                                 "realized_pnl_sol": sum(&positions, "realized_pnl_sol"),
                                 "positions": open,
-                                "position_count": open.len()
+                                "position_count": position_count
                             });
                             drop(positions);
                             let mut current_profile = profile.write().await;
