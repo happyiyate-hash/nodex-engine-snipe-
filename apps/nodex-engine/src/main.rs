@@ -528,9 +528,10 @@ fn start_token_state_projector(
                     if control.read().await.paused {
                         continue;
                     }
-                    if let Err(error) =
-                        nodex_persistence::save_token_state(&database, &snapshot).await
-                    {
+                    let save_result =
+                        nodex_persistence::save_token_state(&database, &snapshot).await;
+                    drop(_write_guard);
+                    if let Err(error) = save_result {
                         tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
                         continue;
                     }
@@ -823,11 +824,14 @@ fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
-                let _write_guard = db_write_gate.read().await;
-                if control.read().await.paused {
-                    continue;
-                }
-                match nodex_persistence::save_launch(&database, &launch).await {
+                let launch_save = {
+                    let _write_guard = db_write_gate.read().await;
+                    if control.read().await.paused {
+                        continue;
+                    }
+                    nodex_persistence::save_launch(&database, &launch).await
+                };
+                match launch_save {
                     Ok(true) => {
                         if control.read().await.paused {
                             continue;
@@ -1008,13 +1012,12 @@ fn start_launch_processor(
                                                 if scan_control.read().await.paused {
                                                     return;
                                                 }
-                                                if let Err(error) =
-                                                    nodex_persistence::save_token_state(
-                                                        &approved_database,
-                                                        &snapshot,
-                                                    )
-                                                    .await
-                                                {
+                                                let save_result = nodex_persistence::save_token_state(
+                                                    &approved_database,
+                                                    &snapshot,
+                                                ).await;
+                                                drop(_write_guard);
+                                                if let Err(error) = save_result {
                                                     tracing::warn!(%error, mint_address=%scan_mint, "Could not persist resolved token identity");
                                                 }
                                                 let _ = scan_events.send(json!({
