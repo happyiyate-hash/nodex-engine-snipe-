@@ -382,7 +382,10 @@ pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u6
             Ok(counts) => return Ok(counts),
             Err(error)
                 if attempt + 1 < MAX_ATTEMPTS
-                    && error.to_string().to_ascii_lowercase().contains("database is locked") =>
+                    && error
+                        .to_string()
+                        .to_ascii_lowercase()
+                        .contains("database is locked") =>
             {
                 let delay_ms = 250_u64 * (1_u64 << attempt);
                 tracing::warn!(
