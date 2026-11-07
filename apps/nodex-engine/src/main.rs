@@ -774,7 +774,6 @@ fn start_launch_processor(
     const LAUNCH_QUEUE_CAPACITY: usize = 256;
     const LAUNCH_WORKER_COUNT: usize = 4;
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let worker_batch_tracker = batch_tracker.clone();
     let producer_batch_tracker = batch_tracker.clone();
     let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64, BatchWorkGuard)>(LAUNCH_QUEUE_CAPACITY);
     let work_rx = Arc::new(Mutex::new(work_rx));
@@ -2107,6 +2106,7 @@ fn spawn_controlled_log_stream(
                 events.clone(),
                 status.clone(),
                 recovery_rpc.clone(),
+                None,
             );
             tokio::pin!(stream);
             tokio::select! {
@@ -2416,51 +2416,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Persist raw upstream log notifications independently of browser subscribers.
-    // Batch writes avoid one SQLite transaction/fsync per Solana notification.
-    let mut persistence_receiver = events.subscribe();
-    let persistence_db = db.clone();
-    tokio::spawn(async move {
-        let mut pending = Vec::<serde_json::Value>::with_capacity(100);
-        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(250));
-        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        flush_tick.tick().await;
-        loop {
-            tokio::select! {
-                event = persistence_receiver.recv() => match event {
-                    Ok(event) => {
-                        if event.get("method").and_then(serde_json::Value::as_str)
-                            == Some("logsNotification")
-                        {
-                            pending.push(event);
-                            if pending.len() == 100 {
-                                match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
-                                    Ok(()) => pending.clear(),
-                                    Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
-                                }
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(
-                            dropped_notifications = count,
-                            pending_notifications = pending.len(),
-                            "Raw Solana event persistence subscriber lagged; recovered notifications may be backfilled after reconnect"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-                _ = flush_tick.tick() => {
-                    if !pending.is_empty() {
-                        match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
-                            Ok(()) => pending.clear(),
-                            Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
-                        }
-                    }
-                }
-            }
-        }
-    });
+    // Raw Solana notification JSON is intentionally transient. Only decoded,
+    // deduplicated launch/token state is persisted; retaining every provider
+    // notification creates unbounded storage growth without helping the UI.
 
     if !config.solana_ws_urls.is_empty() {
         spawn_batched_discovery_stream(
