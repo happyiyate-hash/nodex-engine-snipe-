@@ -107,7 +107,7 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
         Some("The df output did not match the expected six-column format.".to_owned())
     };
 
-    let database = database_file_usage(pool);
+    let database = database_file_usage(pool).await;
 
     let journal_report = command_output("journalctl", &["--disk-usage"]).await;
     let journal_size = journal_report.as_deref().and_then(parse_human_bytes);
