@@ -6,71 +6,11 @@ use tokio::process::Command;
 #[derive(Debug, Serialize)]
 pub struct DiskUsage {
     pub filesystem: String,
+    pub mountpoint: String,
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub available_bytes: u64,
     pub used_percent: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DataCategory {
-    pub logical_bytes: Option<u64>,
-    pub records: Option<i64>,
-    pub physical_bytes: Option<u64>,
-    pub note: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StorageOverview {
-    pub disk: Option<DiskUsage>,
-    pub database: DatabaseUsage,
-    pub categories: Categories,
-    pub system_journal: JournalUsage,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DatabaseUsage {
-    pub path: Option<String>,
-    pub database_bytes: u64,
-    pub wal_bytes: u64,
-    pub shm_bytes: u64,
-    pub total_file_bytes: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct JournalUsage {
-    pub available: bool,
-    pub reported_size_bytes: Option<u64>,
-    pub raw_report: Option<String>,
-    pub note: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Categories {
-    pub tokens: DataCategory,
-    pub launches: DataCategory,
-    pub events: DataCategory,
-    pub discovery: DataCategory,
-    pub chart_data: DataCategory,
-    pub paper_trading: DataCategory,
-    pub engine_logs: DataCategory,
-    pub system_logs: DataCategory,
-    pub database: DataCategory,
-    pub other: DataCategory,
-}
-
-async fn table_usage(pool: &SqlitePool, table: &str, bytes_sql: &str) -> DataCategory {
-    // SQL fragments are compile-time constants at every call site; no user input is interpolated.
-    let bytes = sqlx::query_scalar::<_, i64>(bytes_sql).fetch_one(pool).await.ok();
-    let count_sql = format!("SELECT COUNT(*) FROM {table}");
-    let records = sqlx::query_scalar::<_, i64>(&count_sql).fetch_one(pool).await.ok();
-    DataCategory {
-        logical_bytes: bytes.and_then(|value| u64::try_from(value).ok()),
-        records,
-        physical_bytes: None,
-        note: "Logical payload size inside SQLite; included in the database file size and not additive to disk usage.".into(),
-    }
 }
 
 async fn command_output(program: &str, args: &[&str]) -> Option<String> {
@@ -91,15 +31,18 @@ async fn command_output(program: &str, args: &[&str]) -> Option<String> {
 fn parse_df(output: &str) -> Option<DiskUsage> {
     let line = output.lines().last()?;
     let columns: Vec<&str> = line.split_whitespace().collect();
-    if columns.len() < 6 {
+    // Command output is: size, used, available, percent, source, target.
+    // Keep the expected field count in sync with the df --output arguments.
+    if columns.len() != 6 {
         return None;
     }
     Some(DiskUsage {
-        filesystem: columns[5].to_owned(),
+        filesystem: columns[4].to_owned(),
+        mountpoint: columns[5].to_owned(),
         total_bytes: columns[0].parse().ok()?,
         used_bytes: columns[1].parse().ok()?,
         available_bytes: columns[2].parse().ok()?,
-        used_percent: columns[4].to_owned(),
+        used_percent: columns[3].trim_end_matches('%').to_owned(),
     })
 }
 
@@ -148,25 +91,23 @@ async fn database_file_usage(pool: &SqlitePool) -> DatabaseUsage {
 }
 
 pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
-    let disk = command_output("df", &["-B1", "--output=size,used,avail,pcent,target", "/"])
-        .await
-        .and_then(|output| parse_df(&output));
+    // The root mount is backed by the EC2 root EBS volume. Include both source
+    // and mountpoint so the UI can identify exactly which filesystem was read.
+    let disk_output = command_output(
+        "df",
+        &["-B1", "--output=size,used,avail,pcent,source,target", "/"],
+    )
+    .await;
+    let disk = disk_output.as_deref().and_then(parse_df);
+    let disk_error = if disk.is_some() {
+        None
+    } else if disk_output.is_none() {
+        Some("The df command failed or is unavailable on the server.".to_owned())
+    } else {
+        Some("The df output did not match the expected six-column format.".to_owned())
+    };
 
-    let tokens = table_usage(pool, "token_states",
-        "SELECT COALESCE(SUM(length(payload_json)),0) FROM token_states").await;
-    let launches = table_usage(pool, "token_launches",
-        "SELECT COALESCE(SUM(length(payload_json)),0) FROM token_launches").await;
-    let events = table_usage(pool, "solana_raw_events",
-        "SELECT COALESCE(SUM(length(event_json)),0) FROM solana_raw_events").await;
-    let chart_data = table_usage(pool, "chart_candles",
-        "SELECT COALESCE(SUM(length(payload_json)),0) FROM chart_candles").await;
-    let ledger = table_usage(pool, "paper_ledger",
-        "SELECT COALESCE(SUM(length(id)+length(kind)+COALESCE(length(reference),0)),0) FROM paper_ledger").await;
-    let positions = table_usage(pool, "portfolio_positions",
-        "SELECT COALESCE(SUM(length(payload_json)),0) FROM portfolio_positions").await;
-    let paper_bytes = ledger.logical_bytes.unwrap_or(0).saturating_add(positions.logical_bytes.unwrap_or(0));
-    let paper_records = ledger.records.unwrap_or(0).saturating_add(positions.records.unwrap_or(0));
-    let database = database_file_usage(pool).await;
+    let database = database_file_usage(pool);
 
     let journal_report = command_output("journalctl", &["--disk-usage"]).await;
     let journal_size = journal_report.as_deref().and_then(parse_human_bytes);
@@ -179,41 +120,7 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
 
     StorageOverview {
         disk,
-        categories: Categories {
-            tokens,
-            launches: launches.clone(),
-            events,
-            discovery: DataCategory {
-                logical_bytes: launches.logical_bytes,
-                records: launches.records,
-                physical_bytes: None,
-                note: "Discovery history is represented by launch records; this overlaps the Launches category.".into(),
-            },
-            chart_data,
-            paper_trading: DataCategory {
-                logical_bytes: Some(paper_bytes),
-                records: Some(paper_records),
-                physical_bytes: None,
-                note: "Logical paper-ledger and position payload sizes; included in SQLite database size.".into(),
-            },
-            engine_logs: DataCategory {
-                logical_bytes: None, records: None, physical_bytes: None,
-                note: "NodeX currently writes tracing output to stdout, captured by systemd. Its bytes cannot be isolated from journald's system-wide total.".into(),
-            },
-            system_logs: DataCategory {
-                logical_bytes: journal_size, records: None, physical_bytes: None,
-                note: "System-wide systemd journal size; not additive to database category.".into(),
-            },
-            database: DataCategory {
-                logical_bytes: Some(database.total_file_bytes), records: None,
-                physical_bytes: Some(database.total_file_bytes),
-                note: "Physical SQLite database, WAL and SHM files.".into(),
-            },
-            other: DataCategory {
-                logical_bytes: None, records: None, physical_bytes: None,
-                note: "Not yet attributed; compare root filesystem usage against measured application files.".into(),
-            },
-        },
+        disk_error,
         database,
         system_journal: journal,
         updated_at: chrono::Utc::now().to_rfc3339(),
@@ -238,3 +145,27 @@ pub async fn cleanup_system_journal() -> Result<String, String> {
     }
     Ok(String::from_utf8_lossy(&vacuum.stdout).trim().to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_root_filesystem_capacity_and_mountpoint() {
+        let output = "  1B-blocks       Used       Avail Use% Filesystem       Mounted on\n85819633664 7597551616 78222082048   9% /dev/nvme0n1p1 /\n";
+        let disk = parse_df(output).expect("valid df output should parse");
+        assert_eq!(disk.total_bytes, 85_819_633_664);
+        assert_eq!(disk.used_bytes, 7_597_551_616);
+        assert_eq!(disk.available_bytes, 78_222_082_048);
+        assert_eq!(disk.used_percent, "9");
+        assert_eq!(disk.filesystem, "/dev/nvme0n1p1");
+        assert_eq!(disk.mountpoint, "/");
+    }
+
+    #[test]
+    fn rejects_df_output_with_missing_columns() {
+        let output = "1B-blocks Used Avail Use% Mounted on\n85819633664 7597551616 78222082048 9% /\n";
+        assert!(parse_df(output).is_none());
+    }
+}
+
