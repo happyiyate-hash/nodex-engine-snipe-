@@ -218,6 +218,7 @@ fn start_pumpswap_activity_processor(
     events: broadcast::Sender<serde_json::Value>,
     control: Arc<RwLock<EngineControl>>,
     rpc: Option<SolanaRpc>,
+    registry: TokenRegistry,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     tokio::spawn(async move {
@@ -362,6 +363,11 @@ fn start_pumpswap_activity_processor(
                         let Some(pool_details) = pool_details else {
                             continue;
                         };
+                        // Observe PumpSwap only for tokens already discovered by NodeX.
+                        // Security approval gates execution, not read-only market visibility.
+                        if registry.get(&pool_details.base_mint).is_none() {
+                            continue;
+                        }
                         let pool_details = Some(pool_details);
                         let pair_status = if pool_details.is_some() {
                             "resolved"
@@ -2195,6 +2201,7 @@ async fn main() -> anyhow::Result<()> {
         events.clone(),
         control.clone(),
         rpc.clone(),
+        token_registry.clone(),
     );
 
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
