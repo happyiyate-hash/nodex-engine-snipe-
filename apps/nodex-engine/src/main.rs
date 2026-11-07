@@ -1,4 +1,5 @@
 mod token_details;
+mod websocket;
 
 use axum::{
     extract::{
@@ -29,16 +30,15 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
-
-// Temporary operator key for the current paper-trading deployment.
-const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
 
 #[derive(Clone)]
 struct AppState {
     events: broadcast::Sender<serde_json::Value>,
+    gateway: websocket::Gateway,
+    database_changes: tokio::sync::mpsc::Sender<serde_json::Value>,
     stream_status: Arc<RwLock<StreamStatus>>,
     pumpswap_status: Arc<RwLock<StreamStatus>>,
     wallet: Arc<RwLock<PaperWallet>>,
@@ -1313,6 +1313,11 @@ fn is_token_detail_event(event_type: &str) -> bool {
 }
 
 fn is_frontend_event(value: &serde_json::Value) -> bool {
+    websocket::is_frontend_event(value)
+}
+
+/*
+fn legacy_is_frontend_event(value: &serde_json::Value) -> bool {
     matches!(
         value.get("type").and_then(serde_json::Value::as_str),
         Some("connection_status")
@@ -1357,6 +1362,7 @@ fn is_frontend_event(value: &serde_json::Value) -> bool {
             | Some("command_rejected")
     )
 }
+*/
 
 async fn issue_ws_ticket(
     State(state): State<AppState>,
@@ -1425,7 +1431,7 @@ async fn ws_handler(
 async fn client_socket(socket: WebSocket, state: AppState) {
     static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
     let (mut sender, mut receiver_socket) = socket.split();
-    let mut receiver = state.events.subscribe();
+    let mut receiver = state.gateway.subscribe();
     let mut subscribed_tokens = HashSet::<String>::new();
     let status = state.stream_status.read().await.clone();
     let pumpswap_status = state.pumpswap_status.read().await.clone();
@@ -1807,6 +1813,8 @@ async fn main() -> anyhow::Result<()> {
         nodex_persistence::load_portfolio_positions(&db).await?,
     ));
     let (events, _) = broadcast::channel(8192);
+    let (database_changes, database_change_receiver) = mpsc::channel(512);
+    let gateway = websocket::Gateway::start(events.subscribe(), database_change_receiver, 4096);
     if let (Some(rpc_client), Some(address)) = (
         (!config.solana_http_urls.is_empty())
             .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
@@ -1814,7 +1822,7 @@ async fn main() -> anyhow::Result<()> {
     ) {
         let profile_for_sync = profile_state.clone();
         let database_for_sync = db.clone();
-        let events_for_sync = events.clone();
+        let database_changes_for_sync = database_changes.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1851,8 +1859,8 @@ async fn main() -> anyhow::Result<()> {
                         {
                             tracing::error!(%error, "Could not persist synchronized wallet profile");
                         } else {
-                            let _ = events_for_sync
-                                .send(json!({"type":"profile_updated","data":snapshot}));
+                            let _ = database_changes_for_sync
+                                .send(json!({"type":"profile_updated","data":snapshot})).await;
                         }
                     }
                     Err(error) => {
@@ -1946,13 +1954,15 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         events,
+        gateway,
+        database_changes,
         stream_status,
         pumpswap_status,
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
         database: db.clone(),
         control,
-        admin_api_key: Some(NODEX_ADMIN_API_KEY.to_owned()),
+        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok(),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
         runtime_enabled,
         market_monitor,
