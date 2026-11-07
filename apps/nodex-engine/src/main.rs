@@ -676,7 +676,18 @@ fn start_launch_processor(
                                 "discovery":snapshot.data.get("discovery").cloned().unwrap_or(serde_json::Value::Null)
                             }
                         }));
-                        let _ = events.send(json!({"type":"launch_detected","data":launch}));
+                        let mut legacy_launch = serde_json::to_value(&launch).unwrap_or_else(|_| json!({}));
+                        if let Some(object) = legacy_launch.as_object_mut() {
+                            object.insert("name".into(), json!(metadata.name));
+                            object.insert("symbol".into(), json!(metadata.symbol));
+                            object.insert("decimals".into(), json!(metadata.decimals));
+                            object.insert("logo_url".into(), json!(metadata.logo_url));
+                            object.insert("metadata_uri".into(), json!(metadata.metadata_uri));
+                            object.insert("metadata_status".into(), json!(metadata.status));
+                        }
+                        // Keep the legacy event enriched so existing clients also receive
+                        // metadata before the scanner begins.
+                        let _ = events.send(json!({"type":"launch_detected","data":legacy_launch}));
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
