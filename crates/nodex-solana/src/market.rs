@@ -29,6 +29,7 @@ struct MarketSubscription {
 enum MarketCommand {
     Subscribe(MarketSubscription),
     UnsubscribeMint(String),
+    Stop,
 }
 
 #[derive(Clone)]
@@ -56,6 +57,12 @@ impl MarketMonitor {
             .await
             .map_err(|_| anyhow!("market monitor task is not running"))?;
         Ok(account)
+    }
+
+    /// Stop the monitor permanently. The task will close its active WebSocket and will not reconnect.
+    pub async fn stop(&self) -> Result<()> {
+        self.commands.send(MarketCommand::Stop).await
+            .map_err(|_| anyhow!("market monitor task is not running"))
     }
 
     /// Stop monitoring every account currently associated with a token mint.
@@ -108,8 +115,12 @@ async fn run_market_monitor(
     loop {
         let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
         match connect_market_stream(&active_url, &events, &mut commands, &mut desired).await {
-            // A disconnect or provider rejection rotates to the next configured Helius key.
-            Ok(()) => {
+            // An explicit stop is terminal; upstream disconnects still reconnect.
+            Ok(false) => {
+                let _ = events.send(json!({"type":"market_monitor_status","data":{"connected":false,"stopped":true,"desired_accounts":0,"received_at":chrono::Utc::now().to_rfc3339()}}));
+                return;
+            }
+            Ok(true) => {
                 reconnect_count = reconnect_count.saturating_add(1);
                 let message =
                     "Market account WebSocket closed by the upstream provider; reconnecting."
@@ -571,7 +582,7 @@ async fn connect_market_stream(
     events: &broadcast::Sender<Value>,
     commands: &mut mpsc::Receiver<MarketCommand>,
     desired: &mut HashMap<String, MarketSubscription>,
-) -> Result<()> {
+) -> Result<bool> {
     let (socket, _) = connect_async(ws_url)
         .await
         .context("connecting market monitor WebSocket")?;
@@ -616,6 +627,7 @@ async fn connect_market_stream(
                     return Err(anyhow!("market monitor command channel closed"));
                 };
                 let subscription = match command {
+                    MarketCommand::Stop => return Ok(false),
                     MarketCommand::UnsubscribeMint(mint) => {
                         let (pending_ids, active_ids) = remove_mint_subscriptions(
                             &mint, desired, &mut pending, &mut active,
@@ -668,7 +680,7 @@ async fn connect_market_stream(
             }
             message = stream.next() => {
                 let Some(message) = message else {
-                    return Ok(());
+                    return Ok(true);
                 };
                 match message.context("reading market monitor WebSocket")? {
                     Message::Text(text) => {
