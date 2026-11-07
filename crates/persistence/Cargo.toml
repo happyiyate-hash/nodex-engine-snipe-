@@ -11,3 +11,5 @@ nodex-core = { path = "../nodex-core" }
 nodex-trading = { path = "../nodex-trading" }
 serde_json.workspace = true
 sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
