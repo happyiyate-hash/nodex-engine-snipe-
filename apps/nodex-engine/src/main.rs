@@ -218,7 +218,6 @@ fn start_pumpswap_activity_processor(
     events: broadcast::Sender<serde_json::Value>,
     control: Arc<RwLock<EngineControl>>,
     rpc: Option<SolanaRpc>,
-    registry: TokenRegistry,
 ) {
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     tokio::spawn(async move {
@@ -2196,7 +2195,6 @@ async fn main() -> anyhow::Result<()> {
         events.clone(),
         control.clone(),
         rpc.clone(),
-        token_registry.clone(),
     );
 
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
