@@ -475,10 +475,13 @@ fn start_token_state_projector(
             let Some(kind) = event.get("type").and_then(serde_json::Value::as_str) else {
                 continue;
             };
+            if control.read().await.paused {
+                continue;
+            }
             let Some(data) = event.get("data").cloned() else {
                 continue;
             };
-            let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str) else {
+            let Some(mint = data.get("mint_address").and_then(serde_json::Value::as_str) else {
                 continue;
             };
             if kind == "token_rejected_cleanup" {
@@ -1380,7 +1383,14 @@ async fn update_engine_control(
     let snapshot = control.clone();
     drop(control);
     state.runtime_enabled.send_replace(!snapshot.paused);
-    if !snapshot.paused {
+    if snapshot.paused {
+        let monitor = state.market_monitor.write().await.take();
+        if let Some(monitor) = monitor {
+            if let Err(error) = monitor.stop().await {
+                tracing::warn!(%error, "Could not stop market-account WebSocket monitor");
+            }
+        }
+    } else {
         ensure_market_monitor(&state).await;
     }
     let _ = state
@@ -1436,6 +1446,13 @@ async fn clear_token_and_event_history(
         ));
     }
 
+    if !state.control.read().await.paused {
+        return Err((
+            StatusCode::CONFLICT,
+            "Pause the engine before clearing history.".to_string(),
+        ));
+    }
+
     let (deleted_token_records, deleted_raw_event_records) =
         nodex_persistence::clear_token_and_event_history(&state.database)
             .await
@@ -1457,7 +1474,6 @@ async fn clear_token_and_event_history(
         "deleted_token_records": deleted_token_records,
         "deleted_raw_event_records": deleted_raw_event_records,
         "preserved": [
-            "live token discovery and market subscriptions",
             "paper wallet and ledger",
             "database schema and configuration",
             "source code, API keys, and environment configuration"
@@ -2146,6 +2162,19 @@ async fn main() -> anyhow::Result<()> {
     nodex_persistence::save_profile(&db, &profile).await?;
     let profile_state = Arc::new(RwLock::new(profile));
     let (events, _) = broadcast::channel(8192);
+    let control = Arc::new(RwLock::new(EngineControl {
+        paused: true,
+        mode: "paper".into(),
+        available_modes: TradingModeAvailability {
+            paper: true,
+            real: false,
+        },
+        real_trading_available: false,
+        token_discovery_enabled: false,
+        new_entries_enabled: false,
+        position_monitoring_enabled: true,
+    }));
+
     if let (Some(rpc_client), Some(address)) = (
         (!config.solana_http_urls.is_empty())
             .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
@@ -2154,13 +2183,20 @@ async fn main() -> anyhow::Result<()> {
         let profile_for_sync = profile_state.clone();
         let database_for_sync = db.clone();
         let events_for_sync = events.clone();
+        let sync_control = control.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                if sync_control.read().await.paused {
+                    continue;
+                }
                 match rpc_client.get_balance_lamports(&address).await {
                     Ok(lamports) => {
+                        if sync_control.read().await.paused {
+                            continue;
+                        }
                         let balance_sol = lamports as f64 / LAMPORTS_PER_SOL as f64;
                         let mut current = profile_for_sync.write().await;
                         if let Some(wallet) = current
@@ -2213,19 +2249,6 @@ async fn main() -> anyhow::Result<()> {
 
     // The process starts online but idle. An explicit operator Start/Resume command
     // is required before launch processors accept discovery work.
-    let control = Arc::new(RwLock::new(EngineControl {
-        paused: true,
-        mode: "paper".into(),
-        available_modes: TradingModeAvailability {
-            paper: true,
-            real: false,
-        },
-        real_trading_available: false,
-        token_discovery_enabled: false,
-        new_entries_enabled: false,
-        position_monitoring_enabled: true,
-    }));
-
     // Keep canonical token state synchronized from independent worker events.
     start_token_state_projector(
         events.subscribe(),
@@ -2241,6 +2264,7 @@ async fn main() -> anyhow::Result<()> {
         events.clone(),
         db.clone(),
         token_registry.clone(),
+        control.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = (!config.solana_http_urls.is_empty())
@@ -2296,6 +2320,7 @@ async fn main() -> anyhow::Result<()> {
     // Batch writes avoid one SQLite transaction/fsync per Solana notification.
     let mut persistence_receiver = events.subscribe();
     let persistence_db = db.clone();
+    let persistence_control = control.clone();
     tokio::spawn(async move {
         let mut pending = Vec::<serde_json::Value>::with_capacity(100);
         let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -2310,6 +2335,10 @@ async fn main() -> anyhow::Result<()> {
                         {
                             pending.push(event);
                             if pending.len() == 100 {
+                                if persistence_control.read().await.paused {
+                                    pending.clear();
+                                    continue;
+                                }
                                 match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
                                     Ok(()) => pending.clear(),
                                     Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
@@ -2327,7 +2356,9 @@ async fn main() -> anyhow::Result<()> {
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = flush_tick.tick() => {
-                    if !pending.is_empty() {
+                    if persistence_control.read().await.paused {
+                        pending.clear();
+                    } else if !pending.is_empty() {
                         match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
                             Ok(()) => pending.clear(),
                             Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
