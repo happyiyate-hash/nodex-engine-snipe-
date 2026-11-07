@@ -7,6 +7,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("engine_state")
             | Some("trading_config_updated")
             | Some("launch_detected")
+            | Some("new_token_detected")
             | Some("token_removed")
             | Some("token_approval_pending")
             | Some("token_scan_started")
