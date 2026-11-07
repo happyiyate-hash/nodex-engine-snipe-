@@ -2207,9 +2207,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    if let Some(ws_url) = config.solana_ws_url.clone() {
+    if !config.solana_ws_urls.is_empty() {
         spawn_controlled_log_stream(
-            ws_url,
+            config.solana_ws_urls.clone(),
             config.pump_fun_program_id.clone(),
             events.clone(),
             stream_status.clone(),
