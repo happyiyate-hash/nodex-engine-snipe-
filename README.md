@@ -47,6 +47,8 @@ The engine listens on `http://127.0.0.1:8080` by default.
 - `GET /api/v1/config/trading` — complete persisted paper-strategy configuration.
 - `PUT /api/v1/config/trading` — replace the strategy configuration; requires `x-nodex-admin-key`.
  — paper mode and upstream stream status.
+- `GET /api/v1/admin/storage/overview` — operator-authenticated filesystem, SQLite table payload, database/WAL/SHM and systemd journal measurements; requires `x-nodex-admin-key`.
+- `POST /api/v1/admin/storage/system-journal/cleanup` — operator-authenticated, opt-in system journal rotation and vacuum to a 200 MB target. Requires `NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP=true` and sufficient OS permissions for the NodeX service.
 - `GET /api/v1/paper-wallet` — persisted paper wallet snapshot.
 - `GET /api/v1/tokens/recent?limit=100` — most recently persisted decoded Pump.fun launches (limit is clamped to 1–500).
 - `GET /api/v1/tokens/{mint}/scan` — on-demand SPL Token / Token-2022 mint authority and extension scan, enriched with a RugCheck summary when available.
@@ -111,3 +113,11 @@ After a newly detected Pump.fun launch has been persisted, NodeX subscribes to i
 - `market_monitor_status`, `market_subscription_active`, and `diagnostic` — connection/subscription health and decoding failures.
 
 Price changes are based on account-state samples, not a fixed polling loop. The price history is in-memory and resets on process restart or market-stream reconnect. The current price monitor only supports SOL-quoted Pump.fun curves. PumpSwap pool discovery, effective quote-vault reserve handling, persisted price history, stale-feed gates, volume/buy-sell pressure, and strategy triggers are subsequent milestones.
+
+### Storage management API
+
+Set `NODEX_ADMIN_API_KEY` to a long random secret in the server environment. The storage overview endpoint reports the root filesystem via `df`, logical payload estimates for token, launch, raw-event, chart and paper-trading tables, physical SQLite database/WAL/SHM file sizes, and the systemd journal's reported total size.
+
+SQLite category payload estimates overlap the physical database size and must not be summed with it. Launch and discovery figures refer to the same launch-history rows. NodeX currently writes tracing output to stdout, so systemd captures it in journald; journald does not provide a reliable per-service disk-size breakdown. The journal size is therefore reported as a system-wide value, not falsely attributed to NodeX alone.
+
+System journal cleanup is disabled by default. Only enable `NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP=true` after reviewing the system-wide effect. The endpoint rotates the journal and vacuums archived journal data toward 200 MB, subject to the service's operating-system permissions. It does not delete SQLite data, token records, wallet data, or trading history. The engine process is not granted unrestricted root access.
