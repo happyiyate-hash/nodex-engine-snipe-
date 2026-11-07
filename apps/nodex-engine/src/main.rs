@@ -38,7 +38,6 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 // Temporary operator key for the current paper-trading deployment.
-const NODEX_ADMIN_API_KEY: &str = "n80JHBorD0oFUhPQtpZrwEV4K4o9EyLw";
 
 #[derive(Clone)]
 struct BatchTracker {
@@ -2448,7 +2447,7 @@ async fn main() -> anyhow::Result<()> {
         rpc,
         database: db.clone(),
         control,
-        admin_api_key: Some(NODEX_ADMIN_API_KEY.to_owned()),
+        admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok(),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
         runtime_enabled,
         market_monitor,
