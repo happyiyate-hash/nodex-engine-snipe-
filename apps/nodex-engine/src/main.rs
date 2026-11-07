@@ -2355,6 +2355,7 @@ async fn main() -> anyhow::Result<()> {
         token_registry.clone(),
         profile_state.clone(),
         control.clone(),
+        db_write_gate.clone(),
     );
     // Candles are generated only for tokens whose security decision is APPROVED.
     chart_service::start_chart_service(
