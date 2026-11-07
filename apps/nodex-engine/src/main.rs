@@ -53,6 +53,7 @@ struct AppState {
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
+    portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +208,7 @@ fn start_token_state_projector(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
+    portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
     control: Arc<RwLock<EngineControl>>,
 ) {
     tokio::spawn(async move {
@@ -265,11 +267,15 @@ fn start_token_state_projector(
             };
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
-                    if let Err(error) =
-                        nodex_persistence::save_token_state(&database, &snapshot).await
-                    {
-                        tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
-                        continue;
+                    // Price ticks are runtime state, not durable history. Persist only
+                    // non-price state transitions; Analytics owns chart history separately.
+                    if kind != "market_price_update" {
+                        if let Err(error) =
+                            nodex_persistence::save_token_state(&database, &snapshot).await
+                        {
+                            tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
+                            continue;
+                        }
                     }
                     if kind == "market_price_update" {
                         let event_timestamp_ms = data
@@ -286,15 +292,6 @@ fn start_token_state_projector(
                                 "market_patch":data.clone()
                             }
                         }));
-                    } else if kind == "pumpswap_volume_update" {
-                        let _ = events.send(json!({
-                            "type":"token_statistics_update",
-                            "data":{
-                                "mint_address":mint,
-                                "state_version":snapshot.version,
-                                "statistics_patch":data.clone()
-                            }
-                        }));
                     } else {
                         let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
                     }
@@ -304,141 +301,64 @@ fn start_token_state_projector(
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
                         {
-                            match nodex_persistence::load_portfolio_positions(&database).await {
-                                Ok(mut positions) => {
-                                    for position in positions.iter_mut().filter(|position| {
-                                        position
-                                            .get("mint_address")
-                                            .and_then(serde_json::Value::as_str)
-                                            == Some(mint)
-                                            && position
-                                                .get("status")
-                                                .and_then(serde_json::Value::as_str)
-                                                == Some("open")
-                                    }) {
-                                        let quantity = position
-                                            .get("token_quantity")
-                                            .or_else(|| position.get("quantity"))
-                                            .and_then(serde_json::Value::as_f64)
-                                            .unwrap_or(0.0);
-                                        let cost_basis = position
-                                            .get("cost_basis_sol")
-                                            .or_else(|| position.get("invested_sol"))
-                                            .and_then(serde_json::Value::as_f64)
-                                            .unwrap_or(0.0);
-                                        let current_value = quantity * price_sol;
-                                        let pnl = current_value - cost_basis;
-                                        if let Some(object) = position.as_object_mut() {
-                                            object.insert(
-                                                "current_price_sol".into(),
-                                                json!(price_sol),
-                                            );
-                                            object.insert(
-                                                "current_value_sol".into(),
-                                                json!(current_value),
-                                            );
-                                            object.insert("unrealized_pnl_sol".into(), json!(pnl));
-                                            object.insert(
-                                                "unrealized_pnl_pct".into(),
-                                                json!(if cost_basis > 0.0 {
-                                                    pnl / cost_basis * 100.0
-                                                } else {
-                                                    0.0
-                                                }),
-                                            );
-                                            object.insert(
-                                                "marked_at".into(),
-                                                json!(chrono::Utc::now().to_rfc3339()),
-                                            );
-                                        }
-                                        let position_id = position
-                                            .get("position_id")
-                                            .and_then(serde_json::Value::as_str)
-                                            .unwrap_or(mint);
-                                        if let Err(error) =
-                                            nodex_persistence::save_portfolio_position(
-                                                &database,
-                                                position_id,
-                                                mint,
-                                                "open",
-                                                position,
-                                            )
-                                            .await
-                                        {
-                                            tracing::error!(%error, mint_address = mint, position_id, "Could not persist marked portfolio position");
-                                        } else {
-                                            let _ = events.send(json!({
-                                                "type":"position_updated",
-                                                "data":position.clone()
-                                            }));
-                                        }
-                                    }
-                                    let refreshed =
-                                        match nodex_persistence::load_portfolio_positions(&database)
-                                            .await
-                                        {
-                                            Ok(items) => items,
-                                            Err(error) => {
-                                                tracing::error!(%error, "Could not reload marked portfolio positions");
-                                                Vec::new()
-                                            }
-                                        };
-                                    let open: Vec<serde_json::Value> = refreshed
-                                        .iter()
-                                        .filter(|item| {
-                                            item.get("status").and_then(serde_json::Value::as_str)
-                                                == Some("open")
-                                        })
-                                        .cloned()
-                                        .collect();
-                                    let sum = |items: &[serde_json::Value], field: &str| -> f64 {
-                                        items
-                                            .iter()
-                                            .filter_map(|item| {
-                                                item.get(field).and_then(serde_json::Value::as_f64)
-                                            })
-                                            .sum()
-                                    };
-                                    let position_count = open.len();
-                                    let portfolio = json!({
-                                        "total_value_sol": sum(&open, "current_value_sol"),
-                                        "total_invested_sol": sum(&open, "cost_basis_sol"),
-                                        "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
-                                        "realized_pnl_sol": sum(&refreshed, "realized_pnl_sol"),
-                                        "positions": open,
-                                        "position_count": position_count
-                                    });
-                                    let mut current_profile = profile.write().await;
-                                    if let Some(object) = current_profile.as_object_mut() {
-                                        object.insert("portfolio".into(), portfolio.clone());
-                                    }
-                                    let profile_snapshot = current_profile.clone();
-                                    drop(current_profile);
-                                    if let Err(error) = nodex_persistence::save_profile(
-                                        &database,
-                                        &profile_snapshot,
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(%error, "Could not persist recalculated profile portfolio");
-                                    } else {
-                                        let _ = events.send(json!({
-                                            "type":"portfolio_summary_updated",
-                                            "data":{
-                                                "total_value_sol":portfolio["total_value_sol"],
-                                                "total_invested_sol":portfolio["total_invested_sol"],
-                                                "unrealized_pnl_sol":portfolio["unrealized_pnl_sol"],
-                                                "realized_pnl_sol":portfolio["realized_pnl_sol"],
-                                                "position_count":portfolio["position_count"],
-                                                "updated_at":chrono::Utc::now().to_rfc3339()
-                                            }
-                                        }));
-                                    }
+                            // Mark open positions in memory. Never read/write SQLite for every tick.
+                            let mut positions = portfolio_positions.write().await;
+                            for position in positions.iter_mut().filter(|position| {
+                                position.get("mint_address").and_then(serde_json::Value::as_str) == Some(mint)
+                                    && position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                            }) {
+                                let quantity = position.get("token_quantity")
+                                    .or_else(|| position.get("quantity"))
+                                    .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                let cost_basis = position.get("cost_basis_sol")
+                                    .or_else(|| position.get("invested_sol"))
+                                    .and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                                let current_value = quantity * price_sol;
+                                let pnl = current_value - cost_basis;
+                                if let Some(object) = position.as_object_mut() {
+                                    object.insert("current_price_sol".into(), json!(price_sol));
+                                    object.insert("current_value_sol".into(), json!(current_value));
+                                    object.insert("unrealized_pnl_sol".into(), json!(pnl));
+                                    object.insert("unrealized_pnl_pct".into(), json!(
+                                        if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 }
+                                    ));
+                                    object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
                                 }
-                                Err(error) => {
-                                    tracing::error!(%error, "Could not load portfolio positions for market mark")
-                                }
+                                let _ = events.send(json!({"type":"position_updated","data":position.clone()}));
                             }
+                            let open: Vec<serde_json::Value> = positions.iter()
+                                .filter(|item| item.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+                                .cloned().collect();
+                            let sum = |items: &[serde_json::Value], field: &str| -> f64 {
+                                items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
+                            };
+                            let portfolio = json!({
+                                "total_value_sol": sum(&open, "current_value_sol"),
+                                "total_invested_sol": sum(&open, "cost_basis_sol"),
+                                "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
+                                "realized_pnl_sol": sum(&positions, "realized_pnl_sol"),
+                                "positions": open,
+                                "position_count": open.len()
+                            });
+                            drop(positions);
+                            let mut current_profile = profile.write().await;
+                            if let Some(object) = current_profile.as_object_mut() {
+                                object.insert("portfolio".into(), portfolio.clone());
+                            }
+                            let profile_snapshot = current_profile.clone();
+                            drop(current_profile);
+                            let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                            let _ = events.send(json!({
+                                "type":"portfolio_summary_updated",
+                                "data":{
+                                    "total_value_sol":portfolio["total_value_sol"],
+                                    "total_invested_sol":portfolio["total_invested_sol"],
+                                    "unrealized_pnl_sol":portfolio["unrealized_pnl_sol"],
+                                    "realized_pnl_sol":portfolio["realized_pnl_sol"],
+                                    "position_count":portfolio["position_count"],
+                                    "updated_at":chrono::Utc::now().to_rfc3339()
+                                }
+                            }));
                         }
                     }
                 }
@@ -1336,34 +1256,21 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
 /// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
 /// paper-trading funds and positions remain separate accounting domains.
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let positions = state.portfolio_positions.read().await.clone();
     let mut profile = state.profile.read().await.clone();
-    let positions = match nodex_persistence::load_portfolio_positions(&state.database).await {
-        Ok(positions) => positions,
-        Err(error) => {
-            tracing::error!(%error, "Could not load portfolio positions for profile response");
-            Vec::new()
-        }
-    };
-    let open_positions: Vec<serde_json::Value> = positions
-        .iter()
-        .filter(|position| {
-            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-        })
-        .cloned()
-        .collect();
+    let open_positions: Vec<serde_json::Value> = positions.iter()
+        .filter(|position| position.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+        .cloned().collect();
     let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
-        items
-            .iter()
-            .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
-            .sum()
+        items.iter().filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64)).sum()
     };
-    let position_count = open_positions.len();
     let portfolio = json!({
         "total_value_sol": sum_field(&open_positions, "current_value_sol"),
+        "total_invested_sol": sum_field(&open_positions, "cost_basis_sol"),
         "unrealized_pnl_sol": sum_field(&open_positions, "unrealized_pnl_sol"),
         "realized_pnl_sol": sum_field(&positions, "realized_pnl_sol"),
         "positions": open_positions,
-        "position_count": position_count
+        "position_count": open_positions.len()
     });
     if let Some(object) = profile.as_object_mut() {
         object.insert("portfolio".into(), portfolio);
@@ -1895,6 +1802,9 @@ async fn main() -> anyhow::Result<()> {
     }
     nodex_persistence::save_profile(&db, &profile).await?;
     let profile_state = Arc::new(RwLock::new(profile));
+    let portfolio_positions = Arc::new(RwLock::new(
+        nodex_persistence::load_portfolio_positions(&db).await?,
+    ));
     let (events, _) = broadcast::channel(8192);
     if let (Some(rpc_client), Some(address)) = (
         (!config.solana_http_urls.is_empty())
@@ -1983,6 +1893,7 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
         token_registry.clone(),
         profile_state.clone(),
+        portfolio_positions.clone(),
         control.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
@@ -2048,6 +1959,7 @@ async fn main() -> anyhow::Result<()> {
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
         profile: profile_state,
+        portfolio_positions,
     };
     let app = Router::new()
         .route("/health", get(health))
