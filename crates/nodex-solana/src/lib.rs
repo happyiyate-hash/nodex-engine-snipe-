@@ -12,7 +12,13 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{stream, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::{atomic::{AtomicUsize, Ordering}, Arc}};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -124,26 +130,38 @@ impl SolanaRpc {
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
-            let response = match self.client.post(url)
+            let response = match self
+                .client
+                .post(url)
                 .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
-                .send().await {
+                .send()
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     last_error = Some(anyhow!("Solana RPC request failed: {error}"));
-                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
             };
             let status = response.status();
             if !status.is_success() {
                 last_error = Some(anyhow!("Solana RPC returned HTTP {status}"));
-                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 {
-                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                if status.as_u16() == 429
+                    || status.is_server_error()
+                    || status.as_u16() == 401
+                    || status.as_u16() == 403
+                {
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
             }
-            let decoded = response.json::<RpcResponse<T>>().await
+            let decoded = response
+                .json::<RpcResponse<T>>()
+                .await
                 .context("decoding Solana JSON-RPC response")?;
             if let Some(error) = decoded.error {
                 let message = error.message;
@@ -152,7 +170,8 @@ impl SolanaRpc {
                     || message.contains("429");
                 last_error = Some(anyhow!("Solana RPC {method} error: {message}"));
                 if limited {
-                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
@@ -163,7 +182,8 @@ impl SolanaRpc {
             }
             return Err(anyhow!("Solana RPC {method} returned no result"));
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
     }
 
     /// Fetch one confirmed account's owner and raw bytes for verified program-account decoding.
@@ -579,26 +599,38 @@ impl SolanaRpc {
                 Ok(response) => response,
                 Err(error) => {
                     last_error = Some(anyhow!("sending Solana getTransaction request: {error}"));
-                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
             };
             let status = response.status();
             if !status.is_success() {
                 last_error = Some(anyhow!("Solana getTransaction returned HTTP {status}"));
-                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 {
-                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                if status.as_u16() == 429
+                    || status.is_server_error()
+                    || status.as_u16() == 401
+                    || status.as_u16() == 403
+                {
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
             }
-            let decoded = response.json::<RpcResponse<Value>>().await.context("decoding getTransaction response")?;
+            let decoded = response
+                .json::<RpcResponse<Value>>()
+                .await
+                .context("decoding getTransaction response")?;
             if let Some(error) = decoded.error {
                 let message = error.message;
-                let limited = message.to_ascii_lowercase().contains("rate") || message.to_ascii_lowercase().contains("too many") || message.contains("429");
+                let limited = message.to_ascii_lowercase().contains("rate")
+                    || message.to_ascii_lowercase().contains("too many")
+                    || message.contains("429");
                 last_error = Some(anyhow!("Solana RPC getTransaction error: {message}"));
                 if limited {
-                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
@@ -606,7 +638,8 @@ impl SolanaRpc {
             self.active_http_index.store(index, Ordering::Relaxed);
             return Ok(decoded.result.filter(|value| !value.is_null()));
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
     }
 }
 
