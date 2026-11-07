@@ -2135,7 +2135,6 @@ fn spawn_batched_discovery_stream(
     recovery_rpc: Option<SolanaRpc>,
     mut runtime_enabled: watch::Receiver<bool>,
     mut completed_batches: watch::Receiver<u64>,
-    batch_tracker: BatchTracker,
 ) {
     let checkpoint = Arc::new(Mutex::new(None::<(u64, String)>));
     tokio::spawn(async move {
@@ -2159,8 +2158,8 @@ fn spawn_batched_discovery_stream(
             tokio::select! {
                 _ = &mut stream => {
                     // The discovery socket has closed at the 100-notification limit.
-                    batch_tracker.mark_full();
-                    // Do not reconnect until all queued decoding and scanning work finishes.
+                    // The ordered discovery_batch_full event is handled by the launch processor
+                    // after all preceding launch notifications have entered the worker queue.
                     loop {
                         if *completed_batches.borrow() > batch_before {
                             let _ = events.send(json!({"type":"discovery_batch_completed","data":{
@@ -2436,7 +2435,6 @@ async fn main() -> anyhow::Result<()> {
             rpc.clone(),
             runtime_receiver.clone(),
             completed_batches_rx,
-            batch_tracker.clone(),
         );
     } else {
         tracing::warn!("Helius not configured; set HELIUS_API_KEY or SOLANA_RPC_WS_URL");
