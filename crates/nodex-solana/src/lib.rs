@@ -12,7 +12,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{stream, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::{atomic::{AtomicUsize, Ordering}, Arc}};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -86,6 +86,7 @@ pub fn decode_pump_swap_activity_logs(
 #[derive(Debug, Clone)]
 pub struct SolanaRpc {
     http_urls: Vec<String>,
+    active_http_index: Arc<AtomicUsize>,
     client: reqwest::Client,
 }
 
@@ -95,7 +96,11 @@ impl SolanaRpc {
     }
 
     pub fn new_with_urls(http_urls: Vec<String>) -> Self {
-        Self { http_urls, client: reqwest::Client::new() }
+        Self {
+            http_urls,
+            active_http_index: Arc::new(AtomicUsize::new(0)),
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Read the confirmed native SOL balance for a public wallet address.
@@ -110,18 +115,32 @@ impl SolanaRpc {
     }
 
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
+        if self.http_urls.is_empty() {
+            return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
+        }
         let mut last_error = None;
-        for (index, url) in self.http_urls.iter().enumerate() {
+        let count = self.http_urls.len();
+        let start = self.active_http_index.load(Ordering::Relaxed) % count;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let url = &self.http_urls[index];
             let response = match self.client.post(url)
                 .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
                 .send().await {
                 Ok(response) => response,
-                Err(error) => { last_error = Some(anyhow!("Solana RPC request failed: {error}")); continue; }
+                Err(error) => {
+                    last_error = Some(anyhow!("Solana RPC request failed: {error}"));
+                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
             };
             let status = response.status();
             if !status.is_success() {
                 last_error = Some(anyhow!("Solana RPC returned HTTP {status}"));
-                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 { continue; }
+                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 {
+                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
                 return Err(last_error.expect("error was set"));
             }
             let decoded = response.json::<RpcResponse<T>>().await
@@ -132,15 +151,19 @@ impl SolanaRpc {
                     || message.to_ascii_lowercase().contains("too many")
                     || message.contains("429");
                 last_error = Some(anyhow!("Solana RPC {method} error: {message}"));
-                if limited && index + 1 < self.http_urls.len() { continue; }
+                if limited {
+                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
                 return Err(last_error.expect("error was set"));
             }
             if let Some(result) = decoded.result {
+                self.active_http_index.store(index, Ordering::Relaxed);
                 return Ok(result);
             }
             return Err(anyhow!("Solana RPC {method} returned no result"));
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("No Solana HTTP RPC endpoints are configured")))
+        Err(last_error.unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
     }
 
     /// Fetch one confirmed account's owner and raw bytes for verified program-account decoding.
@@ -541,18 +564,32 @@ impl SolanaRpc {
     /// Fetches a confirmed transaction in raw JSON form, including version-0 transactions.
     /// A null result is returned as None because RPC nodes may not have indexed it yet.
     pub async fn get_transaction(&self, signature: &str) -> Result<Option<Value>> {
+        if self.http_urls.is_empty() {
+            return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
+        }
         let mut last_error = None;
-        for (index, url) in self.http_urls.iter().enumerate() {
+        let count = self.http_urls.len();
+        let start = self.active_http_index.load(Ordering::Relaxed) % count;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let url = &self.http_urls[index];
             let response = match self.client.post(url)
                 .json(&json!({"jsonrpc":"2.0","id":1,"method":"getTransaction","params":[signature,{"encoding":"json","commitment":"confirmed","maxSupportedTransactionVersion":1}]}))
                 .send().await {
                 Ok(response) => response,
-                Err(error) => { last_error = Some(anyhow!("sending Solana getTransaction request: {error}")); continue; }
+                Err(error) => {
+                    last_error = Some(anyhow!("sending Solana getTransaction request: {error}"));
+                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
             };
             let status = response.status();
             if !status.is_success() {
                 last_error = Some(anyhow!("Solana getTransaction returned HTTP {status}"));
-                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 { continue; }
+                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 401 || status.as_u16() == 403 {
+                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
                 return Err(last_error.expect("error was set"));
             }
             let decoded = response.json::<RpcResponse<Value>>().await.context("decoding getTransaction response")?;
@@ -560,12 +597,16 @@ impl SolanaRpc {
                 let message = error.message;
                 let limited = message.to_ascii_lowercase().contains("rate") || message.to_ascii_lowercase().contains("too many") || message.contains("429");
                 last_error = Some(anyhow!("Solana RPC getTransaction error: {message}"));
-                if limited && index + 1 < self.http_urls.len() { continue; }
+                if limited {
+                    self.active_http_index.store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
                 return Err(last_error.expect("error was set"));
             }
+            self.active_http_index.store(index, Ordering::Relaxed);
             return Ok(decoded.result.filter(|value| !value.is_null()));
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("No Solana HTTP RPC endpoints are configured")))
+        Err(last_error.unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
     }
 }
 
