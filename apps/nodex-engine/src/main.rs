@@ -48,6 +48,7 @@ struct AppState {
     wallet: Arc<RwLock<PaperWallet>>,
     rpc: Option<SolanaRpc>,
     database: sqlx::SqlitePool,
+    db_write_gate: Arc<RwLock<()>>,
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
     trading_settings: Arc<RwLock<TradingSettings>>,
@@ -458,6 +459,7 @@ fn start_token_state_projector(
     registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
     control: Arc<RwLock<EngineControl>>,
+    db_write_gate: Arc<RwLock<()>>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -722,6 +724,7 @@ fn start_launch_processor(
     control: Arc<RwLock<EngineControl>>,
     market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     token_registry: TokenRegistry,
+    db_write_gate: Arc<RwLock<()>>,
 ) {
     const LAUNCH_QUEUE_CAPACITY: usize = 256;
     const LAUNCH_WORKER_COUNT: usize = 4;
@@ -1338,6 +1341,11 @@ async fn update_trading_config(
     settings
         .validate()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let _write_guard = state.db_write_gate.read().await;
+    if state.control.read().await.paused {
+        return Err((StatusCode::CONFLICT,
+            "Engine paused before configuration could be persisted.".into()));
+    }
     let serialized = serde_json::to_string(&settings)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     sqlx::query(
@@ -1514,6 +1522,7 @@ async fn clear_token_and_event_history(
         ));
     }
 
+    let _maintenance_write_guard = state.db_write_gate.write().await;
     let (deleted_token_records, deleted_raw_event_records) =
         nodex_persistence::clear_token_and_event_history(&state.database)
             .await
@@ -2223,6 +2232,7 @@ async fn main() -> anyhow::Result<()> {
     nodex_persistence::save_profile(&db, &profile).await?;
     let profile_state = Arc::new(RwLock::new(profile));
     let (events, _) = broadcast::channel(8192);
+    let db_write_gate = Arc::new(RwLock::new(()));
     let control = Arc::new(RwLock::new(EngineControl {
         paused: true,
         mode: "paper".into(),
@@ -2245,6 +2255,7 @@ async fn main() -> anyhow::Result<()> {
         let database_for_sync = db.clone();
         let events_for_sync = events.clone();
         let sync_control = control.clone();
+        let sync_gate = db_write_gate.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2282,6 +2293,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                         let snapshot = current.clone();
                         drop(current);
+                        let _write_guard = sync_gate.read().await;
+                        if sync_control.read().await.paused {
+                            continue;
+                        }
                         if let Err(error) =
                             nodex_persistence::save_profile(&database_for_sync, &snapshot).await
                         {
@@ -2326,6 +2341,7 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
         token_registry.clone(),
         control.clone(),
+        db_write_gate.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = (!config.solana_http_urls.is_empty())
@@ -2346,6 +2362,7 @@ async fn main() -> anyhow::Result<()> {
             control.clone(),
             market_monitor.clone(),
             token_registry.clone(),
+            db_write_gate.clone(),
         );
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
@@ -2382,6 +2399,7 @@ async fn main() -> anyhow::Result<()> {
     let mut persistence_receiver = events.subscribe();
     let persistence_db = db.clone();
     let persistence_control = control.clone();
+    let persistence_gate = db_write_gate.clone();
     tokio::spawn(async move {
         let mut pending = Vec::<serde_json::Value>::with_capacity(100);
         let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -2396,6 +2414,11 @@ async fn main() -> anyhow::Result<()> {
                         {
                             pending.push(event);
                             if pending.len() == 100 {
+                                if persistence_control.read().await.paused {
+                                    pending.clear();
+                                    continue;
+                                }
+                                let _write_guard = persistence_gate.read().await;
                                 if persistence_control.read().await.paused {
                                     pending.clear();
                                     continue;
@@ -2420,6 +2443,11 @@ async fn main() -> anyhow::Result<()> {
                     if persistence_control.read().await.paused {
                         pending.clear();
                     } else if !pending.is_empty() {
+                        let _write_guard = persistence_gate.read().await;
+                        if persistence_control.read().await.paused {
+                            pending.clear();
+                            continue;
+                        }
                         match nodex_persistence::save_raw_solana_events(&persistence_db, &pending).await {
                             Ok(()) => pending.clear(),
                             Err(error) => tracing::error!(%error, batch_size = pending.len(), "Could not persist raw Solana event batch"),
@@ -2450,6 +2478,7 @@ async fn main() -> anyhow::Result<()> {
         wallet: Arc::new(RwLock::new(wallet)),
         rpc,
         database: db.clone(),
+        db_write_gate,
         control,
         admin_api_key: Some(NODEX_ADMIN_API_KEY.to_owned()),
         trading_settings: Arc::new(RwLock::new(trading_settings)),
