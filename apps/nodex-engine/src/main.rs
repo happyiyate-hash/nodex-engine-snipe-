@@ -53,7 +53,7 @@ struct AppState {
     trading_settings: Arc<RwLock<TradingSettings>>,
     runtime_enabled: watch::Sender<bool>,
     market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
-    solana_ws_url: Option<String>,
+    solana_ws_urls: Vec<String>,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
@@ -1887,14 +1887,14 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 async fn ensure_market_monitor(state: &AppState) {
     let mut monitor = state.market_monitor.write().await;
     if monitor.is_none() {
-        if let Some(ws_url) = state.solana_ws_url.clone() {
-            *monitor = Some(start_market_monitor(ws_url, state.events.clone()));
+        if !state.solana_ws_urls.is_empty() {
+            *monitor = Some(start_market_monitor(state.solana_ws_urls.clone(), state.events.clone()));
         }
     }
 }
 
 fn spawn_controlled_log_stream(
-    ws_url: String,
+    ws_urls: Vec<String>,
     program_id: String,
     events: broadcast::Sender<serde_json::Value>,
     status: Arc<RwLock<StreamStatus>>,
@@ -1909,7 +1909,7 @@ fn spawn_controlled_log_stream(
                 }
             }
             let stream = run_logs_stream(
-                ws_url.clone(),
+                ws_urls.clone(),
                 program_id.clone(),
                 events.clone(),
                 status.clone(),
@@ -2018,7 +2018,7 @@ async fn main() -> anyhow::Result<()> {
     let profile_state = Arc::new(RwLock::new(profile));
     let (events, _) = broadcast::channel(8192);
     if let (Some(rpc_client), Some(address)) = (
-        config.solana_http_url.clone().map(SolanaRpc::new),
+        (!config.solana_http_urls.is_empty()).then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
         wallet_address.clone(),
     ) {
         let profile_for_sync = profile_state.clone();
@@ -2113,7 +2113,7 @@ async fn main() -> anyhow::Result<()> {
         token_registry.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
-    let rpc = config.solana_http_url.clone().map(SolanaRpc::new);
+    let rpc = (!config.solana_http_urls.is_empty()).then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()));
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
@@ -2150,9 +2150,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
-    if let Some(ws_url) = config.solana_ws_url.clone() {
+    if !config.solana_ws_urls.is_empty() {
         spawn_controlled_log_stream(
-            ws_url,
+            config.solana_ws_urls.clone(),
             PUMPSWAP_PROGRAM_ID.to_owned(),
             events.clone(),
             pumpswap_status.clone(),
@@ -2232,7 +2232,7 @@ async fn main() -> anyhow::Result<()> {
         trading_settings: Arc::new(RwLock::new(trading_settings)),
         runtime_enabled,
         market_monitor,
-        solana_ws_url: config.solana_ws_url.clone(),
+        solana_ws_urls: config.solana_ws_urls.clone(),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
         profile: profile_state,
