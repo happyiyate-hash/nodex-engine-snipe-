@@ -606,6 +606,7 @@ fn start_launch_processor(
         let market_monitor = market_monitor.clone();
         let token_registry = token_registry.clone();
         let inflight_mints = inflight_mints.clone();
+        let database = database.clone();
         tokio::spawn(async move {
             loop {
                 let work = { work_rx.lock().await.recv().await };
