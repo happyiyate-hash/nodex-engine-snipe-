@@ -8,7 +8,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
@@ -29,7 +29,7 @@ struct MarketSubscription {
 enum MarketCommand {
     Subscribe(MarketSubscription),
     UnsubscribeMint(String),
-    Stop,
+    Stop(oneshot::Sender<()>),
 }
 
 #[derive(Clone)]
@@ -61,8 +61,10 @@ impl MarketMonitor {
 
     /// Stop the monitor permanently. The task will close its active WebSocket and will not reconnect.
     pub async fn stop(&self) -> Result<()> {
-        self.commands.send(MarketCommand::Stop).await
-            .map_err(|_| anyhow!("market monitor task is not running"))
+        let (acknowledge, stopped) = oneshot::channel();
+        self.commands.send(MarketCommand::Stop(acknowledge)).await
+            .map_err(|_| anyhow!("market monitor task is not running"))?;
+        stopped.await.map_err(|_| anyhow!("market monitor stopped without acknowledgement"))
     }
 
     /// Stop monitoring every account currently associated with a token mint.
@@ -172,7 +174,28 @@ async fn run_market_monitor(
         let delay = 2_u64
             .saturating_mul(1_u64 << reconnect_count.min(4))
             .min(30);
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+            command = commands.recv() => {
+                match command {
+                    Some(MarketCommand::Stop(acknowledge)) => {
+                        let _ = acknowledge.send(());
+                        let _ = events.send(json!({"type":"market_monitor_status","data":{
+                            "connected":false,"stopped":true,"desired_accounts":0,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
+                        return;
+                    }
+                    Some(MarketCommand::Subscribe(subscription)) => {
+                        desired.insert(subscription.account.clone(), subscription);
+                    }
+                    Some(MarketCommand::UnsubscribeMint(mint)) => {
+                        desired.retain(|_, subscription| subscription.mint != mint);
+                    }
+                    None => return,
+                }
+            }
+        }
     }
 }
 
@@ -627,7 +650,10 @@ async fn connect_market_stream(
                     return Err(anyhow!("market monitor command channel closed"));
                 };
                 let subscription = match command {
-                    MarketCommand::Stop => return Ok(false),
+                    MarketCommand::Stop(acknowledge) => {
+                        let _ = acknowledge.send(());
+                        return Ok(false);
+                    },
                     MarketCommand::UnsubscribeMint(mint) => {
                         let (pending_ids, active_ids) = remove_mint_subscriptions(
                             &mint, desired, &mut pending, &mut active,
