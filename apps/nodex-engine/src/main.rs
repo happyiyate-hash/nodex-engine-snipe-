@@ -541,6 +541,8 @@ async fn resolve_discovery_metadata(
             provider_error_details(&format!("{error:#}")),
         )),
     }
+    // Preserve canonical on-chain metadata as the primary source. Helius DAS fills
+    // missing display fields and supplies indexed image links when available.
     match rpc.resolve_token_metadata(mint).await {
         Ok(metadata) => {
             let metadata_json = serde_json::to_value(&metadata)
@@ -568,6 +570,47 @@ async fn resolve_discovery_metadata(
             provider_error_details(&format!("{error:#}")),
         )),
     }
+    match rpc.get_asset(mint).await {
+        Ok(asset) => {
+            let content = asset.get("content").unwrap_or(&serde_json::Value::Null);
+            let metadata = content.get("metadata").unwrap_or(&serde_json::Value::Null);
+            let take_string = |value: Option<&serde_json::Value>| {
+                value.and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
+            if result.name.is_none() {
+                result.name = take_string(metadata.get("name"));
+            }
+            if result.symbol.is_none() {
+                result.symbol = take_string(metadata.get("symbol"));
+            }
+            if result.metadata_uri.is_none() {
+                result.metadata_uri = take_string(content.get("json_uri"));
+            }
+            if result.logo_url.is_none() {
+                result.logo_url = take_string(content.pointer("/links/image"));
+            }
+            if result.logo_url.is_none() {
+                result.logo_url = content.get("files")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|files| files.iter().find(|file| {
+                        file.get("mime").and_then(serde_json::Value::as_str)
+                            .is_some_and(|mime| mime.starts_with("image/"))
+                    }))
+                    .and_then(|file| take_string(file.get("uri")));
+            }
+        }
+        Err(error) => result.errors.push(token_diagnostic(
+            mint,
+            "helius_das_metadata",
+            "helius",
+            error.to_string(),
+            provider_error_details(&format!("{error:#}")),
+        )),
+    }
+
     if let Some(uri) = result.metadata_uri.as_deref() {
         let fetch_uri = if let Some(path) = uri.strip_prefix("ipfs://") {
             format!("https://ipfs.io/ipfs/{}", path.trim_start_matches("ipfs/"))
@@ -659,6 +702,103 @@ async fn resolve_discovery_metadata(
             )),
         }
     }
+    // DexScreener is a last-resort display fallback. Only accept a pair whose
+    // base token address exactly matches this mint; never borrow another token's identity.
+    if result.name.is_none() || result.symbol.is_none() || result.logo_url.is_none() {
+        let activity_id = uuid::Uuid::new_v4().to_string();
+        let started = Instant::now();
+        let endpoint = "api.dexscreener.com";
+        let request_url = format!("https://api.dexscreener.com/latest/dex/tokens/{mint}");
+        let _ = activity_events.send(json!({"type":"engine_activity","data":{
+            "id":activity_id,"correlation_id":activity_id,"timestamp":chrono::Utc::now().to_rfc3339(),
+            "direction":"request","provider":"dexscreener","endpoint":endpoint,
+            "operation":"GET /latest/dex/tokens/{tokenAddress}","token_mint":mint,
+            "request":{"method":"GET","path":format!("/latest/dex/tokens/{mint}")}
+        }}));
+        match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+            Err(error) => result.errors.push(token_diagnostic(
+                mint,"dexscreener_metadata","dexscreener",error.to_string(),
+                json!({"kind":"client_configuration_error","message":error.to_string()}),
+            )),
+            Ok(client) => match client.get(&request_url)
+                .header(reqwest::header::ACCEPT,"application/json").send().await {
+                Err(error) => {
+                    let _ = activity_events.send(json!({"type":"engine_activity","data":{
+                        "id":format!("{activity_id}-response"),"correlation_id":activity_id,
+                        "timestamp":chrono::Utc::now().to_rfc3339(),"direction":"response",
+                        "provider":"dexscreener","endpoint":endpoint,
+                        "operation":"GET /latest/dex/tokens/{tokenAddress}","token_mint":mint,
+                        "duration_ms":started.elapsed().as_millis(),"severity":"error","error":error.to_string()
+                    }}));
+                    result.errors.push(token_diagnostic(
+                        mint,"dexscreener_metadata","dexscreener",error.to_string(),
+                        json!({"kind":"transport_error","message":error.to_string()}),
+                    ));
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    match response.bytes().await {
+                        Err(error) => result.errors.push(token_diagnostic(
+                            mint,"dexscreener_metadata","dexscreener",error.to_string(),
+                            json!({"kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()}),
+                        )),
+                        Ok(bytes) if bytes.len() > 524_288 => result.errors.push(token_diagnostic(
+                            mint,"dexscreener_metadata","dexscreener",
+                            "DexScreener response exceeded the 512 KiB safety limit.",
+                            json!({"response_bytes":bytes.len(),"maximum_bytes":524288}),
+                        )),
+                        Ok(bytes) => {
+                            let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+                                .unwrap_or_else(|_| json!({"invalid_json":true}));
+                            let body_text = serde_json::to_string(&value).unwrap_or_default();
+                            let truncated = body_text.len() > 32_768;
+                            let _ = activity_events.send(json!({"type":"engine_activity","data":{
+                                "id":format!("{activity_id}-response"),"correlation_id":activity_id,
+                                "timestamp":chrono::Utc::now().to_rfc3339(),"direction":"response",
+                                "provider":"dexscreener","endpoint":endpoint,
+                                "operation":"GET /latest/dex/tokens/{tokenAddress}","token_mint":mint,
+                                "duration_ms":started.elapsed().as_millis(),"http_status":status.as_u16(),
+                                "severity":if status.is_success() {"info"} else {"error"},
+                                "body_truncated":truncated,
+                                "response":if truncated {json!({"truncated":true,"preview":body_text.chars().take(32_768).collect::<String>()})} else {value.clone()}
+                            }}));
+                            if !status.is_success() {
+                                result.errors.push(token_diagnostic(
+                                    mint,"dexscreener_metadata","dexscreener",
+                                    format!("DexScreener returned HTTP {status}."),
+                                    json!({"http_status":status.as_u16(),"response":value}),
+                                ));
+                            } else if let Some(pairs) = value.get("pairs").and_then(serde_json::Value::as_array) {
+                                let pair = pairs.iter().find(|pair|
+                                    pair.pointer("/baseToken/address").and_then(serde_json::Value::as_str)
+                                        == Some(mint)
+                                );
+                                if let Some(pair) = pair {
+                                    let token = pair.get("baseToken").unwrap_or(&serde_json::Value::Null);
+                                    let take = |value: Option<&serde_json::Value>| value
+                                        .and_then(serde_json::Value::as_str).map(str::trim)
+                                        .filter(|value| !value.is_empty()).map(str::to_owned);
+                                    if result.name.is_none() { result.name = take(token.get("name")); }
+                                    if result.symbol.is_none() { result.symbol = take(token.get("symbol")); }
+                                    if result.logo_url.is_none() {
+                                        result.logo_url = take(pair.pointer("/info/imageUrl"))
+                                            .or_else(|| take(pair.pointer("/info/header")));
+                                    }
+                                } else {
+                                    result.errors.push(token_diagnostic(
+                                        mint,"dexscreener_metadata","dexscreener",
+                                        "No indexed pair had this mint as its base token; identity fallback was not applied.",
+                                        json!({"pair_count":pairs.len(),"mint_match":false}),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     result.status = if result.name.is_some()
         && result.symbol.is_some()
         && result.decimals.is_some()
