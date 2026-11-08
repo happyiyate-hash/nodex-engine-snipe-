@@ -2528,14 +2528,66 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 match activity_receiver.recv().await {
-                    Ok(event)
-                        if event.get("type").and_then(serde_json::Value::as_str)
-                            == Some("engine_activity") =>
-                    {
-                        if let Some(activity) = event.get("data") {
+                    Ok(event) => {
+                        let event_type = event.get("type").and_then(serde_json::Value::as_str);
+                        let activity = if event_type == Some("engine_activity") {
+                            event.get("data").cloned()
+                        } else if matches!(
+                            event_type,
+                            Some("token_scan_started")
+                                | Some("token_scan_progress")
+                                | Some("token_scan_update")
+                                | Some("token_scan_completed")
+                                | Some("token_scan_failed")
+                                | Some("token_diagnostic")
+                                | Some("diagnostic")
+                                | Some("token_metadata_started")
+                                | Some("token_metadata_failed")
+                                | Some("token_metadata_updated")
+                                | Some("token_monitoring_started")
+                                | Some("token_monitoring_update")
+                                | Some("token_monitoring_completed")
+                                | Some("strategy_rejected_token")
+                                | Some("paper_buy_executed")
+                                | Some("paper_buy_failed")
+                                | Some("paper_sell_executed")
+                                | Some("paper_sell_failed")
+                                | Some("swap_started")
+                                | Some("swap_updated")
+                                | Some("swap_completed")
+                                | Some("swap_failed")
+                                | Some("transaction_submitted")
+                                | Some("transaction_confirmed")
+                                | Some("transaction_failed")
+                        ) {
+                            let data = event.get("data").cloned().unwrap_or_else(|| event.clone());
+                            let severity = if event_type.is_some_and(|kind| kind.ends_with("_failed"))
+                                || data.get("severity").and_then(serde_json::Value::as_str) == Some("error")
+                            {
+                                "error"
+                            } else {
+                                "info"
+                            };
+                            Some(serde_json::json!({
+                                "id": uuid::Uuid::new_v4().to_string(),
+                                "timestamp": data.get("timestamp")
+                                    .or_else(|| data.get("received_at"))
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::Value::String(chrono::Utc::now().to_rfc3339())),
+                                "direction": "event",
+                                "provider": "engine",
+                                "operation": event_type.unwrap_or("engine_event"),
+                                "token_mint": data.get("mint_address").or_else(|| data.get("token_mint")),
+                                "severity": severity,
+                                "event": data
+                            }))
+                        } else {
+                            None
+                        };
+                        if let Some(activity) = activity {
                             if let Err(error) = nodex_persistence::save_engine_activity_log(
                                 &activity_database,
-                                activity,
+                                &activity,
                             )
                             .await
                             {
@@ -2543,7 +2595,6 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-                    Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(
                             dropped_events = count,
