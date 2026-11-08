@@ -635,7 +635,7 @@ impl SolanaRpc {
                         json!({"provider":"rugcheck","kind":"transport_error","message":error.to_string()}),
                     ),
                     ..Default::default()
-                }
+                };
             }
         };
         let status = response.status();
