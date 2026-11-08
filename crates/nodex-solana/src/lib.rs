@@ -384,6 +384,19 @@ impl SolanaRpc {
         }
     }
 
+    /// Re-read only the mint account and authority fields for lightweight lifecycle monitoring.
+    /// This deliberately does not repeat holder sampling or external provider requests.
+    pub async fn scan_token_authorities(&self, mint: &str) -> Result<TokenSecurityReport> {
+        let Some((owner, data, slot)) = self.get_account_data(mint).await? else {
+            return Ok(TokenSecurityReport::unverified(
+                mint,
+                "Mint account was not found during authority recheck",
+                None,
+            ));
+        };
+        parse_mint_security_report(mint, &owner, &data, slot)
+    }
+
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
     /// This is the first scanner stage; it deliberately cannot approve a token by itself.
     pub async fn scan_token_security(&self, mint: &str) -> Result<TokenSecurityReport> {
@@ -1222,16 +1235,15 @@ pub fn parse_mint_security_report(
         severity: "critical".into(),
         detail: "A live sell quote and transaction simulation have not yet been performed.".into(),
     });
-    let hard_blocker = mint_authority.is_some() || freeze_authority.is_some();
-    let decision = if hard_blocker {
-        "REJECTED"
+    // Active authorities are a serious risk signal, but at launch they can change.
+    // Keep the token under observation instead of making this first snapshot terminal.
+    // UNVERIFIED always blocks paper-entry eligibility until the full policy passes.
+    let authority_pending = mint_authority.is_some() || freeze_authority.is_some();
+    let decision = "UNVERIFIED";
+    let decision_reason = if authority_pending {
+        "Mint or freeze authority is still active. This is a high-risk warning and will be rechecked; automatic paper entry remains blocked.".into()
     } else {
-        "UNVERIFIED"
-    };
-    let decision_reason = if hard_blocker {
-        "A mint or freeze authority is still active. This token fails the current mandatory authority policy.".into()
-    } else {
-        "Authority checks passed, but holder, creator, metadata, liquidity and sellability checks remain incomplete. Automatic buying is blocked.".into()
+        "Authority checks passed, but holder, creator, metadata, liquidity and sellability checks remain incomplete. Automatic paper entry remains blocked.".into()
     };
     Ok(TokenSecurityReport {
         mint_address: mint.to_owned(),
