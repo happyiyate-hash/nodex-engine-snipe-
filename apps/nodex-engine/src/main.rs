@@ -1239,7 +1239,8 @@ fn start_launch_processor(
                     // authority monitor, including tokens that are still unverified.
                     // This lightweight pass reads only the mint account; it does not
                     // repeat holder sampling or call external security providers.
-                    if let Ok(monitor_permit) = authority_monitor_slots.clone().try_acquire_owned() {
+                    if let Ok(monitor_permit) = authority_monitor_slots.clone().try_acquire_owned()
+                    {
                         let monitor_rpc = scan_rpc.clone();
                         let monitor_events = scan_events.clone();
                         let monitor_registry = approved_registry.clone();
@@ -1250,7 +1251,8 @@ fn start_launch_processor(
                             let started = Instant::now();
                             let max_runtime = Duration::from_secs(300);
                             let mut rechecks = 0u32;
-                            let mut previous_authorities: Option<(Option<String>, Option<String>)> = None;
+                            let mut previous_authorities: Option<(Option<String>, Option<String>)> =
+                                None;
                             let _ = monitor_events.send(json!({
                                 "type":"token_monitoring_started",
                                 "data":{"mint_address":monitor_mint,"status":"watching",
@@ -1267,18 +1269,27 @@ fn start_launch_processor(
                                     Duration::from_secs(15)
                                 };
                                 tokio::time::sleep(interval).await;
-                                if started.elapsed() >= max_runtime { break; }
+                                if started.elapsed() >= max_runtime {
+                                    break;
+                                }
                                 let checked_at = chrono::Utc::now().to_rfc3339();
                                 match tokio::time::timeout(
                                     Duration::from_secs(6),
                                     monitor_rpc.scan_token_authorities(&monitor_mint),
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(Ok(report)) => {
                                         rechecks = rechecks.saturating_add(1);
-                                        let authorities = (report.mint_authority.clone(), report.freeze_authority.clone());
-                                        let changed = previous_authorities.as_ref() != Some(&authorities);
+                                        let authorities = (
+                                            report.mint_authority.clone(),
+                                            report.freeze_authority.clone(),
+                                        );
+                                        let changed =
+                                            previous_authorities.as_ref() != Some(&authorities);
                                         previous_authorities = Some(authorities.clone());
-                                        let active = authorities.0.is_some() || authorities.1.is_some();
+                                        let active =
+                                            authorities.0.is_some() || authorities.1.is_some();
                                         let reason = if active {
                                             "Mint or freeze authority remains active. Monitoring continues; paper entry is blocked."
                                         } else {
@@ -1307,7 +1318,13 @@ fn start_launch_processor(
                                         match monitor_registry.upsert_patch(&monitor_mint, patch) {
                                             Ok(snapshot) => {
                                                 if changed {
-                                                    if let Err(error) = nodex_persistence::save_token_state(&monitor_database, &snapshot).await {
+                                                    if let Err(error) =
+                                                        nodex_persistence::save_token_state(
+                                                            &monitor_database,
+                                                            &snapshot,
+                                                        )
+                                                        .await
+                                                    {
                                                         let _ = monitor_events.send(json!({
                                                             "type":"token_diagnostic",
                                                             "data":token_diagnostic(&monitor_mint,"authority_monitor_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))
@@ -1353,7 +1370,8 @@ fn start_launch_processor(
                                         }));
                                     }
                                     Err(_) => {
-                                        let message = "Authority recheck timed out after 6 seconds.";
+                                        let message =
+                                            "Authority recheck timed out after 6 seconds.";
                                         let _ = monitor_events.send(json!({
                                             "type":"token_monitoring_update",
                                             "data":{"mint_address":monitor_mint,"status":"watching",
@@ -1365,12 +1383,20 @@ fn start_launch_processor(
                                 }
                             }
                             let finished_at = chrono::Utc::now().to_rfc3339();
-                            if let Ok(snapshot) = monitor_registry.upsert_patch(&monitor_mint, json!({
-                                "monitoring":{"status":"completed","completed_at":finished_at,
-                                    "authority_rechecks":rechecks}
-                            })) {
-                                let _ = nodex_persistence::save_token_state(&monitor_database, &snapshot).await;
-                                let _ = monitor_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                            if let Ok(snapshot) = monitor_registry.upsert_patch(
+                                &monitor_mint,
+                                json!({
+                                    "monitoring":{"status":"completed","completed_at":finished_at,
+                                        "authority_rechecks":rechecks}
+                                }),
+                            ) {
+                                let _ = nodex_persistence::save_token_state(
+                                    &monitor_database,
+                                    &snapshot,
+                                )
+                                .await;
+                                let _ = monitor_events
+                                    .send(json!({"type":"token_state_updated","data":snapshot}));
                             }
                             let _ = monitor_events.send(json!({
                                 "type":"token_monitoring_completed",
@@ -1390,25 +1416,27 @@ fn start_launch_processor(
                     // Market data is discovery/monitoring, not a security approval. Subscribe
                     // every detected Pump.fun curve, including unverified and rejected launches.
                     if let Some(monitor) = approved_monitor.read().await.clone() {
-                            match monitor
-                                .subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id)
-                                .await
-                            {
-                                Ok(account_address) => {
-                                    let _ = scan_events.send(json!({"type":"market_subscription_requested","data":{
+                        match monitor
+                            .subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id)
+                            .await
+                        {
+                            Ok(account_address) => {
+                                let _ = scan_events.send(
+                                    json!({"type":"market_subscription_requested","data":{
                                         "mint_address":scan_mint,"account_address":account_address,
                                         "venue":"pump_fun_bonding_curve","status":"pending",
                                         "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
-                                }
-                                Err(error) => {
-                                    let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                        "severity":"warning","component":"market_monitor_registration",
-                                        "message":error.to_string(),"mint_address":scan_mint,
-                                        "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}));
-                                }
+                                    }}),
+                                );
                             }
+                            Err(error) => {
+                                let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                    "severity":"warning","component":"market_monitor_registration",
+                                    "message":error.to_string(),"mint_address":scan_mint,
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
+                            }
+                        }
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
