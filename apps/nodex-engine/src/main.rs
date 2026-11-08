@@ -1098,18 +1098,86 @@ fn start_launch_processor(
                                     }
                                 }
                                 "REJECTED" => {
-                                    approved_registry.remove(&scan_mint);
-                                    let _ = scan_events.send(
-                                        json!({"type":"token_scan_update","data":report.clone()}),
-                                    );
-                                    let _ = scan_events.send(
-                                        json!({"type":"token_rejected_cleanup","data":{
-                                            "mint_address":scan_mint,"reason":report.decision_reason
-                                        }}),
-                                    );
-                                    let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
-                                        "mint_address":scan_mint,"decision":"REJECTED","reason":report.decision_reason
-                                    }}));
+                                    // Rejected launches remain visible for investigation.
+                                    // Their explicit rejected security status keeps them out of
+                                    // the approved-token market and paper-entry paths.
+                                    let mut security_state =
+                                        serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                                    if let Some(object) = security_state.as_object_mut() {
+                                        object.insert("status".into(), json!("rejected"));
+                                    }
+                                    match approved_registry.upsert_patch(
+                                        &scan_mint,
+                                        json!({
+                                            "security":security_state,
+                                            "market":{"status":"not_started"}
+                                        }),
+                                    ) {
+                                        Ok(snapshot) => {
+                                            if let Err(error) = nodex_persistence::save_token_state(
+                                                &approved_database,
+                                                &snapshot,
+                                            ).await {
+                                                let message = format!(
+                                                    "Rejected token state could not be persisted: {error}"
+                                                );
+                                                let _ = scan_events.send(json!({
+                                                    "type":"token_diagnostic",
+                                                    "data":token_diagnostic(
+                                                        &scan_mint,
+                                                        "token_persistence",
+                                                        "sqlite",
+                                                        message.clone(),
+                                                        json!({"kind":"database_persistence_error","message":message})
+                                                    )
+                                                }));
+                                            } else {
+                                                let _ = scan_events.send(json!({
+                                                    "type":"token_state_updated",
+                                                    "data":snapshot
+                                                }));
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let _ = scan_events.send(json!({
+                                                "type":"token_diagnostic",
+                                                "data":token_diagnostic(
+                                                    &scan_mint,
+                                                    "token_state",
+                                                    "nodex_token_registry",
+                                                    error.to_string(),
+                                                    json!({"kind":"token_registry_error","message":error.to_string()})
+                                                )
+                                            }));
+                                        }
+                                    }
+                                    if let Err(error) = nodex_persistence::save_launch(
+                                        &approved_database,
+                                        &launch,
+                                    ).await {
+                                        let _ = scan_events.send(json!({
+                                            "type":"token_diagnostic",
+                                            "data":token_diagnostic(
+                                                &scan_mint,
+                                                "launch_persistence",
+                                                "sqlite",
+                                                error.to_string(),
+                                                json!({"kind":"database_persistence_error","message":error.to_string()})
+                                            )
+                                        }));
+                                    }
+                                    let _ = scan_events.send(json!({
+                                        "type":"token_scan_update",
+                                        "data":report.clone()
+                                    }));
+                                    let _ = scan_events.send(json!({
+                                        "type":"token_approval_pending",
+                                        "data":{
+                                            "mint_address":scan_mint,
+                                            "decision":"REJECTED",
+                                            "reason":report.decision_reason
+                                        }
+                                    }));
                                 }
                                 _ => {
                                     let mut security_state =
