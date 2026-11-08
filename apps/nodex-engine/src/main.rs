@@ -2519,7 +2519,7 @@ async fn main() -> anyhow::Result<()> {
     let portfolio_positions = Arc::new(RwLock::new(
         nodex_persistence::load_portfolio_positions(&db).await?,
     ));
-    let (events, _) = broadcast::channel(8192);
+    let (events, _) = broadcast::channel::<serde_json::Value>(8192);
     // Persist every structured provider request/response card independently of
     // the WebSocket client, so the operator can inspect history after reconnecting.
     {
