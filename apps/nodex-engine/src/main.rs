@@ -664,6 +664,8 @@ fn start_launch_processor(
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     // Prevent concurrent discovery/metadata/scan pipelines for the same mint.
     let inflight_mints = Arc::new(Mutex::new(HashSet::<String>::new()));
+    // Bound concurrent background authority monitors independently from launch workers.
+    let authority_monitor_slots = Arc::new(tokio::sync::Semaphore::new(24));
     let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64)>(LAUNCH_QUEUE_CAPACITY);
     let work_rx = Arc::new(Mutex::new(work_rx));
 
@@ -677,6 +679,7 @@ fn start_launch_processor(
         let market_monitor = market_monitor.clone();
         let token_registry = token_registry.clone();
         let inflight_mints = inflight_mints.clone();
+        let authority_monitor_slots = authority_monitor_slots.clone();
         let database = database.clone();
         tokio::spawn(async move {
             loop {
@@ -1233,6 +1236,158 @@ fn start_launch_processor(
                                 let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
                             }
                         }
+                    }
+                    // Keep every discovered launch under a bounded, time-limited
+                    // authority monitor, including tokens that are still unverified.
+                    // This lightweight pass reads only the mint account; it does not
+                    // repeat holder sampling or call external security providers.
+                    if let Ok(monitor_permit) = authority_monitor_slots.clone().try_acquire_owned() {
+                        let monitor_rpc = scan_rpc.clone();
+                        let monitor_events = scan_events.clone();
+                        let monitor_registry = approved_registry.clone();
+                        let monitor_database = approved_database.clone();
+                        let monitor_mint = scan_mint.clone();
+                        tokio::spawn(async move {
+                            let _monitor_permit = monitor_permit;
+                            let started = Instant::now();
+                            let max_runtime = Duration::from_secs(300);
+                            let mut rechecks = 0u32;
+                            let mut previous_authorities: Option<(Option<String>, Option<String>)> = None;
+                            let _ = monitor_events.send(json!({
+                                "type":"token_monitoring_started",
+                                "data":{"mint_address":monitor_mint,"status":"watching",
+                                    "max_runtime_seconds":300,
+                                    "received_at":chrono::Utc::now().to_rfc3339()}
+                            }));
+                            while started.elapsed() < max_runtime {
+                                let age = started.elapsed();
+                                let interval = if age < Duration::from_secs(15) {
+                                    Duration::from_secs(2)
+                                } else if age < Duration::from_secs(60) {
+                                    Duration::from_secs(5)
+                                } else {
+                                    Duration::from_secs(15)
+                                };
+                                tokio::time::sleep(interval).await;
+                                if started.elapsed() >= max_runtime { break; }
+                                let checked_at = chrono::Utc::now().to_rfc3339();
+                                match tokio::time::timeout(
+                                    Duration::from_secs(6),
+                                    monitor_rpc.scan_token_authorities(&monitor_mint),
+                                ).await {
+                                    Ok(Ok(report)) => {
+                                        rechecks = rechecks.saturating_add(1);
+                                        let authorities = (report.mint_authority.clone(), report.freeze_authority.clone());
+                                        let changed = previous_authorities.as_ref() != Some(&authorities);
+                                        previous_authorities = Some(authorities.clone());
+                                        let active = authorities.0.is_some() || authorities.1.is_some();
+                                        let reason = if active {
+                                            "Mint or freeze authority remains active. Monitoring continues; paper entry is blocked."
+                                        } else {
+                                            "Mint and freeze authorities are now disabled. Other safety checks remain incomplete; paper entry is still blocked."
+                                        };
+                                        let patch = json!({
+                                            "security":{
+                                                "status":"watching",
+                                                "decision":"UNVERIFIED",
+                                                "decision_reason":reason,
+                                                "mint_authority":authorities.0,
+                                                "freeze_authority":authorities.1,
+                                                "authority_recheck":{
+                                                    "status":if active {"active"} else {"cleared"},
+                                                    "checked_at":checked_at,
+                                                    "context_slot":report.context_slot
+                                                }
+                                            },
+                                            "monitoring":{
+                                                "status":"watching",
+                                                "authority_rechecks":rechecks,
+                                                "last_checked_at":checked_at,
+                                                "elapsed_seconds":started.elapsed().as_secs()
+                                            }
+                                        });
+                                        match monitor_registry.upsert_patch(&monitor_mint, patch) {
+                                            Ok(snapshot) => {
+                                                if changed {
+                                                    if let Err(error) = nodex_persistence::save_token_state(&monitor_database, &snapshot).await {
+                                                        let _ = monitor_events.send(json!({
+                                                            "type":"token_diagnostic",
+                                                            "data":token_diagnostic(&monitor_mint,"authority_monitor_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))
+                                                        }));
+                                                    }
+                                                    let _ = monitor_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                                                }
+                                                let _ = monitor_events.send(json!({
+                                                    "type":"token_monitoring_update",
+                                                    "data":{
+                                                        "mint_address":monitor_mint,
+                                                        "status":"watching",
+                                                        "authority_status":if active {"active"} else {"cleared"},
+                                                        "mint_authority":authorities.0,
+                                                        "freeze_authority":authorities.1,
+                                                        "rechecks":rechecks,
+                                                        "checked_at":checked_at,
+                                                        "paper_entry_eligible":false
+                                                    }
+                                                }));
+                                            }
+                                            Err(error) => {
+                                                let _ = monitor_events.send(json!({
+                                                    "type":"token_diagnostic",
+                                                    "data":token_diagnostic(&monitor_mint,"authority_monitor","token_registry",error.to_string(),json!({"kind":"registry_error","message":error.to_string()}))
+                                                }));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(error)) => {
+                                        let _ = monitor_events.send(json!({
+                                            "type":"token_monitoring_update",
+                                            "data":{"mint_address":monitor_mint,"status":"watching",
+                                                "authority_status":"unknown","rechecks":rechecks,
+                                                "error":error.to_string(),
+                                                "checked_at":checked_at,
+                                                "paper_entry_eligible":false}
+                                        }));
+                                        let _ = monitor_events.send(json!({
+                                            "type":"token_diagnostic",
+                                            "data":token_diagnostic(&monitor_mint,"authority_monitor","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))
+                                        }));
+                                    }
+                                    Err(_) => {
+                                        let message = "Authority recheck timed out after 6 seconds.";
+                                        let _ = monitor_events.send(json!({
+                                            "type":"token_monitoring_update",
+                                            "data":{"mint_address":monitor_mint,"status":"watching",
+                                                "authority_status":"unknown","rechecks":rechecks,
+                                                "error":message,"checked_at":checked_at,
+                                                "paper_entry_eligible":false}
+                                        }));
+                                    }
+                                }
+                            }
+                            let finished_at = chrono::Utc::now().to_rfc3339();
+                            if let Ok(snapshot) = monitor_registry.upsert_patch(&monitor_mint, json!({
+                                "monitoring":{"status":"completed","completed_at":finished_at,
+                                    "authority_rechecks":rechecks}
+                            })) {
+                                let _ = nodex_persistence::save_token_state(&monitor_database, &snapshot).await;
+                                let _ = monitor_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                            }
+                            let _ = monitor_events.send(json!({
+                                "type":"token_monitoring_completed",
+                                "data":{"mint_address":monitor_mint,"status":"completed",
+                                    "rechecks":rechecks,"duration_seconds":started.elapsed().as_secs(),
+                                    "completed_at":finished_at}
+                            }));
+                        });
+                    } else {
+                        let _ = scan_events.send(json!({
+                            "type":"token_diagnostic",
+                            "data":token_diagnostic(&scan_mint,"authority_monitor","nodex_engine",
+                                "Background authority-monitor capacity is full; token remains retained but will not receive periodic rechecks.",
+                                json!({"kind":"monitor_capacity_reached","capacity":24}))
+                        }));
                     }
                     if token_approved {
                         if let Some(monitor) = approved_monitor.read().await.clone() {
