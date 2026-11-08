@@ -2610,7 +2610,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = (!config.solana_http_urls.is_empty())
-        .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()));
+        .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()).with_activity_events(events.clone()));
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
