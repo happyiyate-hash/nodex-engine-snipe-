@@ -470,6 +470,7 @@ impl DiscoveryMetadata {
             metadata_uri: None,
             logo_url: None,
             status: "unavailable",
+            errors: Vec::new(),
         }
     }
 }
@@ -541,17 +542,20 @@ async fn resolve_discovery_metadata(
     }
     match rpc.resolve_token_metadata(mint).await {
         Ok(metadata) => {
+            let metadata_json = serde_json::to_value(&metadata)
+                .unwrap_or_else(|_| json!({"status":metadata.status}));
+            let metadata_caveat = metadata.caveat.clone();
+            let metadata_status = metadata.status;
             result.name = metadata.name;
             result.symbol = metadata.symbol;
             result.metadata_uri = metadata.uri;
-            if metadata.status == "unavailable" || metadata.status == "unverified" {
+            if metadata_status == "unavailable" || metadata_status == "unverified" {
                 result.errors.push(token_diagnostic(
                     mint,
                     "on_chain_metadata",
                     "solana_rpc",
-                    metadata.caveat.clone(),
-                    serde_json::to_value(&metadata)
-                        .unwrap_or_else(|_| json!({"status":metadata.status})),
+                    metadata_caveat,
+                    metadata_json,
                 ));
             }
         }
