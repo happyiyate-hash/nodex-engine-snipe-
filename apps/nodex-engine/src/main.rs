@@ -2074,26 +2074,52 @@ async fn refresh_token_metadata(
     ))?;
     let metadata = resolve_discovery_metadata(rpc, &mint, &state.events)
         .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Token metadata refresh failed: {error}")))?;
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Token metadata refresh failed: {error}"),
+            )
+        })?;
 
     let mut identity = serde_json::Map::new();
-    if let Some(value) = metadata.name { identity.insert("name".into(), json!(value)); }
-    if let Some(value) = metadata.symbol { identity.insert("symbol".into(), json!(value)); }
-    if let Some(value) = metadata.decimals { identity.insert("decimals".into(), json!(value)); }
-    if let Some(value) = metadata.metadata_uri { identity.insert("metadata_uri".into(), json!(value)); }
-    if let Some(value) = metadata.logo_url.clone() { identity.insert("logo_url".into(), json!(value)); }
+    if let Some(value) = metadata.name {
+        identity.insert("name".into(), json!(value));
+    }
+    if let Some(value) = metadata.symbol {
+        identity.insert("symbol".into(), json!(value));
+    }
+    if let Some(value) = metadata.decimals {
+        identity.insert("decimals".into(), json!(value));
+    }
+    if let Some(value) = metadata.metadata_uri {
+        identity.insert("metadata_uri".into(), json!(value));
+    }
+    if let Some(value) = metadata.logo_url.clone() {
+        identity.insert("logo_url".into(), json!(value));
+    }
     identity.insert("metadata_status".into(), json!(metadata.status));
-    let snapshot = state.token_registry.upsert_patch(&mint, json!({"identity": identity}))
+
+    let snapshot = state
+        .token_registry
+        .upsert_patch(&mint, json!({"identity": identity}))
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     nodex_persistence::save_token_state(&state.database, &snapshot)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist refreshed token metadata: {error}")))?;
-    let _ = state.events.send(json!({"type":"token_state_updated","data":snapshot}));
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not persist refreshed token metadata: {error}"),
+            )
+        })?;
+    let _ = state
+        .events
+        .send(json!({"type":"token_state_updated","data":snapshot}));
+
     Ok(Json(json!({
-        "status":"refreshed",
-        "mint_address":mint,
-        "metadata_status":metadata.status,
-        "logo_url":metadata.logo_url
+        "status": "refreshed",
+        "mint_address": mint,
+        "metadata_status": metadata.status,
+        "logo_url": metadata.logo_url
     })))
 }
 
