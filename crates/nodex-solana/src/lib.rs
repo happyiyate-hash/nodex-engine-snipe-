@@ -2238,7 +2238,8 @@ mod transaction_decoder_tests {
     #[test]
     fn parses_token_2022_embedded_metadata_and_update_authority() {
         let mut data = base_mint_data(false, false);
-        data.push(1);
+        data.resize(TOKEN_2022_ACCOUNT_TYPE_OFFSET, 0);
+        data.push(TOKEN_2022_MINT_ACCOUNT_TYPE);
         let mut metadata = vec![9u8; 32];
         metadata.extend_from_slice(&[4u8; 32]);
         borsh_string("Metadata Token", &mut metadata);
@@ -2291,7 +2292,8 @@ mod transaction_decoder_tests {
     #[test]
     fn detects_token_2022_permanent_delegate_extension() {
         let mut data = base_mint_data(false, false);
-        data.push(1); // Mint account type
+        data.resize(TOKEN_2022_ACCOUNT_TYPE_OFFSET, 0);
+        data.push(TOKEN_2022_MINT_ACCOUNT_TYPE); // Mint account type
         data.extend_from_slice(&12u16.to_le_bytes()); // PermanentDelegate
         data.extend_from_slice(&32u16.to_le_bytes());
         data.extend_from_slice(&[9u8; 32]);
