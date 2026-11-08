@@ -794,7 +794,11 @@ impl SolanaRpc {
                 .await
                 .context("decoding getTransaction response")?;
             if let Some(error) = decoded.error {
-                let message = error.message;
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| error.to_string());
                 let limited = message.to_ascii_lowercase().contains("rate")
                     || message.to_ascii_lowercase().contains("too many")
                     || message.contains("429");
