@@ -490,7 +490,11 @@ fn normalize_image_url(candidate: &str) -> Option<String> {
         || host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local");
-    if url.scheme() != "https" || unsafe_host || !url.username().is_empty() || url.password().is_some() {
+    if url.scheme() != "https"
+        || unsafe_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return None;
     }
     Some(url.to_string())
