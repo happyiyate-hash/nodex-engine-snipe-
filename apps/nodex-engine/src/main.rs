@@ -1855,6 +1855,22 @@ async fn recent_launches(
     Ok(Json(launches))
 }
 
+async fn engine_activity_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(500);
+    let records = nodex_persistence::list_engine_activity_logs(&state.database, limit)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(records))
+}
+
 async fn recent_events(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -2474,11 +2490,35 @@ async fn main() -> anyhow::Result<()> {
         nodex_persistence::load_portfolio_positions(&db).await?,
     ));
     let (events, _) = broadcast::channel(8192);
+    // Persist every structured provider request/response card independently of
+    // the WebSocket client, so the operator can inspect history after reconnecting.
+    {
+        let mut activity_receiver = events.subscribe();
+        let activity_database = db.clone();
+        tokio::spawn(async move {
+            loop {
+                match activity_receiver.recv().await {
+                    Ok(event) if event.get("type").and_then(serde_json::Value::as_str) == Some("engine_activity") => {
+                        if let Some(activity) = event.get("data") {
+                            if let Err(error) = nodex_persistence::save_engine_activity_log(&activity_database, activity).await {
+                                tracing::error!(%error, "Could not persist engine activity log");
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(dropped_events=count, "Engine activity persistence subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     let (database_changes, database_change_receiver) = mpsc::channel(512);
     let gateway = websocket::Gateway::start(events.subscribe(), database_change_receiver, 4096);
     if let (Some(rpc_client), Some(address)) = (
         (!config.solana_http_urls.is_empty())
-            .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone())),
+            .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()).with_activity_events(events.clone())),
         wallet_address.clone(),
     ) {
         let profile_for_sync = profile_state.clone();
@@ -2651,6 +2691,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/tokens/:mint/state", get(token_state))
         .route("/api/v1/events/recent", get(recent_events))
+        .route("/api/v1/admin/activity-logs", get(engine_activity_logs))
         .route("/api/v1/admin/storage/overview", get(storage_overview))
         .route(
             "/api/v1/admin/storage/system-journal/cleanup",
