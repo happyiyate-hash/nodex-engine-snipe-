@@ -1117,7 +1117,9 @@ fn start_launch_processor(
                                             if let Err(error) = nodex_persistence::save_token_state(
                                                 &approved_database,
                                                 &snapshot,
-                                            ).await {
+                                            )
+                                            .await
+                                            {
                                                 let message = format!(
                                                     "Rejected token state could not be persisted: {error}"
                                                 );
@@ -1151,10 +1153,10 @@ fn start_launch_processor(
                                             }));
                                         }
                                     }
-                                    if let Err(error) = nodex_persistence::save_launch(
-                                        &approved_database,
-                                        &launch,
-                                    ).await {
+                                    if let Err(error) =
+                                        nodex_persistence::save_launch(&approved_database, &launch)
+                                            .await
+                                    {
                                         let _ = scan_events.send(json!({
                                             "type":"token_diagnostic",
                                             "data":token_diagnostic(
