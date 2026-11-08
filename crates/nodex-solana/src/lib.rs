@@ -2038,7 +2038,10 @@ mod token_2022_layout_tests {
     #[test]
     fn reads_extensions_from_the_canonical_offset_166() {
         let data = mint_with_extension(9, &[]);
-        assert_eq!(parse_token_2022_extensions(&data).unwrap(), vec!["non_transferable"]);
+        assert_eq!(
+            parse_token_2022_extensions(&data).unwrap(),
+            vec!["non_transferable"]
+        );
     }
 
     #[test]
@@ -2058,9 +2061,10 @@ mod token_2022_layout_tests {
         .expect("malformed extension must not abort the whole security report");
 
         assert_eq!(report.decision, "UNVERIFIED");
-        assert!(report.checks.iter().any(|check|
-            check.name == "token_2022_extensions" && check.status == "unverified"
-        ));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "token_2022_extensions" && check.status == "unverified"));
     }
 
     #[test]
