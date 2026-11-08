@@ -252,6 +252,15 @@ fn start_token_state_projector(
                 }}));
                 continue;
             }
+            if kind=="token_diagnostic" {
+                let mut diagnostics=registry.get(mint).and_then(|snapshot|snapshot.data.get("diagnostics").and_then(serde_json::Value::as_array).cloned()).unwrap_or_default();
+                diagnostics.push(data.clone());if diagnostics.len()>50{diagnostics.drain(0..diagnostics.len()-50);}
+                match registry.upsert_patch(mint,json!({"diagnostics":diagnostics})){
+                    Ok(snapshot)=>{if let Err(error)=nodex_persistence::save_token_state(&database,&snapshot).await{tracing::error!(%error,mint_address=mint,"Could not persist token diagnostic");}
+                        else{let _=database_changes.send(json!({"type":"token_state_updated","data":snapshot})).await;}}
+                    Err(error)=>tracing::error!(%error,mint_address=mint,"Could not append token diagnostic to canonical state"),
+                }continue;
+            }
             // The approved-token persistence path already commits the final scan report.
             // Never let the projector persist rejected/unverified reports a second time.
             if kind == "token_scan_update" {
@@ -425,6 +434,7 @@ struct DiscoveryMetadata {
     metadata_uri: Option<String>,
     logo_url: Option<String>,
     status: &'static str,
+    errors: Vec<serde_json::Value>,
 }
 
 impl DiscoveryMetadata {
@@ -440,143 +450,82 @@ impl DiscoveryMetadata {
     }
 }
 
+fn provider_error_details(message:&str)->serde_json::Value {
+    const PREFIX:&str="NODEX_PROVIDER_ERROR_JSON:";
+    if let Some((_,payload))=message.split_once(PREFIX){if let Ok(value)=serde_json::from_str::<serde_json::Value>(payload.trim()){return value;}}
+    json!({"kind":"application_error","message":message})
+}
+fn token_diagnostic(mint:&str,stage:&str,provider:&str,message:impl Into<String>,raw_response:serde_json::Value)->serde_json::Value {
+    json!({"mint_address":mint,"stage":stage,"provider":provider,"severity":"error","message":message.into(),"raw_response":raw_response,"occurred_at":chrono::Utc::now().to_rfc3339()})
+}
+
 /// Resolve the token's display identity before publishing new_token_detected.
 /// Missing optional fields never block discovery. Off-chain metadata is fetched only
 /// from HTTPS URLs and redirects are disabled to reduce SSRF and untrusted redirect risk.
-async fn resolve_discovery_metadata(
-    rpc: &SolanaRpc,
-    mint: &str,
-) -> anyhow::Result<DiscoveryMetadata> {
-    let mut result = DiscoveryMetadata::partial();
-
-    // Each metadata source is best-effort and independent: one unavailable RPC call
-    // must not erase fields successfully resolved by another source.
+async fn resolve_discovery_metadata(rpc:&SolanaRpc,mint:&str)->anyhow::Result<DiscoveryMetadata> {
+    let mut result=DiscoveryMetadata::partial();
     match rpc.get_account_data(mint).await {
-        Ok(Some((owner, data, _slot))) if data.len() >= 82 => {
-            const SPL_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-            const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnB9J3q6k7";
-            if owner == SPL_TOKEN || owner == TOKEN_2022 {
-                result.decimals = Some(data[44]);
-            }
+        Ok(Some((owner,data,_))) if data.len()>=82=>{
+            const SPL_TOKEN:&str="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+            const TOKEN_2022:&str="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnB9J3q6k7";
+            if owner==SPL_TOKEN||owner==TOKEN_2022{result.decimals=Some(data[44]);}
+            else{result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc","Mint account is owned by an unsupported token program.",json!({"owner":owner,"account_data_length":data.len()})));}
         }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::debug!(%error, mint_address=%mint, "Mint account metadata lookup failed")
-        }
+        Ok(Some((owner,data,_)))=>result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc","Mint account data is shorter than the expected SPL mint layout.",json!({"owner":owner,"account_data_length":data.len(),"minimum_expected":82}))),
+        Ok(None)=>result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc","The mint account was not found by the RPC provider.",json!({"result":null}))),
+        Err(error)=>result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))),
     }
-
-    match rpc.resolve_token_metadata(mint).await {
-        Ok(metadata) => {
-            result.name = metadata.name;
-            result.symbol = metadata.symbol;
-            result.metadata_uri = metadata.uri;
+    match rpc.resolve_token_metadata(mint).await{
+        Ok(metadata)=>{
+            result.name=metadata.name;result.symbol=metadata.symbol;result.metadata_uri=metadata.uri;
+            if metadata.status=="unavailable"||metadata.status=="unverified"{result.errors.push(token_diagnostic(mint,"on_chain_metadata","solana_rpc",metadata.caveat.clone(),serde_json::to_value(&metadata).unwrap_or_else(|_|json!({"status":metadata.status}))));}
         }
-        Err(error) => {
-            tracing::debug!(%error, mint_address=%mint, "Token-program metadata lookup failed")
-        }
+        Err(error)=>result.errors.push(token_diagnostic(mint,"on_chain_metadata","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))),
     }
-
-    if let Some(uri) = result.metadata_uri.as_deref() {
-        // Normalize common decentralized-storage URI schemes to HTTPS gateways.
-        // The original metadata URI remains unchanged in the event/state.
-        let fetch_uri = if let Some(path) = uri.strip_prefix("ipfs://") {
-            format!("https://ipfs.io/ipfs/{}", path.trim_start_matches("ipfs/"))
-        } else if let Some(path) = uri.strip_prefix("ar://") {
-            format!("https://arweave.net/{}", path.trim_start_matches('/'))
-        } else {
-            uri.to_owned()
-        };
-        if let Ok(url) = reqwest::Url::parse(&fetch_uri) {
-            let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-            let ip_literal = host.parse::<std::net::IpAddr>().is_ok();
-            let unsafe_host = ip_literal
-                || host == "localhost"
-                || host.ends_with(".localhost")
-                || host.ends_with(".local");
-            if url.scheme() == "https" && !unsafe_host {
-                let client = reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(Duration::from_secs(5))
-                    .build()?;
-                if let Ok(mut response) = client
-                    .get(url)
-                    .header(reqwest::header::ACCEPT, "application/json")
-                    .send()
-                    .await
-                {
-                    if response.status().is_success()
-                        && response
-                            .content_length()
-                            .map(|length| length <= 262_144)
-                            .unwrap_or(true)
-                    {
-                        let mut bytes = Vec::new();
-                        let mut within_limit = true;
-                        loop {
-                            match response.chunk().await {
-                                Ok(Some(chunk)) => {
-                                    if bytes.len().saturating_add(chunk.len()) > 262_144 {
-                                        within_limit = false;
-                                        break;
+    if let Some(uri)=result.metadata_uri.as_deref(){
+        let fetch_uri=if let Some(path)=uri.strip_prefix("ipfs://"){format!("https://ipfs.io/ipfs/{}",path.trim_start_matches("ipfs/"))}
+            else if let Some(path)=uri.strip_prefix("ar://"){format!("https://arweave.net/{}",path.trim_start_matches('/'))}else{uri.to_owned()};
+        match reqwest::Url::parse(&fetch_uri){
+            Ok(url)=>{
+                let host=url.host_str().unwrap_or_default().to_ascii_lowercase();
+                let unsafe_host=host.parse::<std::net::IpAddr>().is_ok()||host=="localhost"||host.ends_with(".localhost")||host.ends_with(".local");
+                if url.scheme()!="https"||unsafe_host{
+                    result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri","Metadata URI was blocked because it is not a permitted public HTTPS URL.",json!({"uri_scheme":url.scheme(),"host":host,"blocked":true})));
+                }else{
+                    match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(5)).build(){
+                        Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"client_configuration_error","message":error.to_string()}))),
+                        Ok(client)=>match client.get(url).header(reqwest::header::ACCEPT,"application/json").send().await{
+                            Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"transport_error","message":error.to_string()}))),
+                            Ok(mut response)=>{
+                                let status=response.status();let content_length=response.content_length();let mut bytes=Vec::new();
+                                let mut too_large=content_length.is_some_and(|length|length>262_144);
+                                while !too_large{match response.chunk().await{
+                                    Ok(Some(chunk))=>{if bytes.len().saturating_add(chunk.len())>262_144{too_large=true;break;}bytes.extend_from_slice(&chunk);}
+                                    Ok(None)=>break,
+                                    Err(error)=>{result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()})));break;}
+                                }}
+                                if too_large{result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri","Metadata response exceeded the 256 KiB safety limit.",json!({"content_length":content_length,"received_bytes":bytes.len(),"maximum_bytes":262144})));}
+                                else if !status.is_success(){
+                                    let body=String::from_utf8_lossy(&bytes);let raw=serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|_|json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
+                                    result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",format!("Metadata provider returned HTTP {status}."),json!({"http_status":status.as_u16(),"response":raw})));
+                                }else{match serde_json::from_slice::<serde_json::Value>(&bytes){
+                                    Ok(value)=>{
+                                        result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);
+                                        if result.name.is_none(){result.name=value.get("name").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
+                                        if result.symbol.is_none(){result.symbol=value.get("symbol").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
                                     }
-                                    bytes.extend_from_slice(&chunk);
-                                }
-                                Ok(None) => break,
-                                Err(_) => {
-                                    within_limit = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if within_limit {
-                            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                                result.logo_url = value
-                                    .get("image")
-                                    .or_else(|| value.get("image_url"))
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::trim)
-                                    .filter(|value| !value.is_empty())
-                                    .map(str::to_owned);
-                                if result.name.is_none() {
-                                    result.name = value
-                                        .get("name")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::trim)
-                                        .filter(|value| !value.is_empty())
-                                        .map(str::to_owned);
-                                }
-                                if result.symbol.is_none() {
-                                    result.symbol = value
-                                        .get("symbol")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::trim)
-                                        .filter(|value| !value.is_empty())
-                                        .map(str::to_owned);
-                                }
+                                    Err(error)=>{let body=String::from_utf8_lossy(&bytes);result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",format!("Metadata response was not valid JSON: {error}"),json!({"kind":"invalid_json","response_text":body.chars().take(65_536).collect::<String>()})));}
+                                }}
                             }
                         }
                     }
                 }
             }
+            Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"invalid_metadata_uri","message":error.to_string()}))),
         }
     }
-
-    result.status = if result.name.is_some()
-        && result.symbol.is_some()
-        && result.decimals.is_some()
-        && result.logo_url.is_some()
-    {
-        "complete"
-    } else if result.name.is_some()
-        || result.symbol.is_some()
-        || result.decimals.is_some()
-        || result.metadata_uri.is_some()
-        || result.logo_url.is_some()
-    {
-        "partial"
-    } else {
-        "unavailable"
-    };
+    result.status=if result.name.is_some()&&result.symbol.is_some()&&result.decimals.is_some()&&result.logo_url.is_some(){"complete"}
+        else if result.name.is_some()||result.symbol.is_some()||result.decimals.is_some()||result.metadata_uri.is_some()||result.logo_url.is_some(){"partial"}else{"unavailable"};
     Ok(result)
 }
 
@@ -706,12 +655,14 @@ fn start_launch_processor(
                 let metadata = match metadata_result {
                     Ok(Ok(metadata)) => metadata,
                     Ok(Err(error)) => {
-                        tracing::warn!(%error, mint_address=%mint_address, "Initial token metadata resolution failed; continuing with partial discovery");
-                        DiscoveryMetadata::partial()
+                        tracing::warn!(%error,mint_address=%mint_address,"Initial token metadata resolution failed; continuing with partial discovery");
+                        let mut partial=DiscoveryMetadata::partial();
+                        partial.errors.push(token_diagnostic(&mint_address,"metadata_resolution","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}"))));partial
                     }
                     Err(_) => {
-                        tracing::warn!(mint_address=%mint_address, "Initial token metadata resolution timed out; continuing with partial discovery");
-                        DiscoveryMetadata::partial()
+                        let mut partial=DiscoveryMetadata::partial();let message="Initial token metadata resolution timed out after 10 seconds.";
+                        tracing::warn!(mint_address=%mint_address,"{message}");
+                        partial.errors.push(token_diagnostic(&mint_address,"metadata_resolution","solana_rpc",message,json!({"kind":"timeout","timeout_seconds":10})));partial
                     }
                 };
 
@@ -782,6 +733,7 @@ fn start_launch_processor(
                         // Keep the legacy event enriched so existing clients also receive
                         // metadata before the scanner begins.
                         let _ = events.send(json!({"type":"launch_detected","data":legacy_launch}));
+                        for diagnostic in &metadata.errors { let _=events.send(json!({"type":"token_diagnostic","data":diagnostic})); }
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
@@ -908,23 +860,23 @@ fn start_launch_processor(
                                     report.creator_history = Some(creator_report);
                                 }
                                 Ok(Err(error)) => {
-                                    report.checks.push(nodex_solana::SecurityCheck {
-                                        name: "creator_history".into(),
-                                        status: "unverified".into(),
-                                        severity: "high".into(),
-                                        detail: format!("Creator history lookup failed: {error}"),
-                                    });
+                                    let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"creator_history","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))}));
+                                    report.checks.push(nodex_solana::SecurityCheck{name:"creator_history".into(),status:"unverified".into(),severity:"high".into(),detail:format!("Creator history lookup failed: {error}")});
                                 }
                                 Err(_) => {
-                                    report.checks.push(nodex_solana::SecurityCheck {
-                                        name: "creator_history".into(),
-                                        status: "unverified".into(),
-                                        severity: "high".into(),
-                                        detail: "Creator history lookup exceeded its 15-second time budget.".into(),
-                                    });
+                                    let message="Creator history lookup exceeded its 15-second time budget.";
+                                    let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"creator_history","solana_rpc",message,json!({"kind":"timeout","timeout_seconds":15}))}));
+                                    report.checks.push(nodex_solana::SecurityCheck{name:"creator_history".into(),status:"unverified".into(),severity:"high".into(),detail:message.into()});
                                 }
                             }
 
+                            if let Some(details)=report.rugcheck.error_details.clone(){
+                                let message=report.rugcheck.error.clone().unwrap_or_else(||"RugCheck provider request failed.".into());
+                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"rugcheck","rugcheck",message,details)}));
+                            }
+                            for check in &report.checks{if check.name=="holder_distribution"&&check.detail.contains("NODEX_PROVIDER_ERROR_JSON:"){
+                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"holder_distribution","solana_rpc",check.detail.clone(),provider_error_details(&check.detail))}));
+                            }}
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -982,23 +934,10 @@ fn start_launch_processor(
                                             let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
                                         }
                                     } else {
-                                        terminal_status = "unverified";
-                                        // Roll back a launch row if the canonical approved state could
-                                        // not be committed. This keeps failed approvals out of durable storage.
-                                        if let Err(error) =
-                                            nodex_persistence::delete_token_launches(
-                                                &approved_database,
-                                                &scan_mint,
-                                            )
-                                            .await
-                                        {
-                                            tracing::error!(%error, mint_address=%scan_mint, "Could not roll back launch row after approval persistence failure");
-                                        }
-                                        approved_registry.remove(&scan_mint);
-                                        let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                            "mint_address":scan_mint,
-                                            "reason":"Approved token state could not be committed."
-                                        }}));
+                                        terminal_status="unverified";
+                                        let message="Security approval could not be persisted to SQLite; token is retained as unverified.";
+                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",message,json!({"kind":"database_persistence_error","message":message}))}));
+                                        if let Some(snapshot)=approved_registry.get(&scan_mint){let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));}
                                     }
                                 }
                                 "REJECTED" => {
@@ -1016,18 +955,22 @@ fn start_launch_processor(
                                     }}));
                                 }
                                 _ => {
-                                    approved_registry.remove(&scan_mint);
-                                    let _ = scan_events.send(
-                                        json!({"type":"token_scan_update","data":report.clone()}),
-                                    );
-                                    let _ = scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                        "mint_address":scan_mint,
-                                        "reason":"Token did not receive an explicit APPROVED decision."
-                                    }}));
-                                    let _ = scan_events.send(json!({"type":"token_approval_pending","data":{
-                                        "mint_address":scan_mint,"decision":decision,
-                                        "reason":"Token remains isolated until an explicit APPROVED decision is produced."
-                                    }}));
+                                    let mut security_state=serde_json::to_value(&report).unwrap_or_else(|_|json!({}));
+                                    if let Some(object)=security_state.as_object_mut(){object.insert("status".into(),json!("unverified"));}
+                                    match approved_registry.upsert_patch(&scan_mint,json!({"security":security_state,"market":{"status":"not_started"}})){
+                                        Ok(snapshot)=>{
+                                            if let Err(error)=nodex_persistence::save_token_state(&approved_database,&snapshot).await{
+                                                terminal_status="unverified";
+                                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
+                                            }else{let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));}
+                                        }
+                                        Err(error)=>{let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",error.to_string(),json!({"kind":"token_registry_error","message":error.to_string()}))}));}
+                                    }
+                                    if let Err(error)=nodex_persistence::save_launch(&approved_database,&launch).await{
+                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
+                                    }
+                                    let _=scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                    let _=scan_events.send(json!({"type":"token_approval_pending","data":{"mint_address":scan_mint,"decision":decision,"reason":"Token remains visible but isolated until an explicit APPROVED decision is produced."}}));
                                 }
                             }
                             let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
@@ -1037,21 +980,21 @@ fn start_launch_processor(
                             }}));
                         }
                         Err(error) => {
-                            approved_registry.remove(&scan_mint);
-                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
-                                "severity":"error","component":"token_security_scanner",
-                                "message":error,"mint_address":scan_mint,
-                                "received_at":chrono::Utc::now().to_rfc3339()
-                            }}));
-                            let _ = scan_events.send(json!({"type":"token_scan_failed","data":{
-                                "mint_address":scan_mint,"decision":"UNVERIFIED",
-                                "decision_reason":error,"status":"failed",
-                                "received_at":chrono::Utc::now().to_rfc3339()
-                            }}));
-                            let _ =
-                                scan_events.send(json!({"type":"token_rejected_cleanup","data":{
-                                    "mint_address":scan_mint,"reason":error
-                                }}));
+                            let error_details=provider_error_details(&error);
+                            let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
+                            let _=scan_events.send(json!({"type":"diagnostic","data":{"severity":"error","component":"token_security_scanner","message":error,"mint_address":scan_mint,"received_at":chrono::Utc::now().to_rfc3339()}}));
+                            let _=scan_events.send(json!({"type":"token_scan_failed","data":{"mint_address":scan_mint,"decision":"UNVERIFIED","decision_reason":error,"error_details":error_details,"status":"failed","received_at":chrono::Utc::now().to_rfc3339()}}));
+                            match approved_registry.upsert_patch(&scan_mint,json!({"security":{"status":"failed","decision":"UNVERIFIED","decision_reason":error,"error_details":error_details},"market":{"status":"not_started"}})){
+                                Ok(snapshot)=>{
+                                    if let Err(persist_error)=nodex_persistence::save_token_state(&approved_database,&snapshot).await{
+                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
+                                    }else{let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));}
+                                }
+                                Err(state_error)=>{let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",state_error.to_string(),json!({"kind":"token_registry_error","message":state_error.to_string()}))}));}
+                            }
+                            if let Err(persist_error)=nodex_persistence::save_launch(&approved_database,&launch).await{
+                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
+                            }
                         }
                     }
                     if token_approved {

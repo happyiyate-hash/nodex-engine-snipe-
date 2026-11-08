@@ -15,6 +15,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("token_scan_progress")
             | Some("token_scan_completed")
             | Some("token_scan_failed")
+            | Some("token_diagnostic")
             | Some("token_metadata_started")
             | Some("token_metadata_failed")
             | Some("token_metadata_updated")

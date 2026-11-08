@@ -147,6 +147,7 @@ pub fn build_token_detail_snapshot(
         "mint_address": mint,
         "version": state.map(|item| item.version).unwrap_or(0),
         "updated_at": state.map(|item| item.updated_at.to_rfc3339()),
+        "diagnostics": data.and_then(|value| value.get("diagnostics")).cloned().unwrap_or_else(|| json!([])),
         "identity": {
             "name": identity.get("name").cloned().unwrap_or(Value::Null),
             "symbol": identity.get("symbol").cloned().unwrap_or(Value::Null),
