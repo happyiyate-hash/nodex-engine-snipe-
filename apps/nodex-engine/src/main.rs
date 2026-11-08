@@ -2066,8 +2066,10 @@ async fn token_state(
 /// dashboard refresh), then persists and broadcasts the refreshed snapshot.
 async fn refresh_token_metadata(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(mint): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
     let rpc = state.rpc.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Solana HTTP RPC is not configured".to_string(),
