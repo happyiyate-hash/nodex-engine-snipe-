@@ -2528,16 +2528,27 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 match activity_receiver.recv().await {
-                    Ok(event) if event.get("type").and_then(serde_json::Value::as_str) == Some("engine_activity") => {
+                    Ok(event)
+                        if event.get("type").and_then(serde_json::Value::as_str)
+                            == Some("engine_activity") =>
+                    {
                         if let Some(activity) = event.get("data") {
-                            if let Err(error) = nodex_persistence::save_engine_activity_log(&activity_database, activity).await {
+                            if let Err(error) = nodex_persistence::save_engine_activity_log(
+                                &activity_database,
+                                activity,
+                            )
+                            .await
+                            {
                                 tracing::error!(%error, "Could not persist engine activity log");
                             }
                         }
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(dropped_events=count, "Engine activity persistence subscriber lagged");
+                        tracing::warn!(
+                            dropped_events = count,
+                            "Engine activity persistence subscriber lagged"
+                        );
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -2547,8 +2558,10 @@ async fn main() -> anyhow::Result<()> {
     let (database_changes, database_change_receiver) = mpsc::channel(512);
     let gateway = websocket::Gateway::start(events.subscribe(), database_change_receiver, 4096);
     if let (Some(rpc_client), Some(address)) = (
-        (!config.solana_http_urls.is_empty())
-            .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()).with_activity_events(events.clone())),
+        (!config.solana_http_urls.is_empty()).then(|| {
+            SolanaRpc::new_with_urls(config.solana_http_urls.clone())
+                .with_activity_events(events.clone())
+        }),
         wallet_address.clone(),
     ) {
         let profile_for_sync = profile_state.clone();
@@ -2639,8 +2652,10 @@ async fn main() -> anyhow::Result<()> {
         database_changes.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
-    let rpc = (!config.solana_http_urls.is_empty())
-        .then(|| SolanaRpc::new_with_urls(config.solana_http_urls.clone()).with_activity_events(events.clone()));
+    let rpc = (!config.solana_http_urls.is_empty()).then(|| {
+        SolanaRpc::new_with_urls(config.solana_http_urls.clone())
+            .with_activity_events(events.clone())
+    });
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
