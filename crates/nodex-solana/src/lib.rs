@@ -127,7 +127,10 @@ impl SolanaRpc {
         Self {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .build()
+                .expect("valid Solana RPC HTTP client configuration"),
             activity_events: None,
         }
     }
@@ -142,6 +145,12 @@ impl SolanaRpc {
         if let Some(events) = &self.activity_events {
             let _ = events.send(json!({"type":"engine_activity","data":data}));
         }
+    }
+
+    /// Fetch indexed token metadata through the Helius Digital Asset Standard API.
+    /// Non-Helius RPC providers may return method-not-found; callers should fall back safely.
+    pub async fn get_asset(&self, mint: &str) -> Result<Value> {
+        self.call("getAsset", json!([mint])).await
     }
 
     /// Read the confirmed native SOL balance for a public wallet address.
