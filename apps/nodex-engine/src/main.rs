@@ -896,6 +896,7 @@ fn start_launch_processor(
                 let approved_registry = token_registry.clone();
                 let approved_database = database.clone();
                 let inflight_mints_for_scan = inflight_mints.clone();
+                let authority_monitor_slots_for_scan = authority_monitor_slots.clone();
                 tokio::spawn(async move {
                     let progress_events = scan_events.clone();
                     let progress_mint = scan_mint.clone();
@@ -1239,7 +1240,7 @@ fn start_launch_processor(
                     // authority monitor, including tokens that are still unverified.
                     // This lightweight pass reads only the mint account; it does not
                     // repeat holder sampling or call external security providers.
-                    if let Ok(monitor_permit) = authority_monitor_slots.clone().try_acquire_owned()
+                    if let Ok(monitor_permit) = authority_monitor_slots_for_scan.try_acquire_owned()
                     {
                         let monitor_rpc = scan_rpc.clone();
                         let monitor_events = scan_events.clone();
