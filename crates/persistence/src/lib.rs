@@ -344,7 +344,6 @@ pub async fn get_token_state(pool: &SqlitePool, mint: &str) -> Result<Option<Tok
         .transpose()
 }
 
-
 /** Persist structured provider activity, retaining only the newest 5,000 cards. */
 pub async fn save_engine_activity_log(
     pool: &SqlitePool,
@@ -355,13 +354,11 @@ pub async fn save_engine_activity_log(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     let activity_json = serde_json::to_string(activity)?;
-    sqlx::query(
-        "INSERT INTO engine_activity_logs (recorded_at, activity_json) VALUES (?, ?)",
-    )
-    .bind(recorded_at)
-    .bind(activity_json)
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT INTO engine_activity_logs (recorded_at, activity_json) VALUES (?, ?)")
+        .bind(recorded_at)
+        .bind(activity_json)
+        .execute(pool)
+        .await?;
     sqlx::query(
         "DELETE FROM engine_activity_logs WHERE id NOT IN (SELECT id FROM engine_activity_logs ORDER BY id DESC LIMIT 5000)",
     )
