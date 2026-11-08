@@ -500,6 +500,7 @@ fn token_diagnostic(
 async fn resolve_discovery_metadata(
     rpc: &SolanaRpc,
     mint: &str,
+    activity_events: &broadcast::Sender<serde_json::Value>,
 ) -> anyhow::Result<DiscoveryMetadata> {
     let mut result = DiscoveryMetadata::partial();
     match rpc.get_account_data(mint).await {
@@ -593,8 +594,23 @@ async fn resolve_discovery_metadata(
                 } else {
                     match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(5)).build(){
                         Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"client_configuration_error","message":error.to_string()}))),
-                        Ok(client)=>match client.get(url).header(reqwest::header::ACCEPT,"application/json").send().await{
-                            Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"transport_error","message":error.to_string()}))),
+                        Ok(client)=>{
+                            let activity_id = uuid::Uuid::new_v4().to_string();
+                            let request_started = std::time::Instant::now();
+                            let _ = activity_events.send(json!({"type":"engine_activity","data":{
+                                "id":activity_id,"correlation_id":activity_id,"timestamp":chrono::Utc::now().to_rfc3339(),
+                                "direction":"request","provider":"token_metadata_uri","operation":"GET",
+                                "token_mint":mint,"endpoint":host,"request":{"method":"GET","url":format!("{}://{}{}",url.scheme(),host,url.path())}
+                            }}));
+                            match client.get(url).header(reqwest::header::ACCEPT,"application/json").send().await{
+                            Err(error)=>{
+                                let _ = activity_events.send(json!({"type":"engine_activity","data":{
+                                    "id":format!("{activity_id}-response"),"correlation_id":activity_id,"timestamp":chrono::Utc::now().to_rfc3339(),
+                                    "direction":"response","provider":"token_metadata_uri","operation":"GET","token_mint":mint,
+                                    "endpoint":host,"duration_ms":request_started.elapsed().as_millis(),"severity":"error","error":error.to_string()
+                                }}));
+                                result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"transport_error","message":error.to_string()})));
+                            },
                             Ok(mut response)=>{
                                 let status=response.status();let content_length=response.content_length();let mut bytes=Vec::new();
                                 let mut too_large=content_length.is_some_and(|length|length>262_144);
@@ -603,6 +619,19 @@ async fn resolve_discovery_metadata(
                                     Ok(None)=>break,
                                     Err(error)=>{result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()})));break;}
                                 }}
+                                let response_preview = String::from_utf8_lossy(&bytes);
+                                let response_json = serde_json::from_slice::<serde_json::Value>(&bytes)
+                                    .unwrap_or_else(|_| json!({"raw_text":response_preview.chars().take(32_768).collect::<String>()}));
+                                let response_text = serde_json::to_string(&response_json).unwrap_or_default();
+                                let response_truncated = response_text.len() > 32_768 || too_large;
+                                let _ = activity_events.send(json!({"type":"engine_activity","data":{
+                                    "id":format!("{activity_id}-response"),"correlation_id":activity_id,"timestamp":chrono::Utc::now().to_rfc3339(),
+                                    "direction":"response","provider":"token_metadata_uri","operation":"GET","token_mint":mint,
+                                    "endpoint":host,"duration_ms":request_started.elapsed().as_millis(),"http_status":status.as_u16(),
+                                    "severity":if status.is_success() && !too_large {"info"} else {"error"},
+                                    "body_truncated":response_truncated,
+                                    "response":if response_truncated {json!({"truncated":true,"preview":response_text.chars().take(32_768).collect::<String>()})} else {response_json}
+                                }}));
                                 if too_large{result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri","Metadata response exceeded the 256 KiB safety limit.",json!({"content_length":content_length,"received_bytes":bytes.len(),"maximum_bytes":262144})));}
                                 else if !status.is_success(){
                                     let body=String::from_utf8_lossy(&bytes);let raw=serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|_|json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
@@ -615,6 +644,7 @@ async fn resolve_discovery_metadata(
                                     }
                                     Err(error)=>{let body=String::from_utf8_lossy(&bytes);result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",format!("Metadata response was not valid JSON: {error}"),json!({"kind":"invalid_json","response_text":body.chars().take(65_536).collect::<String>()})));}
                                 }}
+                            }
                             }
                         }
                     }
@@ -771,7 +801,7 @@ fn start_launch_processor(
                 // Resolve identity before announcing discovery or starting security analysis.
                 let metadata_result = tokio::time::timeout(
                     Duration::from_secs(10),
-                    resolve_discovery_metadata(&rpc, &mint_address),
+                    resolve_discovery_metadata(&rpc, &mint_address, &events),
                 )
                 .await;
                 let metadata = match metadata_result {
