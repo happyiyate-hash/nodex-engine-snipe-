@@ -2561,8 +2561,10 @@ async fn main() -> anyhow::Result<()> {
                                 | Some("transaction_failed")
                         ) {
                             let data = event.get("data").cloned().unwrap_or_else(|| event.clone());
-                            let severity = if event_type.is_some_and(|kind| kind.ends_with("_failed"))
-                                || data.get("severity").and_then(serde_json::Value::as_str) == Some("error")
+                            let severity = if event_type
+                                .is_some_and(|kind| kind.ends_with("_failed"))
+                                || data.get("severity").and_then(serde_json::Value::as_str)
+                                    == Some("error")
                             {
                                 "error"
                             } else {
