@@ -1132,16 +1132,37 @@ fn token_2022_extension_name(kind: u16) -> &'static str {
     }
 }
 
+const TOKEN_2022_MINT_BASE_LEN: usize = 82;
+const TOKEN_2022_ACCOUNT_TYPE_OFFSET: usize = 165;
+const TOKEN_2022_TLV_OFFSET: usize = 166;
+const TOKEN_2022_MINT_ACCOUNT_TYPE: u8 = 1;
+
+fn token_2022_tlv_start(data: &[u8]) -> Result<Option<usize>> {
+    // A mint without extensions uses the original 82-byte SPL Mint layout.
+    if data.len() == TOKEN_2022_MINT_BASE_LEN {
+        return Ok(None);
+    }
+    // Extended mints are padded to 165 bytes, carry AccountType::Mint at
+    // offset 165, and start TLV records at offset 166.
+    if data.len() < TOKEN_2022_TLV_OFFSET {
+        return Err(anyhow!("Token-2022 mint extension envelope is truncated"));
+    }
+    if data[TOKEN_2022_MINT_BASE_LEN..TOKEN_2022_ACCOUNT_TYPE_OFFSET]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(anyhow!("Token-2022 mint padding is invalid"));
+    }
+    if data[TOKEN_2022_ACCOUNT_TYPE_OFFSET] != TOKEN_2022_MINT_ACCOUNT_TYPE {
+        return Err(anyhow!("Token-2022 account type is not Mint"));
+    }
+    Ok(Some(TOKEN_2022_TLV_OFFSET))
+}
+
 fn parse_token_2022_extensions(data: &[u8]) -> Result<Vec<String>> {
-    if data.len() <= 82 {
+    let Some(mut offset) = token_2022_tlv_start(data)? else {
         return Ok(vec![]);
-    }
-    // Token-2022 extended mint accounts contain an account-type byte after the
-    // 82-byte base Mint layout, followed by little-endian type/length TLV records.
-    if data.len() < 83 {
-        return Err(anyhow!("Token-2022 mint extension header is truncated"));
-    }
-    let mut offset = 83usize;
+    };
     let mut extensions = Vec::new();
     while offset < data.len() {
         if data[offset..].iter().all(|byte| *byte == 0) {
@@ -1200,10 +1221,9 @@ fn parse_token_2022_metadata(data: &[u8]) -> Result<TokenMetadataReport> {
         caveat: "No on-mint TokenMetadata extension was found; external metadata accounts are not yet decoded.".into(),
         ..Default::default()
     };
-    if data.len() <= 82 {
+    let Some(mut offset) = token_2022_tlv_start(data)? else {
         return Ok(report);
-    }
-    let mut offset = 83usize;
+    };
     while offset + 4 <= data.len() {
         if data[offset..].iter().all(|byte| *byte == 0) {
             break;
@@ -1273,13 +1293,33 @@ pub fn parse_mint_security_report(
     let supply = u64::from_le_bytes(data[36..44].try_into().expect("eight-byte supply"));
     let decimals = data[44];
     let freeze_authority = read_coption_pubkey(data, 46)?;
-    let extensions = if token_program == "token_2022" {
-        parse_token_2022_extensions(data)?
+    let (extensions, extension_error) = if token_program == "token_2022" {
+        match parse_token_2022_extensions(data) {
+            Ok(extensions) => (extensions, None),
+            Err(error) => (vec![], Some(error.to_string())),
+        }
     } else {
-        vec![]
+        (vec![], None)
     };
     let metadata = if token_program == "token_2022" {
-        parse_token_2022_metadata(data)?
+        if let Some(error) = extension_error.as_deref() {
+            TokenMetadataReport {
+                source: "token_2022_extensions".into(),
+                status: "unverified".into(),
+                caveat: format!("Token-2022 extension data could not be verified: {error}"),
+                ..Default::default()
+            }
+        } else {
+            match parse_token_2022_metadata(data) {
+                Ok(metadata) => metadata,
+                Err(error) => TokenMetadataReport {
+                    source: "token_2022_extensions".into(),
+                    status: "unverified".into(),
+                    caveat: format!("Token-2022 metadata could not be verified: {error}"),
+                    ..Default::default()
+                },
+            }
+        }
     } else {
         TokenMetadataReport {
             source: "metaplex_external_not_yet_supported".into(),
@@ -1289,6 +1329,14 @@ pub fn parse_mint_security_report(
         }
     };
     let mut checks = Vec::new();
+    if let Some(error) = extension_error {
+        checks.push(SecurityCheck {
+            name: "token_2022_extensions".into(),
+            status: "unverified".into(),
+            severity: "critical".into(),
+            detail: format!("Token-2022 extensions could not be verified; the token must remain blocked: {error}"),
+        });
+    }
     checks.push(SecurityCheck {
         name: "mint_authority".into(),
         status: if mint_authority.is_none() { "passed" } else { "failed" }.into(),
@@ -1972,6 +2020,60 @@ async fn connect_and_subscribe(
     let reconnect_count = status.read().await.reconnect_count;
     let _ = sender.send(json!({"type":"provider_status","data":{"provider":"solana_websocket","stream_name":stream_name,"connected":false,"reconnect_count":reconnect_count,"program_id":program_id,"reason":"WebSocket stream closed","received_at":chrono::Utc::now().to_rfc3339()}}));
     Ok(())
+}
+
+#[cfg(test)]
+mod token_2022_layout_tests {
+    use super::*;
+
+    fn mint_with_extension(kind: u16, value: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; TOKEN_2022_ACCOUNT_TYPE_OFFSET];
+        data.push(TOKEN_2022_MINT_ACCOUNT_TYPE);
+        data.extend_from_slice(&kind.to_le_bytes());
+        data.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        data.extend_from_slice(value);
+        data
+    }
+
+    #[test]
+    fn reads_extensions_from_the_canonical_offset_166() {
+        let data = mint_with_extension(9, &[]);
+        assert_eq!(parse_token_2022_extensions(&data).unwrap(), vec!["non_transferable"]);
+    }
+
+    #[test]
+    fn malformed_extension_is_reported_as_unverified_not_a_scan_abort() {
+        let mut data = vec![0u8; TOKEN_2022_ACCOUNT_TYPE_OFFSET];
+        data.push(TOKEN_2022_MINT_ACCOUNT_TYPE);
+        data.extend_from_slice(&9u16.to_le_bytes());
+        data.extend_from_slice(&64u16.to_le_bytes());
+        data.extend_from_slice(&[1, 2, 3]);
+
+        let report = parse_mint_security_report(
+            "11111111111111111111111111111111",
+            TOKEN_2022_PROGRAM_ID,
+            &data,
+            Some(1),
+        )
+        .expect("malformed extension must not abort the whole security report");
+
+        assert_eq!(report.decision, "UNVERIFIED");
+        assert!(report.checks.iter().any(|check|
+            check.name == "token_2022_extensions" && check.status == "unverified"
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_account_type_and_nonzero_mint_padding() {
+        let mut wrong_type = vec![0u8; TOKEN_2022_TLV_OFFSET];
+        wrong_type[TOKEN_2022_ACCOUNT_TYPE_OFFSET] = 2;
+        assert!(parse_token_2022_extensions(&wrong_type).is_err());
+
+        let mut bad_padding = vec![0u8; TOKEN_2022_TLV_OFFSET];
+        bad_padding[100] = 1;
+        bad_padding[TOKEN_2022_ACCOUNT_TYPE_OFFSET] = TOKEN_2022_MINT_ACCOUNT_TYPE;
+        assert!(parse_token_2022_extensions(&bad_padding).is_err());
+    }
 }
 
 #[cfg(test)]
