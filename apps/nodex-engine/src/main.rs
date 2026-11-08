@@ -3045,7 +3045,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/tokens/:mint/state", get(token_state))
-        .route("/api/v1/tokens/:mint/metadata/refresh", post(refresh_token_metadata))
+        .route(
+            "/api/v1/tokens/:mint/metadata/refresh",
+            post(refresh_token_metadata),
+        )
         .route("/api/v1/events/recent", get(recent_events))
         .route("/api/v1/admin/activity-logs", get(engine_activity_logs))
         .route("/api/v1/admin/storage/overview", get(storage_overview))
