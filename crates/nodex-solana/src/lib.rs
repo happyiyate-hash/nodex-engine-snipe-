@@ -2037,7 +2037,7 @@ mod transaction_decoder_tests {
     }
 
     #[test]
-    fn active_authority_is_a_mandatory_policy_blocker() {
+    fn active_authority_remains_unverified_and_requires_rechecks() {
         let report = parse_mint_security_report(
             "MintAddress",
             SPL_TOKEN_PROGRAM_ID,
@@ -2045,8 +2045,9 @@ mod transaction_decoder_tests {
             Some(123),
         )
         .expect("valid SPL mint should parse");
-        assert_eq!(report.decision, "REJECTED");
+        assert_eq!(report.decision, "UNVERIFIED");
         assert!(report.mint_authority.is_some());
+        assert!(report.decision_reason.contains("high-risk warning"));
     }
 
     #[test]
