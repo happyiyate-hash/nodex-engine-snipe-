@@ -575,7 +575,8 @@ async fn resolve_discovery_metadata(
             let content = asset.get("content").unwrap_or(&serde_json::Value::Null);
             let metadata = content.get("metadata").unwrap_or(&serde_json::Value::Null);
             let take_string = |value: Option<&serde_json::Value>| {
-                value.and_then(serde_json::Value::as_str)
+                value
+                    .and_then(serde_json::Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_owned)
@@ -593,12 +594,16 @@ async fn resolve_discovery_metadata(
                 result.logo_url = take_string(content.pointer("/links/image"));
             }
             if result.logo_url.is_none() {
-                result.logo_url = content.get("files")
+                result.logo_url = content
+                    .get("files")
                     .and_then(serde_json::Value::as_array)
-                    .and_then(|files| files.iter().find(|file| {
-                        file.get("mime").and_then(serde_json::Value::as_str)
-                            .is_some_and(|mime| mime.starts_with("image/"))
-                    }))
+                    .and_then(|files| {
+                        files.iter().find(|file| {
+                            file.get("mime")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|mime| mime.starts_with("image/"))
+                        })
+                    })
                     .and_then(|file| take_string(file.get("uri")));
             }
         }
@@ -715,13 +720,23 @@ async fn resolve_discovery_metadata(
             "operation":"GET /latest/dex/tokens/{tokenAddress}","token_mint":mint,
             "request":{"method":"GET","path":format!("/latest/dex/tokens/{mint}")}
         }}));
-        match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
             Err(error) => result.errors.push(token_diagnostic(
-                mint,"dexscreener_metadata","dexscreener",error.to_string(),
+                mint,
+                "dexscreener_metadata",
+                "dexscreener",
+                error.to_string(),
                 json!({"kind":"client_configuration_error","message":error.to_string()}),
             )),
-            Ok(client) => match client.get(&request_url)
-                .header(reqwest::header::ACCEPT,"application/json").send().await {
+            Ok(client) => match client
+                .get(&request_url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await
+            {
                 Err(error) => {
                     let _ = activity_events.send(json!({"type":"engine_activity","data":{
                         "id":format!("{activity_id}-response"),"correlation_id":activity_id,
@@ -731,7 +746,10 @@ async fn resolve_discovery_metadata(
                         "duration_ms":started.elapsed().as_millis(),"severity":"error","error":error.to_string()
                     }}));
                     result.errors.push(token_diagnostic(
-                        mint,"dexscreener_metadata","dexscreener",error.to_string(),
+                        mint,
+                        "dexscreener_metadata",
+                        "dexscreener",
+                        error.to_string(),
                         json!({"kind":"transport_error","message":error.to_string()}),
                     ));
                 }
@@ -795,7 +813,7 @@ async fn resolve_discovery_metadata(
                         }
                     }
                 }
-            }
+            },
         }
     }
 
