@@ -98,15 +98,22 @@ pub struct SolanaRpc {
     client: reqwest::Client,
 }
 
-fn redact_provider_value(value:&mut Value) {
-    let secrets:Vec<String>=(1..=5).filter_map(|i|std::env::var(format!("HELIUS_API_KEY{i}")).ok())
-        .chain(std::env::var("HELIUS_API_KEY").ok()).chain(std::env::var("RUGCHECK_API_KEY").ok())
-        .filter(|s|!s.trim().is_empty()).collect();
+fn redact_provider_value(value: &mut Value) {
+    let secrets: Vec<String> = (1..=5)
+        .filter_map(|i| std::env::var(format!("HELIUS_API_KEY{i}")).ok())
+        .chain(std::env::var("HELIUS_API_KEY").ok())
+        .chain(std::env::var("RUGCHECK_API_KEY").ok())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
     match value {
-        Value::String(text)=>for secret in &secrets {*text=text.replace(secret,"[REDACTED]");},
-        Value::Array(items)=>items.iter_mut().for_each(redact_provider_value),
-        Value::Object(items)=>items.values_mut().for_each(redact_provider_value),
-        _=>{}
+        Value::String(text) => {
+            for secret in &secrets {
+                *text = text.replace(secret, "[REDACTED]");
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_provider_value),
+        Value::Object(items) => items.values_mut().for_each(redact_provider_value),
+        _ => {}
     }
 }
 
@@ -135,52 +142,105 @@ impl SolanaRpc {
     }
 
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
-        if self.http_urls.is_empty() { return Err(anyhow!("No Solana HTTP RPC endpoints are configured")); }
+        if self.http_urls.is_empty() {
+            return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
+        }
         let mut last_error = None;
         let count = self.http_urls.len();
         let start = self.active_http_index.load(Ordering::Relaxed) % count;
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
-            let response = match self.client.post(url).json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})).send().await {
+            let response = match self
+                .client
+                .post(url)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+                .send()
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => {
-                    last_error = Some(anyhow!("NODEX_PROVIDER_ERROR_JSON:{}",json!({"provider":"solana_rpc","method":method,"kind":"transport_error","message":error.to_string()})));
-                    self.active_http_index.store((index+1)%count,Ordering::Relaxed); continue;
+                    last_error = Some(anyhow!(
+                        "NODEX_PROVIDER_ERROR_JSON:{}",
+                        json!({"provider":"solana_rpc","method":method,"kind":"transport_error","message":error.to_string()})
+                    ));
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
+                    continue;
                 }
             };
-            let status=response.status();
-            let body=match response.text().await {
-                Ok(body)=>body,
-                Err(error)=>{
-                    last_error=Some(anyhow!("NODEX_PROVIDER_ERROR_JSON:{}",json!({"provider":"solana_rpc","method":method,"kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()})));
-                    self.active_http_index.store((index+1)%count,Ordering::Relaxed);continue;
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    last_error = Some(anyhow!(
+                        "NODEX_PROVIDER_ERROR_JSON:{}",
+                        json!({"provider":"solana_rpc","method":method,"kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()})
+                    ));
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
+                    continue;
                 }
             };
-            let mut response_json=serde_json::from_str::<Value>(&body).unwrap_or_else(|_|json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
+            let mut response_json = serde_json::from_str::<Value>(&body).unwrap_or_else(
+                |_| json!({"raw_text":body.chars().take(65_536).collect::<String>()}),
+            );
             redact_provider_value(&mut response_json);
             if !status.is_success() {
-                last_error=Some(anyhow!("NODEX_PROVIDER_ERROR_JSON:{}",json!({"provider":"solana_rpc","method":method,"kind":"http_error","http_status":status.as_u16(),"response":response_json})));
-                if status.as_u16()==429||status.is_server_error()||status.as_u16()==401||status.as_u16()==403 {
-                    self.active_http_index.store((index+1)%count,Ordering::Relaxed);continue;
+                last_error = Some(anyhow!(
+                    "NODEX_PROVIDER_ERROR_JSON:{}",
+                    json!({"provider":"solana_rpc","method":method,"kind":"http_error","http_status":status.as_u16(),"response":response_json})
+                ));
+                if status.as_u16() == 429
+                    || status.is_server_error()
+                    || status.as_u16() == 401
+                    || status.as_u16() == 403
+                {
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
+                    continue;
                 }
                 return Err(last_error.expect("error was set"));
             }
-            let decoded=match serde_json::from_value::<RpcResponse<T>>(response_json.clone()) {
-                Ok(decoded)=>decoded,
-                Err(error)=>return Err(anyhow!("NODEX_PROVIDER_ERROR_JSON:{}",json!({"provider":"solana_rpc","method":method,"kind":"invalid_json_rpc_response","http_status":status.as_u16(),"decode_error":error.to_string(),"response":response_json}))),
+            let decoded = match serde_json::from_value::<RpcResponse<T>>(response_json.clone()) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    return Err(anyhow!(
+                        "NODEX_PROVIDER_ERROR_JSON:{}",
+                        json!({"provider":"solana_rpc","method":method,"kind":"invalid_json_rpc_response","http_status":status.as_u16(),"decode_error":error.to_string(),"response":response_json})
+                    ))
+                }
             };
-            if let Some(error)=decoded.error {
-                let message=error.get("message").and_then(Value::as_str).unwrap_or("JSON-RPC provider error");
-                let limited=message.to_ascii_lowercase().contains("rate")||message.to_ascii_lowercase().contains("too many")||message.contains("429");
-                last_error=Some(anyhow!("NODEX_PROVIDER_ERROR_JSON:{}",json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"response":error})));
-                if limited {self.active_http_index.store((index+1)%count,Ordering::Relaxed);continue;}
+            if let Some(error) = decoded.error {
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("JSON-RPC provider error");
+                let limited = message.to_ascii_lowercase().contains("rate")
+                    || message.to_ascii_lowercase().contains("too many")
+                    || message.contains("429");
+                last_error = Some(anyhow!(
+                    "NODEX_PROVIDER_ERROR_JSON:{}",
+                    json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"response":error})
+                ));
+                if limited {
+                    self.active_http_index
+                        .store((index + 1) % count, Ordering::Relaxed);
+                    continue;
+                }
                 return Err(last_error.expect("error was set"));
             }
-            if let Some(result)=decoded.result {self.active_http_index.store(index,Ordering::Relaxed);return Ok(result);}
-            return Err(anyhow!("NODEX_PROVIDER_ERROR_JSON:{}",json!({"provider":"solana_rpc","method":method,"kind":"missing_result","http_status":status.as_u16(),"response":response_json})));
+            if let Some(result) = decoded.result {
+                self.active_http_index.store(index, Ordering::Relaxed);
+                return Ok(result);
+            }
+            return Err(anyhow!(
+                "NODEX_PROVIDER_ERROR_JSON:{}",
+                json!({"provider":"solana_rpc","method":method,"kind":"missing_result","http_status":status.as_u16(),"response":response_json})
+            ));
         }
-        Err(last_error.unwrap_or_else(||anyhow!("All configured Solana HTTP RPC endpoints failed")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow!("All configured Solana HTTP RPC endpoints failed")))
     }
 
     /// Fetch one confirmed account's owner and raw bytes for verified program-account decoding.
@@ -437,26 +497,86 @@ impl SolanaRpc {
         Ok(report)
     }
 
-    async fn get_rugcheck_summary(&self,mint:&str)->RugCheckSummary {
-        let url=format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary");
-        let mut request=self.client.get(url).header(reqwest::header::ACCEPT,"application/json").timeout(std::time::Duration::from_secs(8));
-        if let Ok(key)=std::env::var("RUGCHECK_API_KEY"){if !key.trim().is_empty(){request=request.header("X-API-KEY",key);}}
-        let response=match request.send().await {
-            Ok(r)=>r,
-            Err(error)=>return RugCheckSummary{provider:"rugcheck".into(),status:"unavailable".into(),error:Some(error.to_string()),error_details:Some(json!({"provider":"rugcheck","kind":"transport_error","message":error.to_string()})),..Default::default()},
+    async fn get_rugcheck_summary(&self, mint: &str) -> RugCheckSummary {
+        let url = format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary");
+        let mut request = self
+            .client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .timeout(std::time::Duration::from_secs(8));
+        if let Ok(key) = std::env::var("RUGCHECK_API_KEY") {
+            if !key.trim().is_empty() {
+                request = request.header("X-API-KEY", key);
+            }
+        }
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(error) => {
+                return RugCheckSummary {
+                    provider: "rugcheck".into(),
+                    status: "unavailable".into(),
+                    error: Some(error.to_string()),
+                    error_details: Some(
+                        json!({"provider":"rugcheck","kind":"transport_error","message":error.to_string()}),
+                    ),
+                    ..Default::default()
+                }
+            }
         };
-        let status=response.status();
-        let body=match response.text().await {
-            Ok(body)=>body,
-            Err(error)=>return RugCheckSummary{provider:"rugcheck".into(),status:"unavailable".into(),error:Some(error.to_string()),error_details:Some(json!({"provider":"rugcheck","kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()})),..Default::default()},
+        let status = response.status();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                return RugCheckSummary {
+                    provider: "rugcheck".into(),
+                    status: "unavailable".into(),
+                    error: Some(error.to_string()),
+                    error_details: Some(
+                        json!({"provider":"rugcheck","kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()}),
+                    ),
+                    ..Default::default()
+                }
+            }
         };
-        let mut value=serde_json::from_str::<Value>(&body).unwrap_or_else(|_|json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
+        let mut value = serde_json::from_str::<Value>(&body)
+            .unwrap_or_else(|_| json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
         redact_provider_value(&mut value);
-        if !status.is_success(){return RugCheckSummary{provider:"rugcheck".into(),status:"unavailable".into(),error:Some(format!("RugCheck returned HTTP {status}")),error_details:Some(json!({"provider":"rugcheck","kind":"http_error","http_status":status.as_u16(),"response":value})),..Default::default()};}
-        if value.get("raw_text").is_some(){return RugCheckSummary{provider:"rugcheck".into(),status:"unavailable".into(),error:Some("RugCheck returned a response that was not valid JSON".into()),error_details:Some(json!({"provider":"rugcheck","kind":"invalid_json_response","http_status":status.as_u16(),"response":value})),..Default::default()};}
-        RugCheckSummary{provider:"rugcheck".into(),status:"available".into(),score:value.get("score").and_then(Value::as_u64),
-            score_normalised:value.get("score_normalised").and_then(Value::as_u64),lp_locked_pct:value.get("lpLockedPct").and_then(Value::as_f64),
-            risks:value.get("risks").and_then(Value::as_array).cloned().unwrap_or_default(),error:None,error_details:None}
+        if !status.is_success() {
+            return RugCheckSummary {
+                provider: "rugcheck".into(),
+                status: "unavailable".into(),
+                error: Some(format!("RugCheck returned HTTP {status}")),
+                error_details: Some(
+                    json!({"provider":"rugcheck","kind":"http_error","http_status":status.as_u16(),"response":value}),
+                ),
+                ..Default::default()
+            };
+        }
+        if value.get("raw_text").is_some() {
+            return RugCheckSummary {
+                provider: "rugcheck".into(),
+                status: "unavailable".into(),
+                error: Some("RugCheck returned a response that was not valid JSON".into()),
+                error_details: Some(
+                    json!({"provider":"rugcheck","kind":"invalid_json_response","http_status":status.as_u16(),"response":value}),
+                ),
+                ..Default::default()
+            };
+        }
+        RugCheckSummary {
+            provider: "rugcheck".into(),
+            status: "available".into(),
+            score: value.get("score").and_then(Value::as_u64),
+            score_normalised: value.get("score_normalised").and_then(Value::as_u64),
+            lp_locked_pct: value.get("lpLockedPct").and_then(Value::as_f64),
+            risks: value
+                .get("risks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            error: None,
+            error_details: None,
+        }
     }
 
     /// Samples a bounded number of recent creator transactions and counts prior Pump.fun launches.

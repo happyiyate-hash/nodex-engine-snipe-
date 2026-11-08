@@ -252,14 +252,38 @@ fn start_token_state_projector(
                 }}));
                 continue;
             }
-            if kind=="token_diagnostic" {
-                let mut diagnostics=registry.get(mint).and_then(|snapshot|snapshot.data.get("diagnostics").and_then(serde_json::Value::as_array).cloned()).unwrap_or_default();
-                diagnostics.push(data.clone());if diagnostics.len()>50{diagnostics.drain(0..diagnostics.len()-50);}
-                match registry.upsert_patch(mint,json!({"diagnostics":diagnostics})){
-                    Ok(snapshot)=>{if let Err(error)=nodex_persistence::save_token_state(&database,&snapshot).await{tracing::error!(%error,mint_address=mint,"Could not persist token diagnostic");}
-                        else{let _=database_changes.send(json!({"type":"token_state_updated","data":snapshot})).await;}}
-                    Err(error)=>tracing::error!(%error,mint_address=mint,"Could not append token diagnostic to canonical state"),
-                }continue;
+            if kind == "token_diagnostic" {
+                let mut diagnostics = registry
+                    .get(mint)
+                    .and_then(|snapshot| {
+                        snapshot
+                            .data
+                            .get("diagnostics")
+                            .and_then(serde_json::Value::as_array)
+                            .cloned()
+                    })
+                    .unwrap_or_default();
+                diagnostics.push(data.clone());
+                if diagnostics.len() > 50 {
+                    diagnostics.drain(0..diagnostics.len() - 50);
+                }
+                match registry.upsert_patch(mint, json!({"diagnostics":diagnostics})) {
+                    Ok(snapshot) => {
+                        if let Err(error) =
+                            nodex_persistence::save_token_state(&database, &snapshot).await
+                        {
+                            tracing::error!(%error,mint_address=mint,"Could not persist token diagnostic");
+                        } else {
+                            let _ = database_changes
+                                .send(json!({"type":"token_state_updated","data":snapshot}))
+                                .await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error,mint_address=mint,"Could not append token diagnostic to canonical state")
+                    }
+                }
+                continue;
             }
             // The approved-token persistence path already commits the final scan report.
             // Never let the projector persist rejected/unverified reports a second time.
@@ -450,48 +474,119 @@ impl DiscoveryMetadata {
     }
 }
 
-fn provider_error_details(message:&str)->serde_json::Value {
-    const PREFIX:&str="NODEX_PROVIDER_ERROR_JSON:";
-    if let Some((_,payload))=message.split_once(PREFIX){if let Ok(value)=serde_json::from_str::<serde_json::Value>(payload.trim()){return value;}}
+fn provider_error_details(message: &str) -> serde_json::Value {
+    const PREFIX: &str = "NODEX_PROVIDER_ERROR_JSON:";
+    if let Some((_, payload)) = message.split_once(PREFIX) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload.trim()) {
+            return value;
+        }
+    }
     json!({"kind":"application_error","message":message})
 }
-fn token_diagnostic(mint:&str,stage:&str,provider:&str,message:impl Into<String>,raw_response:serde_json::Value)->serde_json::Value {
+fn token_diagnostic(
+    mint: &str,
+    stage: &str,
+    provider: &str,
+    message: impl Into<String>,
+    raw_response: serde_json::Value,
+) -> serde_json::Value {
     json!({"mint_address":mint,"stage":stage,"provider":provider,"severity":"error","message":message.into(),"raw_response":raw_response,"occurred_at":chrono::Utc::now().to_rfc3339()})
 }
 
 /// Resolve the token's display identity before publishing new_token_detected.
 /// Missing optional fields never block discovery. Off-chain metadata is fetched only
 /// from HTTPS URLs and redirects are disabled to reduce SSRF and untrusted redirect risk.
-async fn resolve_discovery_metadata(rpc:&SolanaRpc,mint:&str)->anyhow::Result<DiscoveryMetadata> {
-    let mut result=DiscoveryMetadata::partial();
+async fn resolve_discovery_metadata(
+    rpc: &SolanaRpc,
+    mint: &str,
+) -> anyhow::Result<DiscoveryMetadata> {
+    let mut result = DiscoveryMetadata::partial();
     match rpc.get_account_data(mint).await {
-        Ok(Some((owner,data,_))) if data.len()>=82=>{
-            const SPL_TOKEN:&str="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-            const TOKEN_2022:&str="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnB9J3q6k7";
-            if owner==SPL_TOKEN||owner==TOKEN_2022{result.decimals=Some(data[44]);}
-            else{result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc","Mint account is owned by an unsupported token program.",json!({"owner":owner,"account_data_length":data.len()})));}
+        Ok(Some((owner, data, _))) if data.len() >= 82 => {
+            const SPL_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+            const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnB9J3q6k7";
+            if owner == SPL_TOKEN || owner == TOKEN_2022 {
+                result.decimals = Some(data[44]);
+            } else {
+                result.errors.push(token_diagnostic(
+                    mint,
+                    "mint_account_metadata",
+                    "solana_rpc",
+                    "Mint account is owned by an unsupported token program.",
+                    json!({"owner":owner,"account_data_length":data.len()}),
+                ));
+            }
         }
-        Ok(Some((owner,data,_)))=>result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc","Mint account data is shorter than the expected SPL mint layout.",json!({"owner":owner,"account_data_length":data.len(),"minimum_expected":82}))),
-        Ok(None)=>result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc","The mint account was not found by the RPC provider.",json!({"result":null}))),
-        Err(error)=>result.errors.push(token_diagnostic(mint,"mint_account_metadata","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))),
+        Ok(Some((owner, data, _))) => result.errors.push(token_diagnostic(
+            mint,
+            "mint_account_metadata",
+            "solana_rpc",
+            "Mint account data is shorter than the expected SPL mint layout.",
+            json!({"owner":owner,"account_data_length":data.len(),"minimum_expected":82}),
+        )),
+        Ok(None) => result.errors.push(token_diagnostic(
+            mint,
+            "mint_account_metadata",
+            "solana_rpc",
+            "The mint account was not found by the RPC provider.",
+            json!({"result":null}),
+        )),
+        Err(error) => result.errors.push(token_diagnostic(
+            mint,
+            "mint_account_metadata",
+            "solana_rpc",
+            error.to_string(),
+            provider_error_details(&format!("{error:#}")),
+        )),
     }
-    match rpc.resolve_token_metadata(mint).await{
-        Ok(metadata)=>{
-            result.name=metadata.name;result.symbol=metadata.symbol;result.metadata_uri=metadata.uri;
-            if metadata.status=="unavailable"||metadata.status=="unverified"{result.errors.push(token_diagnostic(mint,"on_chain_metadata","solana_rpc",metadata.caveat.clone(),serde_json::to_value(&metadata).unwrap_or_else(|_|json!({"status":metadata.status}))));}
+    match rpc.resolve_token_metadata(mint).await {
+        Ok(metadata) => {
+            result.name = metadata.name;
+            result.symbol = metadata.symbol;
+            result.metadata_uri = metadata.uri;
+            if metadata.status == "unavailable" || metadata.status == "unverified" {
+                result.errors.push(token_diagnostic(
+                    mint,
+                    "on_chain_metadata",
+                    "solana_rpc",
+                    metadata.caveat.clone(),
+                    serde_json::to_value(&metadata)
+                        .unwrap_or_else(|_| json!({"status":metadata.status})),
+                ));
+            }
         }
-        Err(error)=>result.errors.push(token_diagnostic(mint,"on_chain_metadata","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))),
+        Err(error) => result.errors.push(token_diagnostic(
+            mint,
+            "on_chain_metadata",
+            "solana_rpc",
+            error.to_string(),
+            provider_error_details(&format!("{error:#}")),
+        )),
     }
-    if let Some(uri)=result.metadata_uri.as_deref(){
-        let fetch_uri=if let Some(path)=uri.strip_prefix("ipfs://"){format!("https://ipfs.io/ipfs/{}",path.trim_start_matches("ipfs/"))}
-            else if let Some(path)=uri.strip_prefix("ar://"){format!("https://arweave.net/{}",path.trim_start_matches('/'))}else{uri.to_owned()};
-        match reqwest::Url::parse(&fetch_uri){
-            Ok(url)=>{
-                let host=url.host_str().unwrap_or_default().to_ascii_lowercase();
-                let unsafe_host=host.parse::<std::net::IpAddr>().is_ok()||host=="localhost"||host.ends_with(".localhost")||host.ends_with(".local");
-                if url.scheme()!="https"||unsafe_host{
-                    result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri","Metadata URI was blocked because it is not a permitted public HTTPS URL.",json!({"uri_scheme":url.scheme(),"host":host,"blocked":true})));
-                }else{
+    if let Some(uri) = result.metadata_uri.as_deref() {
+        let fetch_uri = if let Some(path) = uri.strip_prefix("ipfs://") {
+            format!("https://ipfs.io/ipfs/{}", path.trim_start_matches("ipfs/"))
+        } else if let Some(path) = uri.strip_prefix("ar://") {
+            format!("https://arweave.net/{}", path.trim_start_matches('/'))
+        } else {
+            uri.to_owned()
+        };
+        match reqwest::Url::parse(&fetch_uri) {
+            Ok(url) => {
+                let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+                let unsafe_host = host.parse::<std::net::IpAddr>().is_ok()
+                    || host == "localhost"
+                    || host.ends_with(".localhost")
+                    || host.ends_with(".local");
+                if url.scheme() != "https" || unsafe_host {
+                    result.errors.push(token_diagnostic(
+                        mint,
+                        "off_chain_metadata",
+                        "metadata_uri",
+                        "Metadata URI was blocked because it is not a permitted public HTTPS URL.",
+                        json!({"uri_scheme":url.scheme(),"host":host,"blocked":true}),
+                    ));
+                } else {
                     match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(5)).build(){
                         Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"client_configuration_error","message":error.to_string()}))),
                         Ok(client)=>match client.get(url).header(reqwest::header::ACCEPT,"application/json").send().await{
@@ -521,11 +616,31 @@ async fn resolve_discovery_metadata(rpc:&SolanaRpc,mint:&str)->anyhow::Result<Di
                     }
                 }
             }
-            Err(error)=>result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",error.to_string(),json!({"kind":"invalid_metadata_uri","message":error.to_string()}))),
+            Err(error) => result.errors.push(token_diagnostic(
+                mint,
+                "off_chain_metadata",
+                "metadata_uri",
+                error.to_string(),
+                json!({"kind":"invalid_metadata_uri","message":error.to_string()}),
+            )),
         }
     }
-    result.status=if result.name.is_some()&&result.symbol.is_some()&&result.decimals.is_some()&&result.logo_url.is_some(){"complete"}
-        else if result.name.is_some()||result.symbol.is_some()||result.decimals.is_some()||result.metadata_uri.is_some()||result.logo_url.is_some(){"partial"}else{"unavailable"};
+    result.status = if result.name.is_some()
+        && result.symbol.is_some()
+        && result.decimals.is_some()
+        && result.logo_url.is_some()
+    {
+        "complete"
+    } else if result.name.is_some()
+        || result.symbol.is_some()
+        || result.decimals.is_some()
+        || result.metadata_uri.is_some()
+        || result.logo_url.is_some()
+    {
+        "partial"
+    } else {
+        "unavailable"
+    };
     Ok(result)
 }
 
@@ -656,13 +771,29 @@ fn start_launch_processor(
                     Ok(Ok(metadata)) => metadata,
                     Ok(Err(error)) => {
                         tracing::warn!(%error,mint_address=%mint_address,"Initial token metadata resolution failed; continuing with partial discovery");
-                        let mut partial=DiscoveryMetadata::partial();
-                        partial.errors.push(token_diagnostic(&mint_address,"metadata_resolution","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}"))));partial
+                        let mut partial = DiscoveryMetadata::partial();
+                        partial.errors.push(token_diagnostic(
+                            &mint_address,
+                            "metadata_resolution",
+                            "solana_rpc",
+                            error.to_string(),
+                            provider_error_details(&format!("{error:#}")),
+                        ));
+                        partial
                     }
                     Err(_) => {
-                        let mut partial=DiscoveryMetadata::partial();let message="Initial token metadata resolution timed out after 10 seconds.";
+                        let mut partial = DiscoveryMetadata::partial();
+                        let message =
+                            "Initial token metadata resolution timed out after 10 seconds.";
                         tracing::warn!(mint_address=%mint_address,"{message}");
-                        partial.errors.push(token_diagnostic(&mint_address,"metadata_resolution","solana_rpc",message,json!({"kind":"timeout","timeout_seconds":10})));partial
+                        partial.errors.push(token_diagnostic(
+                            &mint_address,
+                            "metadata_resolution",
+                            "solana_rpc",
+                            message,
+                            json!({"kind":"timeout","timeout_seconds":10}),
+                        ));
+                        partial
                     }
                 };
 
@@ -733,7 +864,10 @@ fn start_launch_processor(
                         // Keep the legacy event enriched so existing clients also receive
                         // metadata before the scanner begins.
                         let _ = events.send(json!({"type":"launch_detected","data":legacy_launch}));
-                        for diagnostic in &metadata.errors { let _=events.send(json!({"type":"token_diagnostic","data":diagnostic})); }
+                        for diagnostic in &metadata.errors {
+                            let _ =
+                                events.send(json!({"type":"token_diagnostic","data":diagnostic}));
+                        }
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
@@ -861,22 +995,39 @@ fn start_launch_processor(
                                 }
                                 Ok(Err(error)) => {
                                     let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"creator_history","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))}));
-                                    report.checks.push(nodex_solana::SecurityCheck{name:"creator_history".into(),status:"unverified".into(),severity:"high".into(),detail:format!("Creator history lookup failed: {error}")});
+                                    report.checks.push(nodex_solana::SecurityCheck {
+                                        name: "creator_history".into(),
+                                        status: "unverified".into(),
+                                        severity: "high".into(),
+                                        detail: format!("Creator history lookup failed: {error}"),
+                                    });
                                 }
                                 Err(_) => {
                                     let message="Creator history lookup exceeded its 15-second time budget.";
                                     let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"creator_history","solana_rpc",message,json!({"kind":"timeout","timeout_seconds":15}))}));
-                                    report.checks.push(nodex_solana::SecurityCheck{name:"creator_history".into(),status:"unverified".into(),severity:"high".into(),detail:message.into()});
+                                    report.checks.push(nodex_solana::SecurityCheck {
+                                        name: "creator_history".into(),
+                                        status: "unverified".into(),
+                                        severity: "high".into(),
+                                        detail: message.into(),
+                                    });
                                 }
                             }
 
-                            if let Some(details)=report.rugcheck.error_details.clone(){
-                                let message=report.rugcheck.error.clone().unwrap_or_else(||"RugCheck provider request failed.".into());
+                            if let Some(details) = report.rugcheck.error_details.clone() {
+                                let message =
+                                    report.rugcheck.error.clone().unwrap_or_else(|| {
+                                        "RugCheck provider request failed.".into()
+                                    });
                                 let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"rugcheck","rugcheck",message,details)}));
                             }
-                            for check in &report.checks{if check.name=="holder_distribution"&&check.detail.contains("NODEX_PROVIDER_ERROR_JSON:"){
-                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"holder_distribution","solana_rpc",check.detail.clone(),provider_error_details(&check.detail))}));
-                            }}
+                            for check in &report.checks {
+                                if check.name == "holder_distribution"
+                                    && check.detail.contains("NODEX_PROVIDER_ERROR_JSON:")
+                                {
+                                    let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"holder_distribution","solana_rpc",check.detail.clone(),provider_error_details(&check.detail))}));
+                                }
+                            }
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -934,10 +1085,12 @@ fn start_launch_processor(
                                             let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
                                         }
                                     } else {
-                                        terminal_status="unverified";
+                                        terminal_status = "unverified";
                                         let message="Security approval could not be persisted to SQLite; token is retained as unverified.";
                                         let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",message,json!({"kind":"database_persistence_error","message":message}))}));
-                                        if let Some(snapshot)=approved_registry.get(&scan_mint){let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));}
+                                        if let Some(snapshot) = approved_registry.get(&scan_mint) {
+                                            let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                                        }
                                     }
                                 }
                                 "REJECTED" => {
@@ -955,8 +1108,11 @@ fn start_launch_processor(
                                     }}));
                                 }
                                 _ => {
-                                    let mut security_state=serde_json::to_value(&report).unwrap_or_else(|_|json!({}));
-                                    if let Some(object)=security_state.as_object_mut(){object.insert("status".into(),json!("unverified"));}
+                                    let mut security_state =
+                                        serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                                    if let Some(object) = security_state.as_object_mut() {
+                                        object.insert("status".into(), json!("unverified"));
+                                    }
                                     match approved_registry.upsert_patch(&scan_mint,json!({"security":security_state,"market":{"status":"not_started"}})){
                                         Ok(snapshot)=>{
                                             if let Err(error)=nodex_persistence::save_token_state(&approved_database,&snapshot).await{
@@ -966,10 +1122,15 @@ fn start_launch_processor(
                                         }
                                         Err(error)=>{let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",error.to_string(),json!({"kind":"token_registry_error","message":error.to_string()}))}));}
                                     }
-                                    if let Err(error)=nodex_persistence::save_launch(&approved_database,&launch).await{
+                                    if let Err(error) =
+                                        nodex_persistence::save_launch(&approved_database, &launch)
+                                            .await
+                                    {
                                         let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
                                     }
-                                    let _=scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                    let _ = scan_events.send(
+                                        json!({"type":"token_scan_update","data":report.clone()}),
+                                    );
                                     let _=scan_events.send(json!({"type":"token_approval_pending","data":{"mint_address":scan_mint,"decision":decision,"reason":"Token remains visible but isolated until an explicit APPROVED decision is produced."}}));
                                 }
                             }
@@ -980,7 +1141,7 @@ fn start_launch_processor(
                             }}));
                         }
                         Err(error) => {
-                            let error_details=provider_error_details(&error);
+                            let error_details = provider_error_details(&error);
                             let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
                             let _=scan_events.send(json!({"type":"diagnostic","data":{"severity":"error","component":"token_security_scanner","message":error,"mint_address":scan_mint,"received_at":chrono::Utc::now().to_rfc3339()}}));
                             let _=scan_events.send(json!({"type":"token_scan_failed","data":{"mint_address":scan_mint,"decision":"UNVERIFIED","decision_reason":error,"error_details":error_details,"status":"failed","received_at":chrono::Utc::now().to_rfc3339()}}));
@@ -992,7 +1153,9 @@ fn start_launch_processor(
                                 }
                                 Err(state_error)=>{let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",state_error.to_string(),json!({"kind":"token_registry_error","message":state_error.to_string()}))}));}
                             }
-                            if let Err(persist_error)=nodex_persistence::save_launch(&approved_database,&launch).await{
+                            if let Err(persist_error) =
+                                nodex_persistence::save_launch(&approved_database, &launch).await
+                            {
                                 let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
                             }
                         }
