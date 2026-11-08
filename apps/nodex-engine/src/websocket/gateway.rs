@@ -3,7 +3,8 @@ use serde_json::Value;
 pub(super) fn is_frontend_event(value: &Value) -> bool {
     matches!(
         value.get("type").and_then(Value::as_str),
-        Some("connection_status")
+        Some("engine_activity")
+            | Some("connection_status")
             | Some("engine_state")
             | Some("trading_config_updated")
             | Some("launch_detected")
