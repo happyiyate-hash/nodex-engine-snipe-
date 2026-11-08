@@ -96,6 +96,7 @@ pub struct SolanaRpc {
     http_urls: Vec<String>,
     active_http_index: Arc<AtomicUsize>,
     client: reqwest::Client,
+    activity_events: Option<broadcast::Sender<Value>>,
 }
 
 fn redact_provider_value(value: &mut Value) {
@@ -127,6 +128,19 @@ impl SolanaRpc {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
             client: reqwest::Client::new(),
+            activity_events: None,
+        }
+    }
+
+    /// Attach the engine event bus so provider requests and responses can be inspected live.
+    pub fn with_activity_events(mut self, events: broadcast::Sender<Value>) -> Self {
+        self.activity_events = Some(events);
+        self
+    }
+
+    fn emit_activity(&self, data: Value) {
+        if let Some(events) = &self.activity_events {
+            let _ = events.send(json!({"type":"engine_activity","data":data}));
         }
     }
 
@@ -147,10 +161,37 @@ impl SolanaRpc {
         }
         let mut last_error = None;
         let count = self.http_urls.len();
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+        let token_mint = params
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut request_params = params.clone();
+        redact_provider_value(&mut request_params);
+
         let start = self.active_http_index.load(Ordering::Relaxed) % count;
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
+            let attempt_started = std::time::Instant::now();
+            let attempt_id = format!("{correlation_id}-{index}");
+            let endpoint_host = reqwest::Url::parse(url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "configured_rpc_endpoint".to_string());
+            self.emit_activity(json!({
+                "id": attempt_id,
+                "correlation_id": correlation_id,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "direction": "request",
+                "provider": "solana_rpc",
+                "endpoint": endpoint_host,
+                "operation": method,
+                "token_mint": token_mint,
+                "attempt": index + 1,
+                "request": {"jsonrpc":"2.0","method":method,"params":request_params}
+            }));
             let response = match self
                 .client
                 .post(url)
@@ -160,6 +201,19 @@ impl SolanaRpc {
             {
                 Ok(response) => response,
                 Err(error) => {
+                    self.emit_activity(json!({
+                        "id": format!("{attempt_id}-response"),
+                        "correlation_id": correlation_id,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "direction": "response",
+                        "provider": "solana_rpc",
+                        "endpoint": endpoint_host,
+                        "operation": method,
+                        "token_mint": token_mint,
+                        "duration_ms": attempt_started.elapsed().as_millis(),
+                        "severity": "error",
+                        "error": error.to_string()
+                    }));
                     last_error = Some(anyhow!(
                         "NODEX_PROVIDER_ERROR_JSON:{}",
                         json!({"provider":"solana_rpc","method":method,"kind":"transport_error","message":error.to_string()})
@@ -186,6 +240,28 @@ impl SolanaRpc {
                 |_| json!({"raw_text":body.chars().take(65_536).collect::<String>()}),
             );
             redact_provider_value(&mut response_json);
+            let response_text = serde_json::to_string(&response_json).unwrap_or_default();
+            let body_truncated = response_text.len() > 32_768;
+            let response_body = if body_truncated {
+                json!({"truncated":true,"preview":response_text.chars().take(32_768).collect::<String>()})
+            } else {
+                response_json.clone()
+            };
+            self.emit_activity(json!({
+                "id": format!("{attempt_id}-response"),
+                "correlation_id": correlation_id,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "direction": "response",
+                "provider": "solana_rpc",
+                "endpoint": endpoint_host,
+                "operation": method,
+                "token_mint": token_mint,
+                "duration_ms": attempt_started.elapsed().as_millis(),
+                "http_status": status.as_u16(),
+                "severity": if status.is_success() { "info" } else { "error" },
+                "body_truncated": body_truncated,
+                "response": response_body
+            }));
             if !status.is_success() {
                 last_error = Some(anyhow!(
                     "NODEX_PROVIDER_ERROR_JSON:{}",
