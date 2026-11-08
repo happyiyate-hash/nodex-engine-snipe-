@@ -922,7 +922,6 @@ fn start_launch_processor(
                         Ok(Err(error)) => Err(error.to_string()),
                         Err(_) => Err("Security scan timed out after 45 seconds".to_string()),
                     };
-                    let mut token_approved = false;
                     match scan_result {
                         Ok(mut report) => {
                             // Keep the pre-scan identity authoritative when the scanner has no better value.
@@ -1086,7 +1085,6 @@ fn start_launch_processor(
                                         }
                                     };
                                     if approval_persisted {
-                                        token_approved = true;
                                         let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
                                         if let Some(snapshot) = approved_registry.get(&scan_mint) {
                                             let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
@@ -1389,8 +1387,9 @@ fn start_launch_processor(
                                 json!({"kind":"monitor_capacity_reached","capacity":24}))
                         }));
                     }
-                    if token_approved {
-                        if let Some(monitor) = approved_monitor.read().await.clone() {
+                    // Market data is discovery/monitoring, not a security approval. Subscribe
+                    // every detected Pump.fun curve, including unverified and rejected launches.
+                    if let Some(monitor) = approved_monitor.read().await.clone() {
                             match monitor
                                 .subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id)
                                 .await
@@ -1410,7 +1409,6 @@ fn start_launch_processor(
                                     }}));
                                 }
                             }
-                        }
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
