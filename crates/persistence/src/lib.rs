@@ -49,6 +49,20 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS engine_activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at TEXT NOT NULL,
+            activity_json TEXT NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_engine_activity_logs_recorded_at ON engine_activity_logs(recorded_at)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS solana_raw_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT, signature TEXT, slot INTEGER,
             event_hash TEXT, event_json TEXT NOT NULL, received_at TEXT NOT NULL
@@ -328,6 +342,56 @@ pub async fn get_token_state(pool: &SqlitePool, mint: &str) -> Result<Option<Tok
     payload
         .map(|value| serde_json::from_str(&value).map_err(Into::into))
         .transpose()
+}
+
+
+/** Persist structured provider activity, retaining only the newest 5,000 cards. */
+pub async fn save_engine_activity_log(
+    pool: &SqlitePool,
+    activity: &serde_json::Value,
+) -> Result<()> {
+    let recorded_at = activity
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let activity_json = serde_json::to_string(activity)?;
+    sqlx::query(
+        "INSERT INTO engine_activity_logs (recorded_at, activity_json) VALUES (?, ?)",
+    )
+    .bind(recorded_at)
+    .bind(activity_json)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM engine_activity_logs WHERE id NOT IN (SELECT id FROM engine_activity_logs ORDER BY id DESC LIMIT 5000)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_engine_activity_logs(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>> {
+    let safe_limit = limit.clamp(1, 1000) as i64;
+    let rows = sqlx::query(
+        "SELECT id, recorded_at, activity_json FROM engine_activity_logs ORDER BY id DESC LIMIT ?",
+    )
+    .bind(safe_limit)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let activity_json: String = row.get("activity_json");
+            let activity: serde_json::Value = serde_json::from_str(&activity_json)?;
+            Ok(serde_json::json!({
+                "id": row.get::<i64, _>("id"),
+                "recorded_at": row.get::<String, _>("recorded_at"),
+                "activity": activity
+            }))
+        })
+        .collect()
 }
 
 /// Returns the newest persisted backend events, newest first.
