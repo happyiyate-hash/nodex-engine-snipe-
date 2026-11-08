@@ -475,6 +475,27 @@ impl DiscoveryMetadata {
     }
 }
 
+fn normalize_image_url(candidate: &str) -> Option<String> {
+    let candidate = candidate.trim();
+    let normalized = if let Some(path) = candidate.strip_prefix("ipfs://") {
+        format!("https://ipfs.io/ipfs/{}", path.trim_start_matches("ipfs/"))
+    } else if let Some(path) = candidate.strip_prefix("ar://") {
+        format!("https://arweave.net/{}", path.trim_start_matches('/'))
+    } else {
+        candidate.to_owned()
+    };
+    let url = reqwest::Url::parse(&normalized).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let unsafe_host = host.parse::<std::net::IpAddr>().is_ok()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local");
+    if url.scheme() != "https" || unsafe_host || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    Some(url.to_string())
+}
+
 fn provider_error_details(message: &str) -> serde_json::Value {
     const PREFIX: &str = "NODEX_PROVIDER_ERROR_JSON:";
     if let Some((_, payload)) = message.split_once(PREFIX) {
@@ -814,6 +835,19 @@ async fn resolve_discovery_metadata(
                     }
                 }
             },
+        }
+    }
+
+    if let Some(candidate) = result.logo_url.clone() {
+        result.logo_url = normalize_image_url(&candidate);
+        if result.logo_url.is_none() {
+            result.errors.push(token_diagnostic(
+                mint,
+                "logo_url_validation",
+                "metadata",
+                "The token image URL was rejected because it was not a public HTTPS URL.",
+                json!({"blocked":true}),
+            ));
         }
     }
 
