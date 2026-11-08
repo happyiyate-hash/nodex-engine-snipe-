@@ -588,6 +588,19 @@ impl SolanaRpc {
 
     async fn get_rugcheck_summary(&self, mint: &str) -> RugCheckSummary {
         let url = format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary");
+        let activity_id = uuid::Uuid::new_v4().to_string();
+        let request_started = std::time::Instant::now();
+        self.emit_activity(json!({
+            "id": activity_id,
+            "correlation_id": activity_id,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "direction": "request",
+            "provider": "rugcheck",
+            "endpoint": "api.rugcheck.xyz",
+            "operation": "GET /v1/tokens/{mint}/report/summary",
+            "token_mint": mint,
+            "request": {"method":"GET","path":format!("/v1/tokens/{mint}/report/summary")}
+        }));
         let mut request = self
             .client
             .get(url)
@@ -601,6 +614,19 @@ impl SolanaRpc {
         let response = match request.send().await {
             Ok(r) => r,
             Err(error) => {
+                self.emit_activity(json!({
+                    "id": format!("{activity_id}-response"),
+                    "correlation_id": activity_id,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "direction": "response",
+                    "provider": "rugcheck",
+                    "endpoint": "api.rugcheck.xyz",
+                    "operation": "GET /v1/tokens/{mint}/report/summary",
+                    "token_mint": mint,
+                    "duration_ms": request_started.elapsed().as_millis(),
+                    "severity": "error",
+                    "error": error.to_string()
+                }));
                 return RugCheckSummary {
                     provider: "rugcheck".into(),
                     status: "unavailable".into(),
@@ -630,6 +656,27 @@ impl SolanaRpc {
         let mut value = serde_json::from_str::<Value>(&body)
             .unwrap_or_else(|_| json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
         redact_provider_value(&mut value);
+        let response_text = serde_json::to_string(&value).unwrap_or_default();
+        let response_truncated = response_text.len() > 32_768;
+        self.emit_activity(json!({
+            "id": format!("{activity_id}-response"),
+            "correlation_id": activity_id,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "direction": "response",
+            "provider": "rugcheck",
+            "endpoint": "api.rugcheck.xyz",
+            "operation": "GET /v1/tokens/{mint}/report/summary",
+            "token_mint": mint,
+            "duration_ms": request_started.elapsed().as_millis(),
+            "http_status": status.as_u16(),
+            "severity": if status.is_success() {"info"} else {"error"},
+            "body_truncated": response_truncated,
+            "response": if response_truncated {
+                json!({"truncated":true,"preview":response_text.chars().take(32_768).collect::<String>()})
+            } else {
+                value.clone()
+            }
+        }));
         if !status.is_success() {
             return RugCheckSummary {
                 provider: "rugcheck".into(),
