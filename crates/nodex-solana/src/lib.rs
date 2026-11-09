@@ -165,6 +165,18 @@ impl SolanaRpc {
     }
 
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
+        self.call_with_response(method, params)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// Same provider request path as call(), but also returns the redacted JSON-RPC
+    /// response so the token's own security report can preserve the evidence.
+    async fn call_with_response<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<(T, Value)> {
         if self.http_urls.is_empty() {
             return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
         }
@@ -317,7 +329,7 @@ impl SolanaRpc {
             }
             if let Some(result) = decoded.result {
                 self.active_http_index.store(index, Ordering::Relaxed);
-                return Ok(result);
+                return Ok((result, response_json));
             }
             return Err(anyhow!(
                 "NODEX_PROVIDER_ERROR_JSON:{}",
@@ -333,8 +345,18 @@ impl SolanaRpc {
         &self,
         address: &str,
     ) -> Result<Option<(String, Vec<u8>, Option<u64>)>> {
-        let account: Value = self
-            .call(
+        self.get_account_data_with_response(address)
+            .await
+            .map(|result| result.map(|(owner, bytes, slot, _)| (owner, bytes, slot)))
+    }
+
+    /// Fetch account bytes together with the provider's redacted JSON response.
+    pub async fn get_account_data_with_response(
+        &self,
+        address: &str,
+    ) -> Result<Option<(String, Vec<u8>, Option<u64>, Value)>> {
+        let (account, raw_response): (Value, Value) = self
+            .call_with_response(
                 "getAccountInfo",
                 json!([address, {"encoding":"base64","commitment":"confirmed"}]),
             )
@@ -354,7 +376,7 @@ impl SolanaRpc {
             .ok_or_else(|| anyhow!("getAccountInfo response omitted base64 account data"))?;
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .context("decoding account data returned by getAccountInfo")?;
-        Ok(Some((owner, bytes, slot)))
+        Ok(Some((owner, bytes, slot, raw_response)))
     }
 
     /// Current rent-exempt minimum for a standard 165-byte SPL token account.
@@ -499,20 +521,27 @@ impl SolanaRpc {
         F: FnMut(&str, u8, &str),
     {
         on_progress("mint_account", 8, "Checking mint account");
-        let account: Value = self
-            .call(
+        let (account, raw_account_response): (Value, Value) = self
+            .call_with_response(
                 "getAccountInfo",
                 json!([mint, {"encoding":"base64","commitment":"confirmed"}]),
             )
             .await?;
+        let account_evidence = json!({
+            "provider":"solana_rpc",
+            "method":"getAccountInfo",
+            "response":raw_account_response
+        });
         let context_slot = account.pointer("/context/slot").and_then(Value::as_u64);
         let value = account.get("value").filter(|v| !v.is_null());
         let Some(value) = value else {
-            return Ok(TokenSecurityReport::unverified(
+            let mut report = TokenSecurityReport::unverified(
                 mint,
                 "Mint account was not found by RPC",
                 context_slot,
-            ));
+            );
+            report.provider_responses.push(account_evidence);
+            return Ok(report);
         };
         let owner = value
             .get("owner")
@@ -521,15 +550,35 @@ impl SolanaRpc {
             .to_owned();
         let encoded = value.pointer("/data/0").and_then(Value::as_str);
         let Some(encoded) = encoded else {
-            return Ok(TokenSecurityReport::unverified(
+            let mut report = TokenSecurityReport::unverified(
                 mint,
                 "Mint account data was not returned in base64 form",
                 context_slot,
-            ));
+            );
+            report.provider_responses.push(account_evidence);
+            return Ok(report);
         };
-        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-            .context("decoding mint account base64 data")?;
-        let mut report = parse_mint_security_report(mint, &owner, &bytes, context_slot)?;
+        let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let mut report = TokenSecurityReport::unverified(
+                    mint,
+                    &format!("Mint account base64 data could not be decoded: {error}"),
+                    context_slot,
+                );
+                report.provider_responses.push(account_evidence);
+                return Ok(report);
+            }
+        };
+        let mut report = match parse_mint_security_report(mint, &owner, &bytes, context_slot) {
+            Ok(report) => report,
+            Err(error) => TokenSecurityReport::unverified(
+                mint,
+                &format!("Mint account security parsing failed: {error:#}"),
+                context_slot,
+            ),
+        };
+        report.provider_responses.push(account_evidence);
         on_progress("authorities", 32, "Checking mint and freeze authorities");
         on_progress("holder_distribution", 52, "Checking holder distribution");
         match self
@@ -694,6 +743,7 @@ impl SolanaRpc {
                 error_details: Some(
                     json!({"provider":"rugcheck","kind":"http_error","http_status":status.as_u16(),"response":value}),
                 ),
+                raw_response: Some(value.clone()),
                 ..Default::default()
             };
         }
@@ -705,6 +755,7 @@ impl SolanaRpc {
                 error_details: Some(
                     json!({"provider":"rugcheck","kind":"invalid_json_response","http_status":status.as_u16(),"response":value}),
                 ),
+                raw_response: Some(value.clone()),
                 ..Default::default()
             };
         }
@@ -721,6 +772,7 @@ impl SolanaRpc {
                 .unwrap_or_default(),
             error: None,
             error_details: None,
+            raw_response: Some(value),
         }
     }
 
@@ -1021,6 +1073,9 @@ pub struct RugCheckSummary {
     pub error: Option<String>,
     #[serde(default)]
     pub error_details: Option<Value>,
+    /// Redacted provider JSON, retained on the token's own security report for debugging.
+    #[serde(default)]
+    pub raw_response: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1041,6 +1096,8 @@ pub struct TokenSecurityReport {
     pub checks: Vec<SecurityCheck>,
     pub decision: String,
     pub decision_reason: String,
+    #[serde(default)]
+    pub provider_responses: Vec<Value>,
     pub rugcheck: RugCheckSummary,
 }
 
@@ -1072,6 +1129,7 @@ impl TokenSecurityReport {
             decision: "UNVERIFIED".into(),
             decision_reason: "The mint account could not be verified; automatic buying is blocked."
                 .into(),
+            provider_responses: Vec::new(),
             rugcheck: RugCheckSummary {
                 provider: "rugcheck".into(),
                 status: "not_run".into(),
@@ -1441,6 +1499,7 @@ pub fn parse_mint_security_report(
         checks,
         decision: decision.into(),
         decision_reason,
+        provider_responses: Vec::new(),
         rugcheck: RugCheckSummary {
             provider: "rugcheck".into(),
             status: "not_run".into(),
