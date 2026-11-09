@@ -1453,7 +1453,9 @@ fn start_launch_processor(
                             let _=scan_events.send(json!({"type":"token_scan_failed","data":{
                                 "mint_address":scan_mint,
                                 "decision":"UNVERIFIED",
-                                "decision_reason":error,
+                                "decision_reason":"Diagnostic-only mode is active. This scan failed before provider evidence could be fully collected; no token is being verified.",
+                                "diagnostic_only":true,
+                                "diagnostic_assessment":{"decision":"UNVERIFIED","decision_reason":error},
                                 "error_details":error_details,
                                 "provider_responses":[provider_response.clone()],
                                 "checks":[failure_check.clone()],
@@ -1466,7 +1468,9 @@ fn start_launch_processor(
                             match approved_registry.upsert_patch(&scan_mint,json!({"security":{
                                 "status":"failed",
                                 "decision":"UNVERIFIED",
-                                "decision_reason":error,
+                                "decision_reason":"Diagnostic-only mode is active. This scan failed before provider evidence could be fully collected; no token is being verified.",
+                                "diagnostic_only":true,
+                                "diagnostic_assessment":{"decision":"UNVERIFIED","decision_reason":error},
                                 "error_details":error_details,
                                 "provider_responses":[provider_response],
                                 "checks":[failure_check],
