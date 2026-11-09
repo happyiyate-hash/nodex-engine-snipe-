@@ -1523,6 +1523,7 @@ fn start_launch_processor(
                                 )}));
                                 }
                             }
+                        }
                         Err(error) => {
                             let error_details = provider_error_details(&error);
                             let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
