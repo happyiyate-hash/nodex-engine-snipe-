@@ -416,26 +416,60 @@ pub async fn list_recent_events(pool: &SqlitePool, limit: u32) -> Result<Vec<ser
         .collect()
 }
 
-/// Clears only historical launch and raw upstream notification rows.
-/// It does not alter wallets, ledger entries, schema, or live monitor state.
-pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u64)> {
-    // Retry the complete transaction on transient SQLITE_BUSY/locked errors.
-    // Each failed attempt is rolled back when its transaction is dropped.
+/// Remove stored tokens that have never entered paper trading.
+/// Any mint with a paper position (open or closed) is retained, together with
+/// its token state, launch history and chart candles. Wallets, ledger, runtime
+/// configuration, subscriptions and schema are never modified.
+pub async fn clear_non_paper_token_history(
+    pool: &SqlitePool,
+) -> Result<(u64, u64, u64, u64, Vec<String>)> {
     const MAX_ATTEMPTS: usize = 4;
 
     for attempt in 0..MAX_ATTEMPTS {
         let result = async {
             let mut transaction = pool.begin().await?;
-            let launches = sqlx::query("DELETE FROM token_launches")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected();
+            let deleted_mints = sqlx::query_scalar::<_, String>(
+                r#"SELECT mint_address FROM token_states
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM portfolio_positions p
+                       WHERE p.mint_address = token_states.mint_address
+                   )
+                   UNION
+                   SELECT mint_address FROM token_launches
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM portfolio_positions p
+                       WHERE p.mint_address = token_launches.mint_address
+                   )"#,
+            )
+            .fetch_all(&mut *transaction)
+            .await?;
+
+            let states = sqlx::query(
+                "DELETE FROM token_states WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = token_states.mint_address)",
+            )
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            let candles = sqlx::query(
+                "DELETE FROM chart_candles WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = chart_candles.mint_address)",
+            )
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            let launches = sqlx::query(
+                "DELETE FROM token_launches WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = token_launches.mint_address)",
+            )
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            // Raw upstream notifications are transient history, not paper-trading
+            // accounting, so they can be cleared regardless of token position.
             let events = sqlx::query("DELETE FROM solana_raw_events")
                 .execute(&mut *transaction)
                 .await?
                 .rows_affected();
             transaction.commit().await?;
-            Ok::<(u64, u64), anyhow::Error>((launches, events))
+            Ok::<_, anyhow::Error>((states, launches, candles, events, deleted_mints))
         }
         .await;
 
@@ -443,10 +477,7 @@ pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u6
             Ok(counts) => return Ok(counts),
             Err(error)
                 if attempt + 1 < MAX_ATTEMPTS
-                    && error
-                        .to_string()
-                        .to_ascii_lowercase()
-                        .contains("database is locked") =>
+                    && error.to_string().to_ascii_lowercase().contains("database is locked") =>
             {
                 let delay_ms = 250_u64 * (1_u64 << attempt);
                 tracing::warn!(
@@ -454,7 +485,7 @@ pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u6
                     max_attempts = MAX_ATTEMPTS,
                     delay_ms,
                     %error,
-                    "SQLite history cleanup encountered a transient lock; retrying"
+                    "SQLite token cleanup encountered a transient lock; retrying"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
@@ -462,7 +493,74 @@ pub async fn clear_token_and_event_history(pool: &SqlitePool) -> Result<(u64, u6
         }
     }
 
-    unreachable!("history cleanup retry loop always returns")
+    unreachable!("token cleanup retry loop always returns")
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn cleanup_removes_only_tokens_without_any_paper_position() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        for statement in [
+            "CREATE TABLE token_states (mint_address TEXT PRIMARY KEY, version INTEGER NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT NOT NULL)",
+            "CREATE TABLE token_launches (id TEXT PRIMARY KEY, mint_address TEXT NOT NULL, creator_address TEXT, source TEXT NOT NULL, signature TEXT NOT NULL UNIQUE, slot INTEGER NOT NULL, detected_at TEXT NOT NULL, payload_json TEXT NOT NULL)",
+            "CREATE TABLE chart_candles (mint_address TEXT NOT NULL, timeframe TEXT NOT NULL, open_time_ms INTEGER NOT NULL, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (mint_address, timeframe, open_time_ms))",
+            "CREATE TABLE solana_raw_events (id INTEGER PRIMARY KEY, signature TEXT, slot INTEGER, event_hash TEXT, event_json TEXT NOT NULL, received_at TEXT NOT NULL)",
+            "CREATE TABLE portfolio_positions (position_id TEXT PRIMARY KEY, mint_address TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE paper_wallets (id TEXT PRIMARY KEY, balance INTEGER NOT NULL)",
+            "CREATE TABLE paper_ledger (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        for mint in ["paper-open", "paper-closed", "rejected", "failed-fetch"] {
+            sqlx::query("INSERT INTO token_states VALUES (?, 1, 'now', '{}')")
+                .bind(mint).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO token_launches VALUES (?, ?, NULL, 'pump_fun', ?, 1, 'now', '{}')")
+                .bind(format!("launch-{mint}")).bind(mint).bind(format!("sig-{mint}"))
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO chart_candles VALUES (?, '5m', 1, '{}', 'now')")
+                .bind(mint).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO portfolio_positions VALUES ('pos-open', 'paper-open', 'open', '{}', 'now')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO portfolio_positions VALUES ('pos-closed', 'paper-closed', 'closed', '{}', 'now')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO solana_raw_events (event_json, received_at) VALUES ('{}', 'now')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO paper_wallets VALUES ('wallet', 123)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO paper_ledger VALUES ('ledger', 123)")
+            .execute(&pool).await.unwrap();
+
+        let (states, launches, candles, events, deleted_mints) =
+            clear_non_paper_token_history(&pool).await.unwrap();
+
+        assert_eq!(states, 2);
+        assert_eq!(launches, 2);
+        assert_eq!(candles, 2);
+        assert_eq!(events, 1);
+        assert_eq!(deleted_mints.len(), 2);
+        for mint in ["paper-open", "paper-closed"] {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM token_states WHERE mint_address = ?")
+                .bind(mint).fetch_one(&pool).await.unwrap();
+            assert_eq!(exists, 1);
+        }
+        let remaining_wallets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_wallets")
+            .fetch_one(&pool).await.unwrap();
+        let remaining_ledger: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining_wallets, 1);
+        assert_eq!(remaining_ledger, 1);
+    }
 }
 
 /// Upsert one OHLCV candle by token, timeframe and its event-time bucket.
