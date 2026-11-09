@@ -100,7 +100,7 @@ pub struct SolanaRpc {
 }
 
 fn redact_provider_value(value: &mut Value) {
-    let secrets: Vec<String> = (1..=5)
+    let secrets: Vec<String> = (1..=10)
         .filter_map(|i| std::env::var(format!("HELIUS_API_KEY{i}")).ok())
         .chain(std::env::var("HELIUS_API_KEY").ok())
         .chain(std::env::var("RUGCHECK_API_KEY").ok())
