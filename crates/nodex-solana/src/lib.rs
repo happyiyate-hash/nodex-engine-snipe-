@@ -561,19 +561,20 @@ impl SolanaRpc {
             report.provider_responses.push(account_evidence);
             return Ok(report);
         };
-        let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let mut report = TokenSecurityReport::unverified(
-                    mint,
-                    &format!("Mint account base64 data could not be decoded: {error}"),
-                    context_slot,
-                );
-                report.provider_responses.push(account_evidence);
-                report.enforce_diagnostic_only();
-                return Ok(report);
-            }
-        };
+        let bytes =
+            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let mut report = TokenSecurityReport::unverified(
+                        mint,
+                        &format!("Mint account base64 data could not be decoded: {error}"),
+                        context_slot,
+                    );
+                    report.provider_responses.push(account_evidence);
+                    report.enforce_diagnostic_only();
+                    return Ok(report);
+                }
+            };
         let mut report = match parse_mint_security_report(mint, &owner, &bytes, context_slot) {
             Ok(report) => report,
             Err(error) => TokenSecurityReport::unverified(

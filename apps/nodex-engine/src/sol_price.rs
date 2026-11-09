@@ -18,11 +18,15 @@ pub struct SolPriceSnapshot {
 
 pub fn usd_to_lamports(usd: f64, sol_price_usd: f64) -> Result<u64> {
     if !usd.is_finite() || usd <= 0.0 || !sol_price_usd.is_finite() || sol_price_usd <= 0.0 {
-        return Err(anyhow!("USD amount and SOL/USD price must be finite and positive"));
+        return Err(anyhow!(
+            "USD amount and SOL/USD price must be finite and positive"
+        ));
     }
     let lamports = (usd / sol_price_usd) * LAMPORTS_PER_SOL;
     if !lamports.is_finite() || lamports < 1.0 || lamports > u64::MAX as f64 {
-        return Err(anyhow!("USD amount cannot be represented as a positive lamport balance"));
+        return Err(anyhow!(
+            "USD amount cannot be represented as a positive lamport balance"
+        ));
     }
     Ok(lamports.round() as u64)
 }

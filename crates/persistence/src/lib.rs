@@ -477,7 +477,10 @@ pub async fn clear_non_paper_token_history(
             Ok(counts) => return Ok(counts),
             Err(error)
                 if attempt + 1 < MAX_ATTEMPTS
-                    && error.to_string().to_ascii_lowercase().contains("database is locked") =>
+                    && error
+                        .to_string()
+                        .to_ascii_lowercase()
+                        .contains("database is locked") =>
             {
                 let delay_ms = 250_u64 * (1_u64 << attempt);
                 tracing::warn!(

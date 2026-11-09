@@ -1,7 +1,7 @@
+mod sol_price;
 mod storage;
 mod token_details;
 mod websocket;
-mod sol_price;
 
 use axum::{
     extract::{
@@ -21,9 +21,9 @@ use nodex_solana::{
     StreamStatus,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
-use sol_price::SolPriceSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sol_price::SolPriceSnapshot;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1992,23 +1992,31 @@ async fn clear_token_and_event_history(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
 
-    let (deleted_token_state_records, deleted_launch_records, deleted_chart_records,
-        deleted_raw_event_records, database_mints) =
-        nodex_persistence::clear_non_paper_token_history(&state.database)
-            .await
-            .map_err(|error| (
+    let (
+        deleted_token_state_records,
+        deleted_launch_records,
+        deleted_chart_records,
+        deleted_raw_event_records,
+        database_mints,
+    ) = nodex_persistence::clear_non_paper_token_history(&state.database)
+        .await
+        .map_err(|error| {
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Selective token cleanup failed: {error}"),
-            ))?;
+            )
+        })?;
 
     // Re-read paper positions after the transaction commits so a position
     // created while cleanup was waiting for SQLite cannot be removed in memory.
     let positions = nodex_persistence::load_portfolio_positions(&state.database)
         .await
-        .map_err(|error| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Could not refresh paper-traded token protection: {error}"),
-        ))?;
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not refresh paper-traded token protection: {error}"),
+            )
+        })?;
     let paper_mints: HashSet<String> = positions
         .iter()
         .filter_map(|position| {
@@ -2275,11 +2283,17 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
     let positions = state.portfolio_positions.read().await;
     let open_positions: Vec<&serde_json::Value> = positions
         .iter()
-        .filter(|position| position.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+        .filter(|position| {
+            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+        })
         .collect();
     let positions_value_sol: f64 = open_positions
         .iter()
-        .filter_map(|position| position.get("current_value_sol").and_then(serde_json::Value::as_f64))
+        .filter_map(|position| {
+            position
+                .get("current_value_sol")
+                .and_then(serde_json::Value::as_f64)
+        })
         .sum();
     let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
@@ -2331,11 +2345,23 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
                         && !normalized.contains("stoploss")
                         && !normalized.contains("takeprofit")
                 });
-                if let Some(value_sol) = fields.get("current_value_sol").and_then(serde_json::Value::as_f64) {
-                    fields.insert("current_value_usd".into(), json!(value_sol * sol_price.price_usd));
+                if let Some(value_sol) = fields
+                    .get("current_value_sol")
+                    .and_then(serde_json::Value::as_f64)
+                {
+                    fields.insert(
+                        "current_value_usd".into(),
+                        json!(value_sol * sol_price.price_usd),
+                    );
                 }
-                if let Some(price_sol) = fields.get("current_price_sol").and_then(serde_json::Value::as_f64) {
-                    fields.insert("current_price_usd".into(), json!(price_sol * sol_price.price_usd));
+                if let Some(price_sol) = fields
+                    .get("current_price_sol")
+                    .and_then(serde_json::Value::as_f64)
+                {
+                    fields.insert(
+                        "current_price_usd".into(),
+                        json!(price_sol * sol_price.price_usd),
+                    );
                 }
                 fields.insert("sol_price_usd".into(), json!(sol_price.price_usd));
             }
@@ -2931,7 +2957,8 @@ async fn main() -> anyhow::Result<()> {
         nodex_persistence::load_portfolio_positions(&db).await?,
     ));
     let (events, _) = broadcast::channel::<serde_json::Value>(8192);
-    let sol_price_state = sol_price::start_sol_price_feed(events.clone(), initial_sol_price.clone());
+    let sol_price_state =
+        sol_price::start_sol_price_feed(events.clone(), initial_sol_price.clone());
     // Persist every structured provider request/response card independently of
     // the WebSocket client, so the operator can inspect history after reconnecting.
     {
@@ -3088,9 +3115,12 @@ async fn main() -> anyhow::Result<()> {
     let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
         Some(existing) => {
             let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
-                .fetch_one(&db).await?;
-            let position_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_positions")
-                .fetch_one(&db).await?;
+                .fetch_one(&db)
+                .await?;
+            let position_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_positions")
+                    .fetch_one(&db)
+                    .await?;
             let untouched = ledger_count == 0
                 && position_count == 0
                 && existing.invested_balance_lamports == 0
@@ -3098,7 +3128,11 @@ async fn main() -> anyhow::Result<()> {
             if untouched && existing.starting_balance_lamports != ten_usd_lamports {
                 let wallet = PaperWallet::new(ten_usd_lamports);
                 nodex_persistence::save_paper_wallet(&db, &wallet).await?;
-                tracing::info!(starting_balance_usd = 10.0, starting_balance_sol = ten_usd_lamports as f64 / LAMPORTS_PER_SOL as f64, "Initialized paper wallet at $10 USD");
+                tracing::info!(
+                    starting_balance_usd = 10.0,
+                    starting_balance_sol = ten_usd_lamports as f64 / LAMPORTS_PER_SOL as f64,
+                    "Initialized paper wallet at $10 USD"
+                );
                 wallet
             } else {
                 existing
