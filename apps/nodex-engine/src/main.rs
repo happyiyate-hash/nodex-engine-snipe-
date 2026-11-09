@@ -1521,9 +1521,8 @@ fn start_launch_processor(
                                     &scan_mint,"token_scan_cache","sqlite",error.to_string(),
                                     json!({"kind":"database_persistence_error","message":error.to_string()})
                                 )}));
+                                }
                             }
-                        }
-                    }
                         Err(error) => {
                             let error_details = provider_error_details(&error);
                             let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
@@ -1554,8 +1553,11 @@ fn start_launch_processor(
                                 "status":"failed",
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
-                            let previous_attempts = approved_registry.get(&scan_mint)
-                                .and_then(|state| state.data["security"]["scan_cache"]["attempts"].as_u64())
+                            let previous_attempts = approved_registry
+                                .get(&scan_mint)
+                                .and_then(|state| {
+                                    state.data["security"]["scan_cache"]["attempts"].as_u64()
+                                })
                                 .unwrap_or(0);
                             let attempts = previous_attempts.saturating_add(1);
                             let lower_error = error.to_ascii_lowercase();
@@ -1564,9 +1566,13 @@ fn start_launch_processor(
                                 || lower_error.contains("too many")
                                 || lower_error.contains("max usage");
                             let base_seconds = if rate_limited { 30_u64 } else { 15_u64 };
-                            let backoff_seconds = (base_seconds.saturating_mul(2_u64.saturating_pow(attempts.min(6) as u32))).min(900)
+                            let backoff_seconds = (base_seconds
+                                .saturating_mul(2_u64.saturating_pow(attempts.min(6) as u32)))
+                            .min(900)
                                 + (scan_mint.bytes().map(u64::from).sum::<u64>() % 11);
-                            let retry_after = (chrono::Utc::now() + chrono::Duration::seconds(backoff_seconds as i64)).to_rfc3339();
+                            let retry_after = (chrono::Utc::now()
+                                + chrono::Duration::seconds(backoff_seconds as i64))
+                            .to_rfc3339();
                             match approved_registry.upsert_patch(&scan_mint,json!({"security":{
                                 "status":"failed",
                                 "scan_cache":{
