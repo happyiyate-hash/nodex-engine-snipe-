@@ -928,7 +928,7 @@ fn start_launch_processor(
                                 .await;
                             }
                         }
-Err(error) => {
+                        Err(error) => {
                             last_error = Some(error.to_string());
                             if attempt < 3 {
                                 tokio::time::sleep(std::time::Duration::from_millis(
