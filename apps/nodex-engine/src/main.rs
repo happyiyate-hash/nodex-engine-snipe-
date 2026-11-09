@@ -2312,6 +2312,21 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
 
     let mut token_snapshots = state.token_registry.snapshot();
     token_snapshots.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let token_snapshots: Vec<serde_json::Value> = token_snapshots
+        .into_iter()
+        .map(|snapshot| {
+            // Flatten TokenState.data into the same shape returned by the token
+            // detail endpoint: identity, security, market and statistics beside
+            // mint_address. The browser mapper consumes this canonical shape.
+            let mut value = snapshot.data;
+            if let Some(fields) = value.as_object_mut() {
+                fields.insert("mint_address".into(), json!(snapshot.mint_address));
+                fields.insert("version".into(), json!(snapshot.version));
+                fields.insert("updated_at".into(), json!(snapshot.updated_at));
+            }
+            value
+        })
+        .collect();
 
     if let Some(object) = profile.as_object_mut() {
         object.insert("paper_wallet".into(), json!(paper_wallet));
