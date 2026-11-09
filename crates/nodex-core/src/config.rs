@@ -21,7 +21,7 @@ pub struct EngineConfig {
 
 impl EngineConfig {
     pub fn from_env() -> Self {
-        let keys: Vec<String> = (1..=5)
+        let keys: Vec<String> = (1..=10)
             .filter_map(|index| {
                 let name = if index == 1 {
                     "HELIUS_API_KEY".to_owned()
