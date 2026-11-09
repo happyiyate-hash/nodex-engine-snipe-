@@ -2316,9 +2316,8 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
     let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let total_sol = available_sol + positions_value_sol + locked_rent_sol;
-    let starting_balance_usd = wallet.starting_balance_lamports as f64
-        / LAMPORTS_PER_SOL as f64
-        * price.price_usd;
+    let starting_balance_usd =
+        wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64 * price.price_usd;
     let total_pnl_usd = total_pnl_sol * price.price_usd;
     let total_pnl_pct = if starting_balance_usd > 0.0 {
         total_pnl_usd / starting_balance_usd * 100.0
