@@ -3,8 +3,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
-pub const DEFAULT_STARTING_BALANCE_LAMPORTS: u64 = 10 * LAMPORTS_PER_SOL;
-pub const DEFAULT_TRADE_AMOUNT_LAMPORTS: u64 = 100_000_000;
+// Runtime startup calculates the actual $10 balance from a live SOL/USD quote.
+pub const DEFAULT_STARTING_BALANCE_LAMPORTS: u64 = 10_000_000;
+pub const DEFAULT_TRADE_AMOUNT_LAMPORTS: u64 = 10_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuyCostBreakdown {
@@ -164,10 +165,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_ten_sol_and_point_one_sol_trade() {
+    fn defaults_to_small_fallback_and_point_zero_one_sol_trade() {
         let wallet = PaperWallet::default();
-        assert_eq!(wallet.starting_balance_lamports, 10_000_000_000);
-        assert_eq!(DEFAULT_TRADE_AMOUNT_LAMPORTS, 100_000_000);
+        assert_eq!(wallet.starting_balance_lamports, 10_000_000);
+        assert_eq!(DEFAULT_TRADE_AMOUNT_LAMPORTS, 10_000_000);
     }
 
     #[test]

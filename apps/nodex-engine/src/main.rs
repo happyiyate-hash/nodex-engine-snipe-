@@ -1,6 +1,7 @@
 mod storage;
 mod token_details;
 mod websocket;
+mod sol_price;
 
 use axum::{
     extract::{
@@ -20,6 +21,7 @@ use nodex_solana::{
     StreamStatus,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
+use sol_price::SolPriceSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_keypair::Keypair;
@@ -43,6 +45,7 @@ struct AppState {
     stream_status: Arc<RwLock<StreamStatus>>,
     pumpswap_status: Arc<RwLock<StreamStatus>>,
     wallet: Arc<RwLock<PaperWallet>>,
+    sol_price: Arc<RwLock<SolPriceSnapshot>>,
     rpc: Option<SolanaRpc>,
     database: sqlx::SqlitePool,
     control: Arc<RwLock<EngineControl>>,
@@ -82,7 +85,7 @@ impl Default for TradingSettings {
         Self {
             min_liquidity_usd: 5_000.0,
             max_entry_price_usd: 0.0,
-            max_investment_per_token_sol: 0.1,
+            max_investment_per_token_sol: 0.01,
             max_investment_per_token_usd: 0.0,
             max_simultaneous_positions: 3,
             min_safety_score: 80,
@@ -2260,6 +2263,46 @@ async fn paper_wallet(State(state): State<AppState>) -> Json<PaperWallet> {
     Json(state.wallet.read().await.clone())
 }
 
+async fn sol_price(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!(state.sol_price.read().await.clone()))
+}
+
+/// Aggregate paper-account equity in USD: available SOL + open token holdings
+/// + recoverable rent, all valued using the latest SOL/USD quote.
+async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let price = state.sol_price.read().await.clone();
+    let wallet = state.wallet.read().await.clone();
+    let positions = state.portfolio_positions.read().await;
+    let open_positions: Vec<&serde_json::Value> = positions
+        .iter()
+        .filter(|position| position.get("status").and_then(serde_json::Value::as_str) == Some("open"))
+        .collect();
+    let positions_value_sol: f64 = open_positions
+        .iter()
+        .filter_map(|position| position.get("current_value_sol").and_then(serde_json::Value::as_f64))
+        .sum();
+    let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let total_sol = available_sol + positions_value_sol + locked_rent_sol;
+    Json(json!({
+        "portfolio_balance_usd": total_sol * price.price_usd,
+        "total_value_usd": total_sol * price.price_usd,
+        "available_balance_usd": available_sol * price.price_usd,
+        "positions_value_usd": positions_value_sol * price.price_usd,
+        "locked_rent_value_usd": locked_rent_sol * price.price_usd,
+        "available_balance_sol": available_sol,
+        "positions_value_sol": positions_value_sol,
+        "locked_rent_sol": locked_rent_sol,
+        "total_value_sol": total_sol,
+        "sol_price_usd": price.price_usd,
+        "sol_price_source": price.source,
+        "price_updated_at": price.updated_at,
+        "price_status": price.status,
+        "position_count": open_positions.len(),
+        "updated_at": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
 /// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
 /// paper-trading funds and positions remain separate accounting domains.
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -2268,6 +2311,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     // separate balances and are never added together.
     let positions = state.portfolio_positions.read().await.clone();
     let paper_wallet = state.wallet.read().await.clone();
+    let sol_price = state.sol_price.read().await.clone();
     let mut profile = state.profile.read().await.clone();
 
     let open_positions: Vec<serde_json::Value> = positions
@@ -2287,6 +2331,13 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
                         && !normalized.contains("stoploss")
                         && !normalized.contains("takeprofit")
                 });
+                if let Some(value_sol) = fields.get("current_value_sol").and_then(serde_json::Value::as_f64) {
+                    fields.insert("current_value_usd".into(), json!(value_sol * sol_price.price_usd));
+                }
+                if let Some(price_sol) = fields.get("current_price_sol").and_then(serde_json::Value::as_f64) {
+                    fields.insert("current_price_usd".into(), json!(price_sol * sol_price.price_usd));
+                }
+                fields.insert("sol_price_usd".into(), json!(sol_price.price_usd));
             }
             position
         })
@@ -2315,6 +2366,12 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     // recoverable rent reserves. Fees already debited from available funds are
     // not counted a second time.
     let portfolio_balance_sol = available_balance_sol + total_value_sol + locked_rent_sol;
+    let portfolio_balance_usd = portfolio_balance_sol * sol_price.price_usd;
+    let total_value_usd = total_value_sol * sol_price.price_usd;
+    let starting_balance_usd = starting_balance_sol * sol_price.price_usd;
+    let unrealized_pnl_usd = unrealized_pnl_sol * sol_price.price_usd;
+    let realized_pnl_usd = realized_pnl_sol * sol_price.price_usd;
+    let total_pnl_usd = total_pnl_sol * sol_price.price_usd;
     let unrealized_pnl_pct = if total_invested_sol > 0.0 {
         unrealized_pnl_sol / total_invested_sol * 100.0
     } else {
@@ -2329,6 +2386,18 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let portfolio = json!({
         "portfolio_balance_sol": portfolio_balance_sol,
         "total_portfolio_value_sol": portfolio_balance_sol,
+        "portfolio_balance_usd": portfolio_balance_usd,
+        "total_portfolio_value_usd": portfolio_balance_usd,
+        "total_value_usd": total_value_usd,
+        "available_balance_usd": available_balance_sol * sol_price.price_usd,
+        "starting_balance_usd": starting_balance_usd,
+        "unrealized_pnl_usd": unrealized_pnl_usd,
+        "realized_pnl_usd": realized_pnl_usd,
+        "total_pnl_usd": total_pnl_usd,
+        "sol_price_usd": sol_price.price_usd,
+        "sol_price_source": sol_price.source,
+        "sol_price_updated_at": sol_price.updated_at,
+        "sol_price_status": sol_price.status,
         "total_value_sol": total_value_sol,
         "available_balance_sol": available_balance_sol,
         "invested_balance_sol": invested_balance_sol,
@@ -2364,6 +2433,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
 
     if let Some(object) = profile.as_object_mut() {
         object.insert("paper_wallet".into(), json!(paper_wallet));
+        object.insert("sol_price".into(), json!(sol_price));
         object.insert("portfolio".into(), portfolio);
         // The profile endpoint is the frontend's bootstrap request. Include the
         // complete persisted token states so identity metadata is restored by mint.
@@ -2779,6 +2849,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = EngineConfig::from_env();
+    // Require a genuine spot quote before valuing the initial $10 paper balance.
+    let initial_sol_price = sol_price::fetch_sol_usd_price().await?;
+    tracing::info!(price_usd = initial_sol_price.price_usd, source = %initial_sol_price.source, "Fetched initial SOL/USD price");
     let db = nodex_persistence::connect(&config.database_url).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS nodex_runtime_config (config_key TEXT PRIMARY KEY, config_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
@@ -2858,6 +2931,7 @@ async fn main() -> anyhow::Result<()> {
         nodex_persistence::load_portfolio_positions(&db).await?,
     ));
     let (events, _) = broadcast::channel::<serde_json::Value>(8192);
+    let sol_price_state = sol_price::start_sol_price_feed(events.clone(), initial_sol_price.clone());
     // Persist every structured provider request/response card independently of
     // the WebSocket client, so the operator can inspect history after reconnecting.
     {
@@ -3007,10 +3081,31 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Seed the paper account with $10 worth of SOL at the live quote. Existing
+    // balances are migrated only when no paper trades, positions, or invested
+    // funds exist; accounts with trading history are left untouched.
+    let ten_usd_lamports = sol_price::usd_to_lamports(10.0, initial_sol_price.price_usd)?;
     let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
-        Some(wallet) => wallet,
+        Some(existing) => {
+            let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
+                .fetch_one(&db).await?;
+            let position_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_positions")
+                .fetch_one(&db).await?;
+            let untouched = ledger_count == 0
+                && position_count == 0
+                && existing.invested_balance_lamports == 0
+                && existing.locked_rent_lamports == 0;
+            if untouched && existing.starting_balance_lamports != ten_usd_lamports {
+                let wallet = PaperWallet::new(ten_usd_lamports);
+                nodex_persistence::save_paper_wallet(&db, &wallet).await?;
+                tracing::info!(starting_balance_usd = 10.0, starting_balance_sol = ten_usd_lamports as f64 / LAMPORTS_PER_SOL as f64, "Initialized paper wallet at $10 USD");
+                wallet
+            } else {
+                existing
+            }
+        }
         None => {
-            let wallet = PaperWallet::new(config.paper_starting_balance_lamports);
+            let wallet = PaperWallet::new(ten_usd_lamports);
             nodex_persistence::save_paper_wallet(&db, &wallet).await?;
             wallet
         }
@@ -3098,6 +3193,7 @@ async fn main() -> anyhow::Result<()> {
         stream_status,
         pumpswap_status,
         wallet: Arc::new(RwLock::new(wallet)),
+        sol_price: sol_price_state,
         rpc,
         database: db.clone(),
         control,
@@ -3123,6 +3219,8 @@ async fn main() -> anyhow::Result<()> {
             get(get_trading_config).put(update_trading_config),
         )
         .route("/api/v1/paper-wallet", get(paper_wallet))
+        .route("/api/v1/market/sol-price", get(sol_price))
+        .route("/api/v1/portfolio/balance", get(portfolio_balance))
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/tokens/:mint/state", get(token_state))

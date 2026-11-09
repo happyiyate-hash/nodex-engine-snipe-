@@ -25,6 +25,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("token_metadata_updated")
             | Some("token_state_updated")
             | Some("profile_updated")
+            | Some("sol_price_update")
             | Some("market_price_update")
             | Some("token_market_update")
             | Some("token_statistics_update")

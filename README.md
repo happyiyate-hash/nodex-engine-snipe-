@@ -121,3 +121,22 @@ Set `NODEX_ADMIN_API_KEY` to a long random secret in the server environment. The
 SQLite category payload estimates overlap the physical database size and must not be summed with it. Launch and discovery figures refer to the same launch-history rows. NodeX currently writes tracing output to stdout, so systemd captures it in journald; journald does not provide a reliable per-service disk-size breakdown. The journal size is therefore reported as a system-wide value, not falsely attributed to NodeX alone.
 
 System journal cleanup is disabled by default. Only enable `NODEX_ALLOW_SYSTEM_JOURNAL_CLEANUP=true` after reviewing the system-wide effect. The endpoint rotates the journal and vacuums archived journal data toward 200 MB, subject to the service's operating-system permissions. It does not delete SQLite data, token records, wallet data, or trading history. The engine process is not granted unrestricted root access.
+
+
+## Live SOL price and USD paper portfolio
+
+The engine fetches a live SOL/USD spot quote from Coinbase, with Binance as a
+fallback, and refreshes it every 10 seconds. The quote is broadcast as
+`sol_price_update`. If both providers fail, the last quote is retained and
+marked `stale`; no synthetic price is substituted.
+
+A new paper wallet starts with **$10 USD worth of SOL**, converted to lamports
+using the startup quote. An existing wallet is reset to this seed only when it
+has no paper ledger entries, no positions, and no invested or locked balances.
+The default per-token paper sizing is reduced to 0.01 SOL for the small seed.
+
+- `GET /api/v1/market/sol-price` — latest SOL/USD quote, source, timestamp and freshness.
+- `GET /api/v1/portfolio/balance` — aggregate USD portfolio balance, including
+  available paper SOL, open token holdings and recoverable rent.
+- `GET /api/v1/profile` — includes `portfolio_balance_usd`, USD PnL fields,
+  per-position USD marks and the SOL quote used for valuation.
