@@ -1951,55 +1951,79 @@ async fn engine_status(State(state): State<AppState>) -> Json<serde_json::Value>
     }))
 }
 
-/// Temporary maintenance endpoint. Deletes historical launch rows and raw
-/// upstream notification history only; live subscriptions and monitor state stay running.
+/// Selectively remove stored tokens that have never entered paper trading.
+/// Any token with an open or closed paper position remains intact.
 async fn clear_token_and_event_history(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let configured_key = state
-        .admin_api_key
-        .as_deref()
-        .filter(|key| !key.is_empty())
-        .ok_or((
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Maintenance endpoint authentication is unavailable.".to_string(),
+    verify_operator_key(&state, &headers)?;
+
+    // Read all paper-traded mints before deleting history. Closed positions count:
+    // a token that has ever entered paper trading must not be removed by cleanup.
+    let positions = nodex_persistence::load_portfolio_positions(&state.database)
+        .await
+        .map_err(|error| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not identify paper-traded tokens: {error}"),
         ))?;
-    let supplied_key = headers
-        .get("x-nodex-admin-key")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if supplied_key.is_empty() || supplied_key != configured_key {
-        return Err((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "Invalid or missing NodeX admin key.".to_string(),
-        ));
+    let paper_mints: HashSet<String> = positions
+        .iter()
+        .filter_map(|position| position.get("mint_address").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect();
+
+    let (deleted_token_state_records, deleted_launch_records, deleted_chart_records,
+        deleted_raw_event_records, database_mints) =
+        nodex_persistence::clear_non_paper_token_history(&state.database)
+            .await
+            .map_err(|error| (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Selective token cleanup failed: {error}"),
+            ))?;
+
+    // Also remove transient in-memory token states that had not reached SQLite.
+    let mut deleted_mints: HashSet<String> = database_mints.into_iter().collect();
+    for snapshot in state.token_registry.snapshot() {
+        if !paper_mints.contains(&snapshot.mint_address) {
+            state.token_registry.remove(&snapshot.mint_address);
+            deleted_mints.insert(snapshot.mint_address);
+        }
+    }
+    for mint in &deleted_mints {
+        let _ = state.events.send(json!({
+            "type": "token_removed",
+            "data": {
+                "mint_address": mint,
+                "reason": "storage_cleanup",
+                "removed_at": chrono::Utc::now().to_rfc3339()
+            }
+        }));
     }
 
-    let (deleted_token_records, deleted_raw_event_records) =
-        nodex_persistence::clear_token_and_event_history(&state.database)
-            .await
-            .map_err(|error| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("History cleanup failed: {error}"),
-                )
-            })?;
-
     tracing::warn!(
-        deleted_token_records,
+        deleted_token_state_records,
+        deleted_launch_records,
+        deleted_chart_records,
         deleted_raw_event_records,
-        "NodeX historical token and raw event records cleared through maintenance API"
+        deleted_in_memory_tokens = deleted_mints.len(),
+        "NodeX non-paper token history cleared through maintenance API"
     );
 
     Ok(Json(json!({
         "status": "ok",
-        "deleted_token_records": deleted_token_records,
+        "deleted_token_records": deleted_token_state_records,
+        "deleted_token_state_records": deleted_token_state_records,
+        "deleted_launch_records": deleted_launch_records,
+        "deleted_chart_records": deleted_chart_records,
         "deleted_raw_event_records": deleted_raw_event_records,
+        "deleted_mints": deleted_mints,
         "preserved": [
-            "live token discovery and market subscriptions",
+            "all tokens with open or closed paper positions",
             "paper wallet and ledger",
-            "database schema and configuration",
+            "paper positions and balances",
+            "live token discovery and market subscriptions",
+            "database schema and runtime configuration",
             "source code, API keys, and environment configuration"
         ]
     })))
@@ -2286,9 +2310,15 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
         "position_count": open_positions.len()
     });
 
+    let mut token_snapshots = state.token_registry.snapshot();
+    token_snapshots.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+
     if let Some(object) = profile.as_object_mut() {
         object.insert("paper_wallet".into(), json!(paper_wallet));
         object.insert("portfolio".into(), portfolio);
+        // The profile endpoint is the frontend's bootstrap request. Include the
+        // complete persisted token states so identity metadata is restored by mint.
+        object.insert("tokens".into(), json!(token_snapshots));
     }
     Json(profile)
 }
