@@ -1959,20 +1959,6 @@ async fn clear_token_and_event_history(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
 
-    // Read all paper-traded mints before deleting history. Closed positions count:
-    // a token that has ever entered paper trading must not be removed by cleanup.
-    let positions = nodex_persistence::load_portfolio_positions(&state.database)
-        .await
-        .map_err(|error| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Could not identify paper-traded tokens: {error}"),
-        ))?;
-    let paper_mints: HashSet<String> = positions
-        .iter()
-        .filter_map(|position| position.get("mint_address").and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
-        .collect();
-
     let (deleted_token_state_records, deleted_launch_records, deleted_chart_records,
         deleted_raw_event_records, database_mints) =
         nodex_persistence::clear_non_paper_token_history(&state.database)
@@ -1981,6 +1967,24 @@ async fn clear_token_and_event_history(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Selective token cleanup failed: {error}"),
             ))?;
+
+    // Re-read paper positions after the transaction commits so a position
+    // created while cleanup was waiting for SQLite cannot be removed in memory.
+    let positions = nodex_persistence::load_portfolio_positions(&state.database)
+        .await
+        .map_err(|error| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not refresh paper-traded token protection: {error}"),
+        ))?;
+    let paper_mints: HashSet<String> = positions
+        .iter()
+        .filter_map(|position| {
+            position
+                .get("mint_address")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned)
+        .collect();
 
     // Also remove transient in-memory token states that had not reached SQLite.
     let mut deleted_mints: HashSet<String> = database_mints.into_iter().collect();
