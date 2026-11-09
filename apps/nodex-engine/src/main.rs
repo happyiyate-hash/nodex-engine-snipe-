@@ -998,11 +998,19 @@ fn start_launch_processor(
                         && retry_after.map(|time| time > now).unwrap_or(true);
                     let waiting = cache_status == "retry_wait"
                         && retry_after.map(|time| time > now).unwrap_or(false);
-                    if terminal || cached || waiting || cache_status == "scanning" {
+                    let scan_started_at = cache["started_at"].as_str()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                    let scan_in_progress = cache_status == "scanning"
+                        && scan_started_at.map(|time| now.signed_duration_since(time).num_seconds() < 120)
+                            .unwrap_or(false);
+                    if terminal || cached || waiting || scan_in_progress {
                         inflight_mints.lock().await.remove(&mint_address);
                         continue;
                     }
                 }
+                let scan_attempts = token_registry.get(&mint_address)
+                    .and_then(|state| state.data["security"]["scan_cache"]["attempts"].as_u64())
+                    .unwrap_or(0);
 
                 // Resolve identity before announcing discovery or starting security analysis.
                 let metadata_result = tokio::time::timeout(
@@ -1077,7 +1085,7 @@ fn start_launch_processor(
                             "status": "pending",
                             "scan_cache": {
                                 "status": "scanning",
-                                "attempts": 0,
+                                "attempts": scan_attempts,
                                 "started_at": chrono::Utc::now().to_rfc3339()
                             }
                         },
@@ -1576,6 +1584,7 @@ fn start_launch_processor(
                                     "status": cache_status,
                                     "verified": cache_status == "verified",
                                     "diagnostic_only": diagnostic_only,
+                                    "attempts": scan_attempts,
                                     "scanned_at": scanned_at.to_rfc3339(),
                                     "retry_after": retry_after,
                                     "provider_rate_limited": provider_limited
