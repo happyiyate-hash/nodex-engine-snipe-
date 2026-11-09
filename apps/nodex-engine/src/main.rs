@@ -927,7 +927,6 @@ fn start_launch_processor(
                                 ))
                                 .await;
                             }
-                        }
                         Err(error) => {
                             last_error = Some(error.to_string());
                             if attempt < 3 {
