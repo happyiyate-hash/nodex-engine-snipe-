@@ -2295,18 +2295,46 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
                 .and_then(serde_json::Value::as_f64)
         })
         .sum();
+    let unrealized_pnl_sol: f64 = open_positions
+        .iter()
+        .filter_map(|position| {
+            position
+                .get("unrealized_pnl_sol")
+                .and_then(serde_json::Value::as_f64)
+        })
+        .sum();
+    let realized_pnl_sol: f64 = positions
+        .iter()
+        .filter_map(|position| {
+            position
+                .get("realized_pnl_sol")
+                .and_then(serde_json::Value::as_f64)
+        })
+        .sum();
+    let total_pnl_sol = unrealized_pnl_sol + realized_pnl_sol;
     let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let total_sol = available_sol + positions_value_sol + locked_rent_sol;
+    let starting_balance_usd = wallet.starting_balance_lamports as f64
+        / LAMPORTS_PER_SOL as f64
+        * price.price_usd;
+    let total_pnl_usd = total_pnl_sol * price.price_usd;
+    let total_pnl_pct = if starting_balance_usd > 0.0 {
+        total_pnl_usd / starting_balance_usd * 100.0
+    } else {
+        0.0
+    };
     Json(json!({
         "portfolio_balance_usd": total_sol * price.price_usd,
         "total_value_usd": total_sol * price.price_usd,
         "available_balance_usd": available_sol * price.price_usd,
         "invested_balance_usd": invested_sol * price.price_usd,
-        "starting_balance_usd": wallet.starting_balance_lamports as f64
-            / LAMPORTS_PER_SOL as f64
-            * price.price_usd,
+        "starting_balance_usd": starting_balance_usd,
+        "unrealized_pnl_usd": unrealized_pnl_sol * price.price_usd,
+        "realized_pnl_usd": realized_pnl_sol * price.price_usd,
+        "total_pnl_usd": total_pnl_usd,
+        "total_pnl_pct": total_pnl_pct,
         "positions_value_usd": positions_value_sol * price.price_usd,
         "locked_rent_value_usd": locked_rent_sol * price.price_usd,
         "available_balance_sol": available_sol,
