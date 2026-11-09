@@ -2304,7 +2304,9 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
         "total_value_usd": total_sol * price.price_usd,
         "available_balance_usd": available_sol * price.price_usd,
         "invested_balance_usd": invested_sol * price.price_usd,
-        "starting_balance_usd": wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64 * price.price_usd,
+        "starting_balance_usd": wallet.starting_balance_lamports as f64
+            / LAMPORTS_PER_SOL as f64
+            * price.price_usd,
         "positions_value_usd": positions_value_sol * price.price_usd,
         "locked_rent_value_usd": locked_rent_sol * price.price_usd,
         "available_balance_sol": available_sol,
