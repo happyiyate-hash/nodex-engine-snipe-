@@ -1524,8 +1524,7 @@ fn start_launch_processor(
                             }
                         }
                     }
-                        }
-                        Err(error) => {
+
                             let error_details = provider_error_details(&error);
                             let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
                             let _=scan_events.send(json!({"type":"diagnostic","data":{"severity":"error","component":"token_security_scanner","message":error,"mint_address":scan_mint,"received_at":chrono::Utc::now().to_rfc3339()}}));
