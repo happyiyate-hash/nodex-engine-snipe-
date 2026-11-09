@@ -25,7 +25,7 @@ NodeX is a modular Solana launch-analysis and paper-trading engine. The current 
 Requires stable Rust.
 
 1. Copy `.env.example` to `.env`.
-2. Create a Helius API key and set `HELIUS_API_KEY` in `.env`. Keep the real `.env` file private; it is ignored by Git.
+2. Create up to 10 Helius API keys and set `HELIUS_API_KEY` through `HELIUS_API_KEY10` in `.env` (the first key uses `HELIUS_API_KEY`, then `HELIUS_API_KEY2` ... `HELIUS_API_KEY10`). The engine builds matching HTTP and WebSocket endpoints and cycles through configured endpoints when an HTTP RPC request is rate-limited or unavailable. Keep real keys private; `.env` is ignored by Git.
 3. Optionally set `RUGCHECK_API_KEY` for RugCheck API access. The backend calls RugCheck's token report summary endpoint; if the provider is unavailable or rate-limited, the report remains explicitly unverified and never becomes safe by default.
 3. Run:
 
