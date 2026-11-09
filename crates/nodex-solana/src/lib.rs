@@ -21,7 +21,7 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
@@ -95,12 +95,13 @@ pub fn decode_pump_swap_activity_logs(
 pub struct SolanaRpc {
     http_urls: Vec<String>,
     active_http_index: Arc<AtomicUsize>,
+    request_limit: Arc<Semaphore>,
     client: reqwest::Client,
     activity_events: Option<broadcast::Sender<Value>>,
 }
 
 fn redact_provider_value(value: &mut Value) {
-    let secrets: Vec<String> = (1..=10)
+    let secrets: Vec<String> = (2..=20)
         .filter_map(|i| std::env::var(format!("HELIUS_API_KEY{i}")).ok())
         .chain(std::env::var("HELIUS_API_KEY").ok())
         .chain(std::env::var("RUGCHECK_API_KEY").ok())
@@ -127,6 +128,13 @@ impl SolanaRpc {
         Self {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
+            request_limit: Arc::new(Semaphore::new(
+                std::env::var("HELIUS_MAX_CONCURRENT_REQUESTS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100),
+            )),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
@@ -180,6 +188,8 @@ impl SolanaRpc {
         if self.http_urls.is_empty() {
             return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
         }
+        let _request_permit = self.request_limit.acquire().await
+            .map_err(|_| anyhow!("Solana RPC request scheduler is shutting down"))?;
         let mut last_error = None;
         let count = self.http_urls.len();
         let correlation_id = uuid::Uuid::new_v4().to_string();
@@ -191,7 +201,7 @@ impl SolanaRpc {
         let mut request_params = params.clone();
         redact_provider_value(&mut request_params);
 
-        let start = self.active_http_index.load(Ordering::Relaxed) % count;
+        let start = self.active_http_index.fetch_add(1, Ordering::Relaxed) % count;
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
@@ -239,8 +249,6 @@ impl SolanaRpc {
                         "NODEX_PROVIDER_ERROR_JSON:{}",
                         json!({"provider":"solana_rpc","method":method,"kind":"transport_error","message":error.to_string()})
                     ));
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -252,8 +260,6 @@ impl SolanaRpc {
                         "NODEX_PROVIDER_ERROR_JSON:{}",
                         json!({"provider":"solana_rpc","method":method,"kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()})
                     ));
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -293,8 +299,6 @@ impl SolanaRpc {
                     || status.as_u16() == 401
                     || status.as_u16() == 403
                 {
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
@@ -321,14 +325,11 @@ impl SolanaRpc {
                     json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"response":error})
                 ));
                 if limited {
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
             }
             if let Some(result) = decoded.result {
-                self.active_http_index.store(index, Ordering::Relaxed);
                 return Ok((result, response_json));
             }
             return Err(anyhow!(
@@ -963,9 +964,11 @@ impl SolanaRpc {
         if self.http_urls.is_empty() {
             return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
         }
+        let _request_permit = self.request_limit.acquire().await
+            .map_err(|_| anyhow!("Solana RPC request scheduler is shutting down"))?;
         let mut last_error = None;
         let count = self.http_urls.len();
-        let start = self.active_http_index.load(Ordering::Relaxed) % count;
+        let start = self.active_http_index.fetch_add(1, Ordering::Relaxed) % count;
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
@@ -975,8 +978,6 @@ impl SolanaRpc {
                 Ok(response) => response,
                 Err(error) => {
                     last_error = Some(anyhow!("sending Solana getTransaction request: {error}"));
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -988,8 +989,6 @@ impl SolanaRpc {
                     || status.as_u16() == 401
                     || status.as_u16() == 403
                 {
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
@@ -1009,13 +1008,10 @@ impl SolanaRpc {
                     || message.contains("429");
                 last_error = Some(anyhow!("Solana RPC getTransaction error: {message}"));
                 if limited {
-                    self.active_http_index
-                        .store((index + 1) % count, Ordering::Relaxed);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
             }
-            self.active_http_index.store(index, Ordering::Relaxed);
             return Ok(decoded.result.filter(|value| !value.is_null()));
         }
         Err(last_error
