@@ -176,7 +176,7 @@ mod tests {
         let mut wallet = PaperWallet::default();
         let entry = wallet.reserve_buy(&costs()).unwrap();
         assert_eq!(entry.amount_lamports, 12_344_280);
-        assert_eq!(wallet.invested_balance_lamports, 100_000_000);
+        assert_eq!(wallet.invested_balance_lamports, 10_000_000);
         assert_eq!(wallet.locked_rent_lamports, 2_039_280);
         assert_eq!(wallet.total_network_fees_lamports, 5_000);
     }
