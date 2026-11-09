@@ -523,23 +523,50 @@ mod cleanup_tests {
 
         for mint in ["paper-open", "paper-closed", "rejected", "failed-fetch"] {
             sqlx::query("INSERT INTO token_states VALUES (?, 1, 'now', '{}')")
-                .bind(mint).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO token_launches VALUES (?, ?, NULL, 'pump_fun', ?, 1, 'now', '{}')")
-                .bind(format!("launch-{mint}")).bind(mint).bind(format!("sig-{mint}"))
-                .execute(&pool).await.unwrap();
+                .bind(mint)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO token_launches VALUES (?, ?, NULL, 'pump_fun', ?, 1, 'now', '{}')",
+            )
+            .bind(format!("launch-{mint}"))
+            .bind(mint)
+            .bind(format!("sig-{mint}"))
+            .execute(&pool)
+            .await
+            .unwrap();
             sqlx::query("INSERT INTO chart_candles VALUES (?, '5m', 1, '{}', 'now')")
-                .bind(mint).execute(&pool).await.unwrap();
+                .bind(mint)
+                .execute(&pool)
+                .await
+                .unwrap();
         }
-        sqlx::query("INSERT INTO portfolio_positions VALUES ('pos-open', 'paper-open', 'open', '{}', 'now')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO portfolio_positions VALUES ('pos-closed', 'paper-closed', 'closed', '{}', 'now')")
-            .execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO portfolio_positions VALUES ('pos-open', 'paper-open', 'open', '{}', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO portfolio_positions VALUES ('pos-closed', 'paper-closed', 'closed', '{}', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO solana_raw_events (event_json, received_at) VALUES ('{}', 'now')")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO paper_wallets VALUES ('wallet', 123)")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO paper_ledger VALUES ('ledger', 123)")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let (states, launches, candles, events, deleted_mints) =
             clear_non_paper_token_history(&pool).await.unwrap();
@@ -549,15 +576,25 @@ mod cleanup_tests {
         assert_eq!(candles, 2);
         assert_eq!(events, 1);
         assert_eq!(deleted_mints.len(), 2);
+
         for mint in ["paper-open", "paper-closed"] {
-            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM token_states WHERE mint_address = ?")
-                .bind(mint).fetch_one(&pool).await.unwrap();
+            let exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM token_states WHERE mint_address = ?")
+                    .bind(mint)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(exists, 1);
         }
+
         let remaining_wallets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_wallets")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let remaining_ledger: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(remaining_wallets, 1);
         assert_eq!(remaining_ledger, 1);
     }
