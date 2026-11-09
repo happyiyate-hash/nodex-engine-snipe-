@@ -1437,7 +1437,7 @@ fn start_launch_processor(
                                         "data":{
                                             "mint_address":scan_mint,
                                             "decision":"REJECTED",
-                                            "reason":report.decision_reason
+                                            "reason":report.decision_reason.clone()
                                         }
                                     }));
                                 }
@@ -1569,14 +1569,17 @@ fn start_launch_processor(
                             });
                         let cache_status = if decision == "REJECTED" {
                             "rejected"
-                        } else if decision == "APPROVED" && !diagnostic_only {
+                        } else if decision == "APPROVED" && !diagnostic_only && terminal_status == "completed" {
                             "verified"
                         } else {
                             "completed_diagnostic"
                         };
-                        let retry_seconds = if provider_limited { 60 } else { 900 };
+                        let retry_seconds = if provider_limited {
+                            (30_u64.saturating_mul(2_u64.saturating_pow(scan_attempts.min(5) as u32))).min(900)
+                                + (scan_mint.bytes().map(u64::from).sum::<u64>() % 11)
+                        } else { 900 };
                         let retry_after = if cache_status == "completed_diagnostic" {
-                            Some((scanned_at + chrono::Duration::seconds(retry_seconds)).to_rfc3339())
+                            Some((scanned_at + chrono::Duration::seconds(retry_seconds as i64)).to_rfc3339())
                         } else { None };
                         if let Ok(snapshot) = approved_registry.upsert_patch(&scan_mint, json!({
                             "security": {
@@ -1584,7 +1587,7 @@ fn start_launch_processor(
                                     "status": cache_status,
                                     "verified": cache_status == "verified",
                                     "diagnostic_only": diagnostic_only,
-                                    "attempts": scan_attempts,
+                                    "attempts": scan_attempts + u64::from(provider_limited),
                                     "scanned_at": scanned_at.to_rfc3339(),
                                     "retry_after": retry_after,
                                     "provider_rate_limited": provider_limited
