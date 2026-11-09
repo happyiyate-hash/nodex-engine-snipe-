@@ -2296,12 +2296,15 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
         })
         .sum();
     let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let total_sol = available_sol + positions_value_sol + locked_rent_sol;
     Json(json!({
         "portfolio_balance_usd": total_sol * price.price_usd,
         "total_value_usd": total_sol * price.price_usd,
         "available_balance_usd": available_sol * price.price_usd,
+        "invested_balance_usd": invested_sol * price.price_usd,
+        "starting_balance_usd": wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64 * price.price_usd,
         "positions_value_usd": positions_value_sol * price.price_usd,
         "locked_rent_value_usd": locked_rent_sol * price.price_usd,
         "available_balance_sol": available_sol,
@@ -2387,6 +2390,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let locked_rent_sol = paper_wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let invested_balance_sol =
         paper_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let invested_balance_usd = invested_balance_sol * sol_price.price_usd;
 
     // Paper-account equity includes unspent funds, marked open positions, and
     // recoverable rent reserves. Fees already debited from available funds are
@@ -2416,6 +2420,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
         "total_portfolio_value_usd": portfolio_balance_usd,
         "total_value_usd": total_value_usd,
         "available_balance_usd": available_balance_sol * sol_price.price_usd,
+        "invested_balance_usd": invested_balance_usd,
         "starting_balance_usd": starting_balance_usd,
         "unrealized_pnl_usd": unrealized_pnl_usd,
         "realized_pnl_usd": realized_pnl_usd,
