@@ -1601,6 +1601,7 @@ fn start_launch_processor(
                                 let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
                             }
                         }
+                    }
                     // Keep every discovered launch under a bounded, time-limited
                     // authority monitor, including tokens that are still unverified.
                     // This lightweight pass reads only the mint account; it does not
