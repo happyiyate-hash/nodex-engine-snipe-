@@ -1473,6 +1473,57 @@ fn start_launch_processor(
                                 "progress":100,"message":"Security scan finished.",
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
+                        // Record a durable terminal/intermediate scan state independently of
+                        // the security verdict. A completed diagnostic scan is cached briefly,
+                        // never promoted to verified; rate limits receive a shorter retry window.
+                        let scanned_at = chrono::Utc::now();
+                        let diagnostic_only = report.diagnostic_only;
+                        let provider_limited = report.rugcheck.error.as_deref()
+                            .map(|value| {
+                                let value = value.to_ascii_lowercase();
+                                value.contains("429") || value.contains("rate limit")
+                                    || value.contains("too many") || value.contains("max usage")
+                            }).unwrap_or(false)
+                            || report.checks.iter().any(|check| {
+                                let value = check.detail.to_ascii_lowercase();
+                                value.contains("429") || value.contains("rate limit")
+                                    || value.contains("too many") || value.contains("max usage")
+                            });
+                        let cache_status = if decision == "REJECTED" {
+                            "rejected"
+                        } else if decision == "APPROVED" && !diagnostic_only && terminal_status == "completed" {
+                            "verified"
+                        } else {
+                            "completed_diagnostic"
+                        };
+                        let retry_seconds = if provider_limited {
+                            (30_u64.saturating_mul(2_u64.saturating_pow(scan_attempts.min(5) as u32))).min(900)
+                                + (scan_mint.bytes().map(u64::from).sum::<u64>() % 11)
+                        } else { 900 };
+                        let retry_after = if cache_status == "completed_diagnostic" {
+                            Some((scanned_at + chrono::Duration::seconds(retry_seconds as i64)).to_rfc3339())
+                        } else { None };
+                        if let Ok(snapshot) = approved_registry.upsert_patch(&scan_mint, json!({
+                            "security": {
+                                "scan_cache": {
+                                    "status": cache_status,
+                                    "verified": cache_status == "verified",
+                                    "diagnostic_only": diagnostic_only,
+                                    "attempts": scan_attempts + u64::from(provider_limited),
+                                    "scanned_at": scanned_at.to_rfc3339(),
+                                    "retry_after": retry_after,
+                                    "provider_rate_limited": provider_limited
+                                }
+                            }
+                        })) {
+                            if let Err(error) = nodex_persistence::save_token_state(&approved_database, &snapshot).await {
+                                let _ = scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(
+                                    &scan_mint,"token_scan_cache","sqlite",error.to_string(),
+                                    json!({"kind":"database_persistence_error","message":error.to_string()})
+                                )}));
+                            }
+                        }
+                    }
                         }
                         Err(error) => {
                             let error_details = provider_error_details(&error);
@@ -1551,57 +1602,6 @@ fn start_launch_processor(
                                 let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
                             }
                         }
-                        // Record a durable terminal/intermediate scan state independently of
-                        // the security verdict. A completed diagnostic scan is cached briefly,
-                        // never promoted to verified; rate limits receive a shorter retry window.
-                        let scanned_at = chrono::Utc::now();
-                        let diagnostic_only = report.diagnostic_only;
-                        let provider_limited = report.rugcheck.error.as_deref()
-                            .map(|value| {
-                                let value = value.to_ascii_lowercase();
-                                value.contains("429") || value.contains("rate limit")
-                                    || value.contains("too many") || value.contains("max usage")
-                            }).unwrap_or(false)
-                            || report.checks.iter().any(|check| {
-                                let value = check.detail.to_ascii_lowercase();
-                                value.contains("429") || value.contains("rate limit")
-                                    || value.contains("too many") || value.contains("max usage")
-                            });
-                        let cache_status = if decision == "REJECTED" {
-                            "rejected"
-                        } else if decision == "APPROVED" && !diagnostic_only && terminal_status == "completed" {
-                            "verified"
-                        } else {
-                            "completed_diagnostic"
-                        };
-                        let retry_seconds = if provider_limited {
-                            (30_u64.saturating_mul(2_u64.saturating_pow(scan_attempts.min(5) as u32))).min(900)
-                                + (scan_mint.bytes().map(u64::from).sum::<u64>() % 11)
-                        } else { 900 };
-                        let retry_after = if cache_status == "completed_diagnostic" {
-                            Some((scanned_at + chrono::Duration::seconds(retry_seconds as i64)).to_rfc3339())
-                        } else { None };
-                        if let Ok(snapshot) = approved_registry.upsert_patch(&scan_mint, json!({
-                            "security": {
-                                "scan_cache": {
-                                    "status": cache_status,
-                                    "verified": cache_status == "verified",
-                                    "diagnostic_only": diagnostic_only,
-                                    "attempts": scan_attempts + u64::from(provider_limited),
-                                    "scanned_at": scanned_at.to_rfc3339(),
-                                    "retry_after": retry_after,
-                                    "provider_rate_limited": provider_limited
-                                }
-                            }
-                        })) {
-                            if let Err(error) = nodex_persistence::save_token_state(&approved_database, &snapshot).await {
-                                let _ = scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(
-                                    &scan_mint,"token_scan_cache","sqlite",error.to_string(),
-                                    json!({"kind":"database_persistence_error","message":error.to_string()})
-                                )}));
-                            }
-                        }
-                    }
                     // Keep every discovered launch under a bounded, time-limited
                     // authority monitor, including tokens that are still unverified.
                     // This lightweight pass reads only the mint account; it does not
