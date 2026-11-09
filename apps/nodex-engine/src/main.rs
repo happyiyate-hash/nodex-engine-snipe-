@@ -2316,8 +2316,9 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
     let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let total_sol = available_sol + positions_value_sol + locked_rent_sol;
-    let starting_balance_usd =
-        wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64 * price.price_usd;
+    // The account's performance baseline is the original $10 seed, not the
+    // changing USD mark of the SOL held in the paper wallet.
+    let starting_balance_usd = 10.0;
     let total_pnl_usd = total_pnl_sol * price.price_usd;
     let total_pnl_pct = if starting_balance_usd > 0.0 {
         total_pnl_usd / starting_balance_usd * 100.0
@@ -2427,7 +2428,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let portfolio_balance_sol = available_balance_sol + total_value_sol + locked_rent_sol;
     let portfolio_balance_usd = portfolio_balance_sol * sol_price.price_usd;
     let total_value_usd = total_value_sol * sol_price.price_usd;
-    let starting_balance_usd = starting_balance_sol * sol_price.price_usd;
+    let starting_balance_usd = 10.0;
     let unrealized_pnl_usd = unrealized_pnl_sol * sol_price.price_usd;
     let realized_pnl_usd = realized_pnl_sol * sol_price.price_usd;
     let total_pnl_usd = total_pnl_sol * sol_price.price_usd;
@@ -2436,8 +2437,8 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     } else {
         0.0
     };
-    let total_pnl_pct = if starting_balance_sol > 0.0 {
-        total_pnl_sol / starting_balance_sol * 100.0
+    let total_pnl_pct = if starting_balance_usd > 0.0 {
+        total_pnl_usd / starting_balance_usd * 100.0
     } else {
         0.0
     };
