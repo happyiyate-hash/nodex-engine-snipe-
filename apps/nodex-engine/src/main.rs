@@ -2440,7 +2440,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     });
 
     let mut token_snapshots = state.token_registry.snapshot();
-    token_snapshots.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    token_snapshots.sort_by_key(|left| std::cmp::Reverse(left.updated_at));
     let token_snapshots: Vec<serde_json::Value> = token_snapshots
         .into_iter()
         .map(|snapshot| {
