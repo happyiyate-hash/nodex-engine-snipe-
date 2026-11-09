@@ -501,7 +501,9 @@ impl SolanaRpc {
                 None,
             ));
         };
-        parse_mint_security_report(mint, &owner, &data, slot)
+        let mut report = parse_mint_security_report(mint, &owner, &data, slot)?;
+        report.enforce_diagnostic_only();
+        Ok(report)
     }
 
     /// Inspect mint authorities and Token-2022 extensions using confirmed account data.
@@ -541,6 +543,7 @@ impl SolanaRpc {
                 context_slot,
             );
             report.provider_responses.push(account_evidence);
+            report.enforce_diagnostic_only();
             return Ok(report);
         };
         let owner = value
@@ -567,6 +570,7 @@ impl SolanaRpc {
                     context_slot,
                 );
                 report.provider_responses.push(account_evidence);
+                report.enforce_diagnostic_only();
                 return Ok(report);
             }
         };
@@ -640,6 +644,9 @@ impl SolanaRpc {
                 }),
             });
         }
+        // Diagnostic-only mode prevents any token from being marked verified or
+        // approved while we inspect the exact evidence returned by providers.
+        report.enforce_diagnostic_only();
         on_progress("complete", 100, "Security scan completed");
         Ok(report)
     }
@@ -1096,12 +1103,28 @@ pub struct TokenSecurityReport {
     pub checks: Vec<SecurityCheck>,
     pub decision: String,
     pub decision_reason: String,
+    /// True while NodeX collects provider evidence without making verification decisions.
+    #[serde(default)]
+    pub diagnostic_only: bool,
+    /// The parser's provisional decision, retained for debugging only.
+    #[serde(default)]
+    pub diagnostic_assessment: Option<Value>,
     #[serde(default)]
     pub provider_responses: Vec<Value>,
     pub rugcheck: RugCheckSummary,
 }
 
 impl TokenSecurityReport {
+    fn enforce_diagnostic_only(&mut self) {
+        self.diagnostic_assessment = Some(json!({
+            "decision":self.decision,
+            "decision_reason":self.decision_reason
+        }));
+        self.diagnostic_only = true;
+        self.decision = "UNVERIFIED".into();
+        self.decision_reason = "Diagnostic-only mode is active. Provider requests and checks are retained for inspection, but NodeX is not verifying or approving any token. Inspect diagnostic_assessment and provider_responses.".into();
+    }
+
     fn unverified(mint: &str, reason: &str, context_slot: Option<u64>) -> Self {
         Self {
             mint_address: mint.to_owned(),
@@ -1127,8 +1150,12 @@ impl TokenSecurityReport {
                 detail: reason.into(),
             }],
             decision: "UNVERIFIED".into(),
-            decision_reason: "The mint account could not be verified; automatic buying is blocked."
-                .into(),
+            decision_reason: reason.into(),
+            diagnostic_only: true,
+            diagnostic_assessment: Some(json!({
+                "decision":"UNVERIFIED",
+                "decision_reason":reason
+            })),
             provider_responses: Vec::new(),
             rugcheck: RugCheckSummary {
                 provider: "rugcheck".into(),
@@ -1499,6 +1526,8 @@ pub fn parse_mint_security_report(
         checks,
         decision: decision.into(),
         decision_reason,
+        diagnostic_only: false,
+        diagnostic_assessment: None,
         provider_responses: Vec::new(),
         rugcheck: RugCheckSummary {
             provider: "rugcheck".into(),
