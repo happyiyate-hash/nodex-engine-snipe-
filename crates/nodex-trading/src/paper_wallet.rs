@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 // Runtime startup calculates the actual $10 balance from a live SOL/USD quote.
-pub const DEFAULT_STARTING_BALANCE_LAMPORTS: u64 = 10_000_000;
+pub const DEFAULT_STARTING_BALANCE_LAMPORTS: u64 = 20_000_000;
 pub const DEFAULT_TRADE_AMOUNT_LAMPORTS: u64 = 10_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn defaults_to_small_fallback_and_point_zero_one_sol_trade() {
         let wallet = PaperWallet::default();
-        assert_eq!(wallet.starting_balance_lamports, 10_000_000);
+        assert_eq!(wallet.starting_balance_lamports, 20_000_000);
         assert_eq!(DEFAULT_TRADE_AMOUNT_LAMPORTS, 10_000_000);
     }
 
@@ -175,7 +175,7 @@ mod tests {
     fn buy_debits_costs_and_tracks_recoverable_rent_separately() {
         let mut wallet = PaperWallet::default();
         let entry = wallet.reserve_buy(&costs()).unwrap();
-        assert_eq!(entry.amount_lamports, 102_346_280);
+        assert_eq!(entry.amount_lamports, 12_344_280);
         assert_eq!(wallet.invested_balance_lamports, 100_000_000);
         assert_eq!(wallet.locked_rent_lamports, 2_039_280);
         assert_eq!(wallet.total_network_fees_lamports, 5_000);
