@@ -237,19 +237,12 @@ fn start_token_state_projector(
                 continue;
             };
             if kind == "token_rejected_cleanup" {
-                if let Err(error) = nodex_persistence::delete_token_state(&database, mint).await {
-                    tracing::error!(%error, mint_address=mint, "Could not remove rejected token state");
-                }
-                if let Err(error) = nodex_persistence::delete_token_launches(&database, mint).await
-                {
-                    tracing::error!(%error, mint_address=mint, "Could not remove rejected token launch records");
-                }
-                registry.remove(mint);
-                let _ = events.send(json!({"type":"token_removed","data":{
-                    "mint_address":mint,
-                    "reason":data.get("reason").cloned().unwrap_or(serde_json::Value::Null),
-                    "removed_at":chrono::Utc::now().to_rfc3339()
-                }}));
+                // Legacy cleanup events must never erase a token's scan evidence.
+                // Rejected and unverified launches are retained for operator debugging.
+                tracing::warn!(
+                    mint_address = mint,
+                    "Ignoring legacy token cleanup request; token state and launch history are retained"
+                );
                 continue;
             }
             if kind == "token_diagnostic" {
@@ -1446,8 +1439,41 @@ fn start_launch_processor(
                             let error_details = provider_error_details(&error);
                             let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
                             let _=scan_events.send(json!({"type":"diagnostic","data":{"severity":"error","component":"token_security_scanner","message":error,"mint_address":scan_mint,"received_at":chrono::Utc::now().to_rfc3339()}}));
-                            let _=scan_events.send(json!({"type":"token_scan_failed","data":{"mint_address":scan_mint,"decision":"UNVERIFIED","decision_reason":error,"error_details":error_details,"status":"failed","received_at":chrono::Utc::now().to_rfc3339()}}));
-                            match approved_registry.upsert_patch(&scan_mint,json!({"security":{"status":"failed","decision":"UNVERIFIED","decision_reason":error,"error_details":error_details},"market":{"status":"not_started"}})){
+                            let failure_check = json!({
+                                "name":"security_scan",
+                                "status":"unverified",
+                                "severity":"critical",
+                                "detail":error
+                            });
+                            let provider_response = json!({
+                                "provider":"solana_rpc",
+                                "method":"security_scan",
+                                "response":error_details
+                            });
+                            let _=scan_events.send(json!({"type":"token_scan_failed","data":{
+                                "mint_address":scan_mint,
+                                "decision":"UNVERIFIED",
+                                "decision_reason":error,
+                                "error_details":error_details,
+                                "provider_responses":[provider_response.clone()],
+                                "checks":[failure_check.clone()],
+                                "progress":100,
+                                "stage":"failed",
+                                "message":error,
+                                "status":"failed",
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
+                            match approved_registry.upsert_patch(&scan_mint,json!({"security":{
+                                "status":"failed",
+                                "decision":"UNVERIFIED",
+                                "decision_reason":error,
+                                "error_details":error_details,
+                                "provider_responses":[provider_response],
+                                "checks":[failure_check],
+                                "progress":100,
+                                "stage":"failed",
+                                "message":error
+                            },"market":{"status":"not_started"}})){
                                 Ok(snapshot)=>{
                                     if let Err(persist_error)=nodex_persistence::save_token_state(&approved_database,&snapshot).await{
                                         let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
