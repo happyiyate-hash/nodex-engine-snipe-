@@ -61,6 +61,13 @@ struct AppState {
     portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PreferredOwner {
+    address: String,
+    #[serde(default)]
+    label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct TradingSettings {
@@ -84,6 +91,8 @@ struct TradingSettings {
     diagnostic_mode: bool,
     block_unverified_trades: bool,
     execution_enabled: bool,
+    whitelist_only_mode: bool,
+    preferred_owners: Vec<PreferredOwner>,
 }
 
 impl Default for TradingSettings {
@@ -109,12 +118,35 @@ impl Default for TradingSettings {
             diagnostic_mode: true,
             block_unverified_trades: true,
             execution_enabled: false,
+            whitelist_only_mode: false,
+            preferred_owners: Vec::new(),
         }
     }
 }
 
 impl TradingSettings {
     fn validate(&self) -> Result<(), String> {
+        if self.preferred_owners.len() > 500 {
+            return Err("preferred_owners must contain no more than 500 wallets.".into());
+        }
+        let mut owner_addresses = HashSet::new();
+        for owner in &self.preferred_owners {
+            if owner.address.trim() != owner.address || owner.address.is_empty() {
+                return Err("Each preferred owner must have a non-empty, trimmed Solana wallet address.".into());
+            }
+            let decoded = bs58::decode(&owner.address)
+                .into_vec()
+                .map_err(|_| format!("Invalid Solana wallet address: {}", owner.address))?;
+            if decoded.len() != 32 {
+                return Err(format!("Solana wallet address must decode to 32 bytes: {}", owner.address));
+            }
+            if !owner_addresses.insert(owner.address.as_str()) {
+                return Err(format!("Duplicate preferred owner address: {}", owner.address));
+            }
+            if owner.label.len() > 80 {
+                return Err("Preferred owner labels must be 80 characters or fewer.".into());
+            }
+        }
         let finite_non_negative = [
             ("min_liquidity_usd", self.min_liquidity_usd),
             ("max_entry_price_usd", self.max_entry_price_usd),
@@ -1001,6 +1033,24 @@ fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
+                // Creator is decoded from the Pump.fun create transaction above. Apply
+                // strict filtering before metadata resolution and security-provider work.
+                // If creator data is absent, strict mode fails closed and skips the launch.
+                let whitelist_settings = trading_settings.read().await;
+                if whitelist_settings.whitelist_only_mode {
+                    let creator = launch.creator_address.as_deref();
+                    let preferred = creator.map(|address| whitelist_settings.preferred_owners.iter()
+                        .any(|owner| owner.address == address)).unwrap_or(false);
+                    if !preferred {
+                        tracing::debug!(
+                            mint_address = %launch.mint_address,
+                            creator_address = creator.unwrap_or("unknown"),
+                            "Launch skipped by strict preferred-owner whitelist"
+                        );
+                        continue;
+                    }
+                }
+                drop(whitelist_settings);
                 let mint_address = launch.mint_address.clone();
                 {
                     let mut inflight = inflight_mints.lock().await;
@@ -2138,6 +2188,8 @@ async fn patch_runtime_config(
         "diagnostic_mode",
         "block_unverified_trades",
         "execution_enabled",
+        "whitelist_only_mode",
+        "preferred_owners",
     ];
     if let Some(unknown) = patch_object
         .keys()
