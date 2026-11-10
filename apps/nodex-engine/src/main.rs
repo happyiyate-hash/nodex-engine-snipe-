@@ -904,6 +904,7 @@ fn start_launch_processor(
         let token_registry = token_registry.clone();
         let inflight_mints = inflight_mints.clone();
         let authority_monitor_slots = authority_monitor_slots.clone();
+        let security_rpc = security_rpc.clone();
         let database = database.clone();
         tokio::spawn(async move {
             loop {
