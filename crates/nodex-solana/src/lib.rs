@@ -532,6 +532,19 @@ impl SolanaRpc {
     pub async fn scan_token_security_with_progress<F>(
         &self,
         mint: &str,
+        on_progress: F,
+    ) -> Result<TokenSecurityReport>
+    where
+        F: FnMut(&str, u8, &str),
+    {
+        self.scan_token_security_with_progress_mode(mint, true, on_progress).await
+    }
+
+    /// Runs a security scan using the caller's current diagnostic-only setting.
+    pub async fn scan_token_security_with_progress_mode<F>(
+        &self,
+        mint: &str,
+        diagnostic_mode: bool,
         mut on_progress: F,
     ) -> Result<TokenSecurityReport>
     where
@@ -558,7 +571,7 @@ impl SolanaRpc {
                 context_slot,
             );
             report.provider_responses.push(account_evidence);
-            report.enforce_diagnostic_only();
+            if diagnostic_mode { report.enforce_diagnostic_only(); }
             return Ok(report);
         };
         let owner = value
@@ -586,7 +599,7 @@ impl SolanaRpc {
                         context_slot,
                     );
                     report.provider_responses.push(account_evidence);
-                    report.enforce_diagnostic_only();
+                    if diagnostic_mode { report.enforce_diagnostic_only(); }
                     return Ok(report);
                 }
             };
@@ -660,9 +673,8 @@ impl SolanaRpc {
                 }),
             });
         }
-        // Diagnostic-only mode prevents any token from being marked verified or
-        // approved while we inspect the exact evidence returned by providers.
-        report.enforce_diagnostic_only();
+        // Diagnostic-only mode is controlled by the persisted runtime config.
+        if diagnostic_mode { report.enforce_diagnostic_only(); }
         on_progress("complete", 100, "Security scan completed");
         Ok(report)
     }
@@ -1239,11 +1251,8 @@ impl TokenSecurityReport {
             }],
             decision: "UNVERIFIED".into(),
             decision_reason: reason.into(),
-            diagnostic_only: true,
-            diagnostic_assessment: Some(json!({
-                "decision":"UNVERIFIED",
-                "decision_reason":reason
-            })),
+            diagnostic_only: false,
+            diagnostic_assessment: None,
             provider_responses: Vec::new(),
             rugcheck: RugCheckSummary {
                 provider: "rugcheck".into(),
