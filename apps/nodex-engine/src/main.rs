@@ -1339,12 +1339,14 @@ fn start_launch_processor(
                                 "block_unverified_trades": current_policy.block_unverified_trades,
                                 "diagnostic_mode": current_policy.diagnostic_mode,
                                 "all_checks_verified": all_checks_verified,
-                                "eligible": current_policy.execution_enabled && !current_policy.diagnostic_mode
+                                "eligible": current_policy.execution_enabled
+                                    && !current_policy.diagnostic_mode
+                                    && !report.diagnostic_only
                                     && (!current_policy.block_unverified_trades || all_checks_verified),
                                 "reason": if !current_policy.execution_enabled {
                                     "Execution master switch is OFF or execution module is not connected"
-                                } else if current_policy.diagnostic_mode {
-                                    "Diagnostic-only mode blocks execution"
+                                } else if current_policy.diagnostic_mode || report.diagnostic_only {
+                                    "Diagnostic-only scan results block execution"
                                 } else if current_policy.block_unverified_trades && !all_checks_verified {
                                     "Security checks are incomplete or not all VERIFIED"
                                 } else {
