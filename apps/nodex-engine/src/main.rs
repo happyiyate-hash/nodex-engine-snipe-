@@ -2669,7 +2669,6 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
                 .and_then(serde_json::Value::as_f64)
         })
         .sum();
-    let total_pnl_sol = unrealized_pnl_sol + realized_pnl_sol;
     let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
