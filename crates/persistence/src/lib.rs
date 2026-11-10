@@ -109,6 +109,20 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_captured_at ON portfolio_snapshots(captured_at DESC)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS profiles (
             id TEXT PRIMARY KEY NOT NULL,
             payload_json TEXT NOT NULL,
@@ -200,6 +214,34 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     Ok(pool)
+}
+
+/// Persist portfolio valuations while retaining a bounded, deduplicated history.
+pub async fn save_portfolio_snapshot(pool: &SqlitePool, snapshot: &serde_json::Value) -> Result<()> {
+    let payload = serde_json::to_string(snapshot)?;
+    let captured_at = snapshot.get("updated_at")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let mut transaction = pool.begin().await?;
+    let latest: Option<String> = sqlx::query_scalar(
+        "SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
+    ).fetch_optional(&mut *transaction).await?;
+    if latest.as_deref() != Some(payload.as_str()) {
+        sqlx::query("INSERT INTO portfolio_snapshots (captured_at, payload_json) VALUES (?, ?)")
+            .bind(captured_at).bind(payload).execute(&mut *transaction).await?;
+        sqlx::query("DELETE FROM portfolio_snapshots WHERE id NOT IN (SELECT id FROM portfolio_snapshots ORDER BY id DESC LIMIT 1000)")
+            .execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn load_latest_portfolio_snapshot(pool: &SqlitePool) -> Result<Option<serde_json::Value>> {
+    let payload = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
+    ).fetch_optional(pool).await?;
+    payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
 }
 
 /// Persist the assembled profile snapshot independently from the paper-trading wallet.
