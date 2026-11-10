@@ -2730,8 +2730,20 @@ fn calculate_portfolio_snapshot(
     positions: &[serde_json::Value],
 ) -> serde_json::Value {
     let sol_price_usd = if price.price_usd.is_finite() && price.price_usd > 0.0 { price.price_usd } else { 0.0 };
-    let open_positions: Vec<&serde_json::Value> = positions.iter().filter(|position| {
+    let open_positions: Vec<serde_json::Value> = positions.iter().filter(|position| {
         position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+    }).map(|position| {
+        let mut value = position.clone();
+        if let Some(fields) = value.as_object_mut() {
+            if let Some(value_sol) = fields.get("current_value_sol").and_then(serde_json::Value::as_f64) {
+                fields.insert("current_value_usd".into(), json!(value_sol * sol_price_usd));
+            }
+            if let Some(price_sol) = fields.get("current_price_sol").and_then(serde_json::Value::as_f64) {
+                fields.insert("current_price_usd".into(), json!(price_sol * sol_price_usd));
+            }
+            fields.insert("sol_price_usd".into(), json!(sol_price_usd));
+        }
+        value
     }).collect();
     let sum = |field: &str| -> f64 {
         open_positions.iter().filter_map(|position| position.get(field).and_then(serde_json::Value::as_f64))
@@ -2773,7 +2785,7 @@ fn calculate_portfolio_snapshot(
         "invested_balance_sol": invested_sol, "locked_rent_sol": locked_rent_sol, "total_value_sol": total_sol,
         "sol_price_usd": sol_price_usd, "sol_price_source": price.source, "sol_price_updated_at": price.updated_at,
         "sol_price_status": price.status, "price_updated_at": price.updated_at, "price_status": price.status,
-        "position_count": open_positions.len(), "positions": open_positions.into_iter().cloned().collect::<Vec<_>>(),
+        "position_count": open_positions.len(), "positions": open_positions,
         "updated_at": chrono::Utc::now().to_rfc3339()
     })
 }
@@ -2801,53 +2813,6 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let paper_wallet = state.wallet.read().await.clone();
     let sol_price = state.sol_price.read().await.clone();
     let mut profile = state.profile.read().await.clone();
-
-    let open_positions: Vec<serde_json::Value> = positions
-        .iter()
-        .filter(|position| {
-            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-        })
-        .cloned()
-        .map(|mut position| {
-            // Risk configuration belongs to /api/v1/config/trading, not the
-            // profile/portfolio snapshot. Do not expose per-position SL/TP fields here.
-            if let Some(fields) = position.as_object_mut() {
-                fields.retain(|key, _| {
-                    let normalized = key.to_ascii_lowercase();
-                    !normalized.contains("stop_loss")
-                        && !normalized.contains("take_profit")
-                        && !normalized.contains("stoploss")
-                        && !normalized.contains("takeprofit")
-                });
-                if let Some(value_sol) = fields
-                    .get("current_value_sol")
-                    .and_then(serde_json::Value::as_f64)
-                {
-                    fields.insert(
-                        "current_value_usd".into(),
-                        json!(value_sol * sol_price.price_usd),
-                    );
-                }
-                if let Some(price_sol) = fields
-                    .get("current_price_sol")
-                    .and_then(serde_json::Value::as_f64)
-                {
-                    fields.insert(
-                        "current_price_usd".into(),
-                        json!(price_sol * sol_price.price_usd),
-                    );
-                }
-                fields.insert("sol_price_usd".into(), json!(sol_price.price_usd));
-            }
-            position
-        })
-        .collect();
-    let sum_field = |items: &[serde_json::Value], field: &str| -> f64 {
-        items
-            .iter()
-            .filter_map(|item| item.get(field).and_then(serde_json::Value::as_f64))
-            .sum()
-    };
 
     let portfolio = calculate_portfolio_snapshot(&paper_wallet, &sol_price, &positions);
 
