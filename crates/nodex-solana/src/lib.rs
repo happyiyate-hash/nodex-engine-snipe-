@@ -25,6 +25,8 @@ use tokio::sync::{broadcast, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
+static RUGCHECK_KEY_INDEX: AtomicUsize = AtomicUsize::new(0);
+
 const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [0x18, 0x1e, 0xc8, 0x28, 0x05, 0x1c, 0x07, 0x77];
 const PUMP_CREATE_V2_DISCRIMINATOR: [u8; 8] = [0xd6, 0x90, 0x4c, 0xec, 0x5f, 0x8b, 0x31, 0xb4];
 
@@ -665,7 +667,33 @@ impl SolanaRpc {
     }
 
     async fn get_rugcheck_summary(&self, mint: &str) -> RugCheckSummary {
-        let url = format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary");
+        let refresh = std::env::var("RUGCHECK_REFRESH_REPORTS")
+            .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+            .unwrap_or(false);
+        let path = format!("/v1/tokens/{mint}/report");
+        let url = if refresh {
+            format!("https://api.rugcheck.xyz{path}?refresh=true")
+        } else {
+            format!("https://api.rugcheck.xyz{path}")
+        };
+        let keys: Vec<String> = (1..=10)
+            .filter_map(|index| {
+                let name = if index == 1 {
+                    "RUGCHECK_API_KEY".to_owned()
+                } else {
+                    format!("RUGCHECK_API_KEY{index}")
+                };
+                std::env::var(name).ok().map(|key| key.trim().to_owned())
+                    .filter(|key| !key.is_empty())
+            })
+            .collect();
+        let key_count = keys.len();
+        let start_index = if key_count > 0 {
+            RUGCHECK_KEY_INDEX.fetch_add(1, Ordering::Relaxed) % key_count
+        } else {
+            0
+        };
+        let attempts = key_count.max(1);
         let activity_id = uuid::Uuid::new_v4().to_string();
         let request_started = std::time::Instant::now();
         self.emit_activity(json!({
@@ -675,23 +703,55 @@ impl SolanaRpc {
             "direction": "request",
             "provider": "rugcheck",
             "endpoint": "api.rugcheck.xyz",
-            "operation": "GET /v1/tokens/{mint}/report/summary",
+            "operation": "GET /v1/tokens/{mint}/report",
             "token_mint": mint,
-            "request": {"method":"GET","path":format!("/v1/tokens/{mint}/report/summary")}
+            "configured_key_count": key_count,
+            "refresh_requested": refresh,
+            "request": {"method":"GET","path":path}
         }));
-        let mut request = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .timeout(std::time::Duration::from_secs(8));
-        if let Ok(key) = std::env::var("RUGCHECK_API_KEY") {
-            if !key.trim().is_empty() {
+
+        let mut final_response = None;
+        let mut last_error = None;
+        for offset in 0..attempts {
+            let key = if key_count > 0 {
+                Some(&keys[(start_index + offset) % key_count])
+            } else {
+                None
+            };
+            let mut request = self.client.get(&url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .timeout(std::time::Duration::from_secs(12));
+            if let Some(key) = key {
                 request = request.header("X-API-KEY", key);
             }
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if (status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status == reqwest::StatusCode::UNAUTHORIZED
+                        || status == reqwest::StatusCode::FORBIDDEN
+                        || status.is_server_error())
+                        && offset + 1 < attempts
+                    {
+                        last_error = Some(format!("RugCheck returned HTTP {status}; trying another configured key"));
+                        continue;
+                    }
+                    final_response = Some(response);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    if offset + 1 == attempts {
+                        break;
+                    }
+                }
+            }
         }
-        let response = match request.send().await {
-            Ok(r) => r,
-            Err(error) => {
+
+        let response = match final_response {
+            Some(response) => response,
+            None => {
+                let message = last_error.unwrap_or_else(|| "RugCheck request failed".into());
                 self.emit_activity(json!({
                     "id": format!("{activity_id}-response"),
                     "correlation_id": activity_id,
@@ -699,19 +759,22 @@ impl SolanaRpc {
                     "direction": "response",
                     "provider": "rugcheck",
                     "endpoint": "api.rugcheck.xyz",
-                    "operation": "GET /v1/tokens/{mint}/report/summary",
+                    "operation": "GET /v1/tokens/{mint}/report",
                     "token_mint": mint,
                     "duration_ms": request_started.elapsed().as_millis(),
                     "severity": "error",
-                    "error": error.to_string()
+                    "error": message
                 }));
                 return RugCheckSummary {
                     provider: "rugcheck".into(),
                     status: "unavailable".into(),
-                    error: Some(error.to_string()),
-                    error_details: Some(
-                        json!({"provider":"rugcheck","kind":"transport_error","message":error.to_string()}),
-                    ),
+                    error: Some(message.clone()),
+                    error_details: Some(json!({
+                        "provider":"rugcheck",
+                        "kind":"request_failed",
+                        "configured_key_count":key_count,
+                        "message":message
+                    })),
                     ..Default::default()
                 };
             }
@@ -724,18 +787,21 @@ impl SolanaRpc {
                     provider: "rugcheck".into(),
                     status: "unavailable".into(),
                     error: Some(error.to_string()),
-                    error_details: Some(
-                        json!({"provider":"rugcheck","kind":"response_read_error","http_status":status.as_u16(),"message":error.to_string()}),
-                    ),
+                    error_details: Some(json!({
+                        "provider":"rugcheck",
+                        "kind":"response_read_error",
+                        "http_status":status.as_u16(),
+                        "message":error.to_string()
+                    })),
                     ..Default::default()
-                }
+                };
             }
         };
         let mut value = serde_json::from_str::<Value>(&body)
             .unwrap_or_else(|_| json!({"raw_text":body.chars().take(65_536).collect::<String>()}));
         redact_provider_value(&mut value);
         let response_text = serde_json::to_string(&value).unwrap_or_default();
-        let response_truncated = response_text.len() > 32_768;
+        let response_truncated = response_text.len() > 65_536;
         self.emit_activity(json!({
             "id": format!("{activity_id}-response"),
             "correlation_id": activity_id,
@@ -743,27 +809,32 @@ impl SolanaRpc {
             "direction": "response",
             "provider": "rugcheck",
             "endpoint": "api.rugcheck.xyz",
-            "operation": "GET /v1/tokens/{mint}/report/summary",
+            "operation": "GET /v1/tokens/{mint}/report",
             "token_mint": mint,
             "duration_ms": request_started.elapsed().as_millis(),
             "http_status": status.as_u16(),
             "severity": if status.is_success() {"info"} else {"error"},
+            "configured_key_count": key_count,
             "body_truncated": response_truncated,
             "response": if response_truncated {
-                json!({"truncated":true,"preview":response_text.chars().take(32_768).collect::<String>()})
+                json!({"truncated":true,"preview":response_text.chars().take(65_536).collect::<String>()})
             } else {
                 value.clone()
             }
         }));
         if !status.is_success() {
+            let message = format!("RugCheck returned HTTP {status}");
             return RugCheckSummary {
                 provider: "rugcheck".into(),
                 status: "unavailable".into(),
-                error: Some(format!("RugCheck returned HTTP {status}")),
-                error_details: Some(
-                    json!({"provider":"rugcheck","kind":"http_error","http_status":status.as_u16(),"response":value}),
-                ),
-                raw_response: Some(value.clone()),
+                error: Some(message.clone()),
+                error_details: Some(json!({
+                    "provider":"rugcheck",
+                    "kind":"http_error",
+                    "http_status":status.as_u16(),
+                    "response":value
+                })),
+                raw_response: Some(value),
                 ..Default::default()
             };
         }
@@ -772,26 +843,34 @@ impl SolanaRpc {
                 provider: "rugcheck".into(),
                 status: "unavailable".into(),
                 error: Some("RugCheck returned a response that was not valid JSON".into()),
-                error_details: Some(
-                    json!({"provider":"rugcheck","kind":"invalid_json_response","http_status":status.as_u16(),"response":value}),
-                ),
-                raw_response: Some(value.clone()),
+                error_details: Some(json!({
+                    "provider":"rugcheck",
+                    "kind":"invalid_json_response",
+                    "http_status":status.as_u16(),
+                    "response":value
+                })),
+                raw_response: Some(value),
                 ..Default::default()
             };
         }
+        let lp_locked_pct = value.get("lpLockedPct").and_then(Value::as_f64)
+            .or_else(|| value.get("markets").and_then(Value::as_array)
+                .and_then(|markets| markets.first())
+                .and_then(|market| market.get("lp"))
+                .and_then(|lp| lp.get("lpLockedPct"))
+                .and_then(Value::as_f64));
         RugCheckSummary {
             provider: "rugcheck".into(),
             status: "available".into(),
             score: value.get("score").and_then(Value::as_u64),
             score_normalised: value.get("score_normalised").and_then(Value::as_u64),
-            lp_locked_pct: value.get("lpLockedPct").and_then(Value::as_f64),
-            risks: value
-                .get("risks")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
+            lp_locked_pct,
+            risks: value.get("risks").and_then(Value::as_array)
+                .cloned().unwrap_or_default(),
             error: None,
             error_details: None,
+            // Preserve the full report, including tokenMeta, token authorities,
+            // top holders, markets, lockers, creator tokens and insider networks.
             raw_response: Some(value),
         }
     }
