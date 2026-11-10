@@ -10,7 +10,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
