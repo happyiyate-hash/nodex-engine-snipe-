@@ -202,7 +202,10 @@ impl SolanaRpc {
         if self.http_urls.is_empty() {
             return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
         }
-        let _request_permit = self.request_limit.acquire().await
+        let _request_permit = self
+            .request_limit
+            .acquire()
+            .await
             .map_err(|_| anyhow!("Solana RPC request scheduler is shutting down"))?;
         let mut last_error = None;
         let count = self.http_urls.len();
@@ -537,7 +540,8 @@ impl SolanaRpc {
     where
         F: FnMut(&str, u8, &str),
     {
-        self.scan_token_security_with_progress_mode(mint, true, on_progress).await
+        self.scan_token_security_with_progress_mode(mint, true, on_progress)
+            .await
     }
 
     /// Runs a security scan using the caller's current diagnostic-only setting.
@@ -571,7 +575,9 @@ impl SolanaRpc {
                 context_slot,
             );
             report.provider_responses.push(account_evidence);
-            if diagnostic_mode { report.enforce_diagnostic_only(); }
+            if diagnostic_mode {
+                report.enforce_diagnostic_only();
+            }
             return Ok(report);
         };
         let owner = value
@@ -599,7 +605,9 @@ impl SolanaRpc {
                         context_slot,
                     );
                     report.provider_responses.push(account_evidence);
-                    if diagnostic_mode { report.enforce_diagnostic_only(); }
+                    if diagnostic_mode {
+                        report.enforce_diagnostic_only();
+                    }
                     return Ok(report);
                 }
             };
@@ -674,7 +682,9 @@ impl SolanaRpc {
             });
         }
         // Diagnostic-only mode is controlled by the persisted runtime config.
-        if diagnostic_mode { report.enforce_diagnostic_only(); }
+        if diagnostic_mode {
+            report.enforce_diagnostic_only();
+        }
         on_progress("complete", 100, "Security scan completed");
         Ok(report)
     }
@@ -696,7 +706,9 @@ impl SolanaRpc {
                 } else {
                     format!("RUGCHECK_API_KEY{index}")
                 };
-                std::env::var(name).ok().map(|key| key.trim().to_owned())
+                std::env::var(name)
+                    .ok()
+                    .map(|key| key.trim().to_owned())
                     .filter(|key| !key.is_empty())
             })
             .collect();
@@ -731,7 +743,9 @@ impl SolanaRpc {
             } else {
                 None
             };
-            let mut request = self.client.get(&url)
+            let mut request = self
+                .client
+                .get(&url)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .timeout(std::time::Duration::from_secs(12));
             if let Some(key) = key {
@@ -746,7 +760,9 @@ impl SolanaRpc {
                         || status.is_server_error())
                         && offset + 1 < attempts
                     {
-                        last_error = Some(format!("RugCheck returned HTTP {status}; trying another configured key"));
+                        last_error = Some(format!(
+                            "RugCheck returned HTTP {status}; trying another configured key"
+                        ));
                         continue;
                     }
                     final_response = Some(response);
@@ -866,20 +882,29 @@ impl SolanaRpc {
                 ..Default::default()
             };
         }
-        let lp_locked_pct = value.get("lpLockedPct").and_then(Value::as_f64)
-            .or_else(|| value.get("markets").and_then(Value::as_array)
-                .and_then(|markets| markets.first())
-                .and_then(|market| market.get("lp"))
-                .and_then(|lp| lp.get("lpLockedPct"))
-                .and_then(Value::as_f64));
+        let lp_locked_pct = value
+            .get("lpLockedPct")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                value
+                    .get("markets")
+                    .and_then(Value::as_array)
+                    .and_then(|markets| markets.first())
+                    .and_then(|market| market.get("lp"))
+                    .and_then(|lp| lp.get("lpLockedPct"))
+                    .and_then(Value::as_f64)
+            });
         RugCheckSummary {
             provider: "rugcheck".into(),
             status: "available".into(),
             score: value.get("score").and_then(Value::as_u64),
             score_normalised: value.get("score_normalised").and_then(Value::as_u64),
             lp_locked_pct,
-            risks: value.get("risks").and_then(Value::as_array)
-                .cloned().unwrap_or_default(),
+            risks: value
+                .get("risks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
             error: None,
             error_details: None,
             // Preserve the full report, including tokenMeta, token authorities,
