@@ -407,6 +407,14 @@ pub async fn list_engine_activity_logs(
         .collect()
 }
 
+/// Permanently removes persisted engine activity stream records only.
+pub async fn clear_engine_activity_logs(pool: &SqlitePool) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM engine_activity_logs")
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// Returns the newest persisted backend events, newest first.
 pub async fn list_recent_events(pool: &SqlitePool, limit: u32) -> Result<Vec<serde_json::Value>> {
     let safe_limit = limit.clamp(1, 500) as i64;
