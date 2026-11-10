@@ -227,7 +227,17 @@ pub async fn save_portfolio_snapshot(pool: &SqlitePool, snapshot: &serde_json::V
     let latest: Option<String> = sqlx::query_scalar(
         "SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
     ).fetch_optional(&mut *transaction).await?;
-    if latest.as_deref() != Some(payload.as_str()) {
+    let changed = match latest {
+        Some(previous) => {
+            let mut previous_value: serde_json::Value = serde_json::from_str(&previous)?;
+            let mut next_value = snapshot.clone();
+            if let Some(object) = previous_value.as_object_mut() { object.remove("updated_at"); }
+            if let Some(object) = next_value.as_object_mut() { object.remove("updated_at"); }
+            previous_value != next_value
+        }
+        None => true,
+    };
+    if changed {
         sqlx::query("INSERT INTO portfolio_snapshots (captured_at, payload_json) VALUES (?, ?)")
             .bind(captured_at).bind(payload).execute(&mut *transaction).await?;
         sqlx::query("DELETE FROM portfolio_snapshots WHERE id NOT IN (SELECT id FROM portfolio_snapshots ORDER BY id DESC LIMIT 1000)")
