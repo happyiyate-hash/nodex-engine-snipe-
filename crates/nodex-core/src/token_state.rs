@@ -6,6 +6,26 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+/// Hard ceiling for in-memory token snapshots on the small monitoring instance.
+pub const MAX_TOKEN_STATES: usize = 500;
+
+fn evict_oldest_if_over_limit(
+    records: &mut HashMap<String, TokenState>,
+    protected_mint: &str,
+) {
+    if records.len() <= MAX_TOKEN_STATES {
+        return;
+    }
+    let oldest_mint = records
+        .iter()
+        .filter(|(mint, _)| mint.as_str() != protected_mint)
+        .min_by(|left, right| left.1.updated_at.cmp(&right.1.updated_at))
+        .map(|(mint, _)| mint.clone());
+    if let Some(oldest_mint) = oldest_mint {
+        records.remove(&oldest_mint);
+    }
+}
+
 /// Canonical, versioned state for one token. `data` contains independently
 /// maintained domains (identity, discovery, security, market, trading, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,11 +102,15 @@ impl TokenRegistry {
             .records
             .write()
             .map_err(|_| "token registry lock poisoned")?;
-        let state = records
-            .entry(mint.to_owned())
-            .or_insert_with(|| TokenState::new(mint));
-        state.apply_patch(patch)?;
-        Ok(state.clone())
+        let updated = {
+            let state = records
+                .entry(mint.to_owned())
+                .or_insert_with(|| TokenState::new(mint));
+            state.apply_patch(patch)?;
+            state.clone()
+        };
+        evict_oldest_if_over_limit(&mut records, mint);
+        Ok(updated)
     }
 
     pub fn restore(&self, state: TokenState) -> Result<(), &'static str> {
@@ -102,7 +126,9 @@ impl TokenRegistry {
             .map(|current| state.version >= current.version)
             .unwrap_or(true);
         if replace {
-            records.insert(state.mint_address.clone(), state);
+            let mint = state.mint_address.clone();
+            records.insert(mint.clone(), state);
+            evict_oldest_if_over_limit(&mut records, &mint);
         }
         Ok(())
     }
@@ -160,6 +186,24 @@ mod tests {
         assert_eq!(updated.version, 2);
         assert_eq!(updated.data["identity"]["name"], "Example");
         assert_eq!(updated.data["market"]["price"], 2.0);
+    }
+
+    #[test]
+    fn registry_retains_at_most_500_most_recent_tokens() {
+        let registry = TokenRegistry::new();
+        for index in 0..510 {
+            registry
+                .restore(TokenState {
+                    mint_address: format!("mint-{index}"),
+                    version: 1,
+                    updated_at: Utc::now() + chrono::Duration::seconds(index),
+                    data: json!({"index": index}),
+                })
+                .unwrap();
+        }
+        assert_eq!(registry.len(), MAX_TOKEN_STATES);
+        assert!(registry.get("mint-0").is_none());
+        assert!(registry.get("mint-509").is_some());
     }
 
     #[test]
