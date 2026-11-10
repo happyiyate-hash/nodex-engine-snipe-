@@ -2358,6 +2358,35 @@ async fn patch_runtime_config(
     }
     drop(wallet_guard);
     *state.trading_settings.write().await = candidate.clone();
+    if balance_changed {
+        let wallet_snapshot = state.wallet.read().await.clone();
+        let price_snapshot = state.sol_price.read().await.clone();
+        let positions_snapshot = state.portfolio_positions.read().await.clone();
+        let portfolio_snapshot =
+            calculate_portfolio_snapshot(&wallet_snapshot, &price_snapshot, &positions_snapshot);
+        if let Err(error) =
+            nodex_persistence::save_portfolio_snapshot(&state.database, &portfolio_snapshot).await
+        {
+            tracing::error!(%error, "Could not persist portfolio snapshot after starting-balance settings change");
+        }
+        let profile_snapshot = {
+            let mut profile = state.profile.write().await;
+            if let Some(object) = profile.as_object_mut() {
+                object.insert("paper_wallet".into(), json!(wallet_snapshot));
+                object.insert("sol_price".into(), json!(price_snapshot));
+                object.insert("portfolio".into(), portfolio_snapshot.clone());
+            }
+            profile.clone()
+        };
+        if let Err(error) = nodex_persistence::save_profile(&state.database, &profile_snapshot).await {
+            tracing::error!(%error, "Could not persist profile after starting-balance settings change");
+        }
+        let _ = state.events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+        let _ = state.events.send(json!({
+            "type":"portfolio_summary_updated",
+            "data":portfolio_snapshot
+        }));
+    }
     let _ = state
         .database_changes
         .send(json!({
