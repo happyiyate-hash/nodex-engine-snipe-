@@ -2583,6 +2583,21 @@ async fn engine_activity_logs(
     Ok(Json(records))
 }
 
+async fn clear_engine_activity_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let deleted_records = nodex_persistence::clear_engine_activity_logs(&state.database)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    tracing::info!(deleted_records, "Operator cleared persisted engine activity logs");
+    Ok(Json(json!({
+        "status": "ok",
+        "deleted_records": deleted_records
+    })))
+}
+
 async fn recent_events(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -3715,6 +3730,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/events/recent", get(recent_events))
         .route("/api/v1/admin/activity-logs", get(engine_activity_logs))
+        .route("/api/v1/admin/activity-logs/clear", post(clear_engine_activity_logs))
         .route("/api/v1/admin/storage/overview", get(storage_overview))
         .route(
             "/api/v1/admin/storage/system-journal/cleanup",
