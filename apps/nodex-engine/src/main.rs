@@ -47,6 +47,7 @@ struct AppState {
     wallet: Arc<RwLock<PaperWallet>>,
     sol_price: Arc<RwLock<SolPriceSnapshot>>,
     rpc: Option<SolanaRpc>,
+    flux_rpc: Option<SolanaRpc>,
     database: sqlx::SqlitePool,
     control: Arc<RwLock<EngineControl>>,
     admin_api_key: Option<String>,
@@ -875,6 +876,7 @@ fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
     rpc: SolanaRpc,
+    security_rpc: Option<SolanaRpc>,
     database: sqlx::SqlitePool,
     pump_fun_program_id: String,
     control: Arc<RwLock<EngineControl>>,
@@ -1152,7 +1154,7 @@ fn start_launch_processor(
                     }
                 }
 
-                let scan_rpc = rpc.clone();
+                let scan_rpc = security_rpc.clone().unwrap_or_else(|| rpc.clone());
                 let scan_events = events.clone();
                 let scan_mint = mint_address.clone();
                 let approved_monitor = market_monitor.clone();
@@ -2401,7 +2403,7 @@ async fn scan_token(
     State(state): State<AppState>,
     Path(mint): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let rpc = state.rpc.ok_or((
+    let rpc = state.flux_rpc.or(state.rpc).ok_or((
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "Solana HTTP RPC is not configured".to_string(),
     ))?;
@@ -3360,6 +3362,12 @@ async fn main() -> anyhow::Result<()> {
         SolanaRpc::new_with_urls(config.solana_http_urls.clone())
             .with_activity_events(events.clone())
     });
+    let flux_rpc = (!config.fluxrpc_http_urls.is_empty()).then(|| {
+        SolanaRpc::new_with_urls_and_limit(
+            config.fluxrpc_http_urls.clone(),
+            "FLUXRPC_MAX_CONCURRENT_REQUESTS",
+        ).with_activity_events(events.clone())
+    });
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
@@ -3371,6 +3379,7 @@ async fn main() -> anyhow::Result<()> {
             events.subscribe(),
             events.clone(),
             launch_rpc,
+            flux_rpc.clone(),
             db.clone(),
             config.pump_fun_program_id.clone(),
             control.clone(),
@@ -3413,6 +3422,7 @@ async fn main() -> anyhow::Result<()> {
         wallet: Arc::new(RwLock::new(wallet)),
         sol_price: sol_price_state,
         rpc,
+        flux_rpc,
         database: db.clone(),
         control,
         admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok(),
