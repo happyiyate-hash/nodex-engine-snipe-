@@ -3754,3 +3754,61 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+
+#[cfg(test)]
+mod portfolio_accounting_tests {
+    use super::*;
+
+    fn quote(price: f64) -> SolPriceSnapshot {
+        SolPriceSnapshot {
+            price_usd: price,
+            source: "test".into(),
+            updated_at: chrono::Utc::now(),
+            status: "live".into(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn sol_only_portfolio_marks_unrealized_pnl_and_percentage_up_and_down() {
+        let wallet = PaperWallet::new_with_price(50_000_000, 200.0);
+        let up = calculate_portfolio_snapshot(&wallet, &quote(220.0), &[]);
+        assert!((up["portfolio_balance_usd"].as_f64().unwrap() - 11.0).abs() < 1e-9);
+        assert!((up["unrealized_pnl_usd"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert!((up["unrealized_pnl_pct"].as_f64().unwrap() - 10.0).abs() < 1e-9);
+        assert!((up["total_pnl_pct"].as_f64().unwrap() - 10.0).abs() < 1e-9);
+
+        let down = calculate_portfolio_snapshot(&wallet, &quote(180.0), &[]);
+        assert!((down["portfolio_balance_usd"].as_f64().unwrap() - 9.0).abs() < 1e-9);
+        assert!((down["unrealized_pnl_usd"].as_f64().unwrap() + 1.0).abs() < 1e-9);
+        assert!((down["unrealized_pnl_pct"].as_f64().unwrap() + 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn portfolio_snapshot_includes_sol_and_open_token_position_pnl() {
+        let wallet = PaperWallet {
+            starting_balance_lamports: 50_000_000,
+            starting_sol_price_usd: 200.0,
+            available_balance_lamports: 40_000_000,
+            invested_balance_lamports: 10_000_000,
+            locked_rent_lamports: 1_000_000,
+            total_network_fees_lamports: 0,
+            total_priority_fees_lamports: 0,
+            total_swap_fees_lamports: 0,
+            total_rent_refunded_lamports: 0,
+        };
+        let positions = vec![json!({
+            "mint_address":"token",
+            "status":"open",
+            "current_value_sol":0.02,
+            "cost_basis_sol":0.01,
+            "unrealized_pnl_sol":0.01
+        })];
+        let snapshot = calculate_portfolio_snapshot(&wallet, &quote(220.0), &positions);
+        assert!((snapshot["sol_unrealized_pnl_usd"].as_f64().unwrap() - 0.82).abs() < 1e-9);
+        assert!((snapshot["token_unrealized_pnl_usd"].as_f64().unwrap() - 2.2).abs() < 1e-9);
+        assert!((snapshot["unrealized_pnl_usd"].as_f64().unwrap() - 3.02).abs() < 1e-9);
+        assert_eq!(snapshot["position_count"], 1);
+    }
+}
