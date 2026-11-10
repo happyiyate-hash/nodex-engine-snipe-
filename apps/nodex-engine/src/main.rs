@@ -897,6 +897,7 @@ fn start_launch_processor(
     database: sqlx::SqlitePool,
     pump_fun_program_id: String,
     control: Arc<RwLock<EngineControl>>,
+    trading_settings: Arc<RwLock<TradingSettings>>,
     market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     token_registry: TokenRegistry,
 ) {
@@ -917,6 +918,7 @@ fn start_launch_processor(
         let events = events.clone();
         let program_id = pump_fun_program_id.clone();
         let control = control.clone();
+        let trading_settings = trading_settings.clone();
         let market_monitor = market_monitor.clone();
         let token_registry = token_registry.clone();
         let inflight_mints = inflight_mints.clone();
@@ -1181,13 +1183,16 @@ fn start_launch_processor(
                 let approved_database = database.clone();
                 let inflight_mints_for_scan = inflight_mints.clone();
                 let authority_monitor_slots_for_scan = authority_monitor_slots.clone();
+                let trading_settings_for_scan = trading_settings.clone();
                 tokio::spawn(async move {
+                    let scan_settings = trading_settings_for_scan.read().await.clone();
                     let progress_events = scan_events.clone();
                     let progress_mint = scan_mint.clone();
                     let scan_result = match tokio::time::timeout(
                         Duration::from_secs(45),
-                        scan_rpc.scan_token_security_with_progress(
+                        scan_rpc.scan_token_security_with_progress_mode(
                             &scan_mint,
+                            scan_settings.diagnostic_mode,
                             move |stage, progress, message| {
                                 let _ = progress_events.send(
                                     json!({"type":"token_scan_progress","data":{
@@ -1209,6 +1214,20 @@ fn start_launch_processor(
                     };
                     match scan_result {
                         Ok(mut report) => {
+                            // Re-read the persisted policy after the scan so a mid-scan operator update
+                            // is reflected in the execution gate for this token.
+                            let current_policy = trading_settings_for_scan.read().await.clone();
+                            let all_checks_verified = !report.checks.is_empty() && report.checks.iter().all(|check| check.status.eq_ignore_ascii_case("verified"));
+                            let execution_gate = json!({
+                                "execution_enabled": current_policy.execution_enabled,
+                                "block_unverified_trades": current_policy.block_unverified_trades,
+                                "diagnostic_mode": current_policy.diagnostic_mode,
+                                "all_checks_verified": all_checks_verified,
+                                "eligible": current_policy.execution_enabled && !current_policy.diagnostic_mode && (!current_policy.block_unverified_trades || all_checks_verified),
+                                "reason": if !current_policy.execution_enabled { "Execution master switch is OFF or execution module is not connected" } else if current_policy.diagnostic_mode { "Diagnostic-only mode blocks execution" } else if current_policy.block_unverified_trades && !all_checks_verified { "Security checks are incomplete or not all VERIFIED" } else { "Qualified by current runtime policy" }
+                            });
+                            let mut report_payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                            report_payload["execution_gate"] = execution_gate;
                             // Keep the pre-scan identity authoritative when the scanner has no better value.
                             if report.metadata.name.is_none() {
                                 report.metadata.name = metadata.name.clone();
@@ -1347,7 +1366,7 @@ fn start_launch_processor(
                                         approved_registry.upsert_patch(
                                             &scan_mint,
                                             json!({
-                                                "security":report.clone(),
+                                                "security":report_payload.clone(),
                                                 "market":{"status":"starting"}
                                             }),
                                         )
@@ -1370,7 +1389,7 @@ fn start_launch_processor(
                                         }
                                     };
                                     if approval_persisted {
-                                        let _ = scan_events.send(json!({"type":"token_scan_update","data":report.clone()}));
+                                        let _ = scan_events.send(json!({"type":"token_scan_update","data":report_payload.clone()}));
                                         if let Some(snapshot) = approved_registry.get(&scan_mint) {
                                             let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
                                         }
@@ -1387,8 +1406,7 @@ fn start_launch_processor(
                                     // Rejected launches remain visible for investigation.
                                     // Their explicit rejected security status keeps them out of
                                     // the approved-token market and paper-entry paths.
-                                    let mut security_state =
-                                        serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                                    let mut security_state = report_payload.clone();
                                     if let Some(object) = security_state.as_object_mut() {
                                         object.insert("status".into(), json!("rejected"));
                                     }
@@ -2528,7 +2546,8 @@ async fn scan_token(
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "Solana HTTP RPC is not configured".to_string(),
     ))?;
-    let report = rpc.scan_token_security(&mint).await.map_err(|error| {
+    let diagnostic_mode = state.trading_settings.read().await.diagnostic_mode;
+    let report = rpc.scan_token_security_with_progress_mode(&mint, diagnostic_mode, |_, _, _| {}).await.map_err(|error| {
         (
             axum::http::StatusCode::BAD_GATEWAY,
             format!("Token security scan failed: {error}"),
@@ -3487,6 +3506,7 @@ async fn main() -> anyhow::Result<()> {
         database_changes.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
+    let trading_settings_state = Arc::new(RwLock::new(trading_settings.clone()));
     let rpc = (!config.solana_http_urls.is_empty()).then(|| {
         SolanaRpc::new_with_urls(config.solana_http_urls.clone())
             .with_activity_events(events.clone())
@@ -3512,6 +3532,7 @@ async fn main() -> anyhow::Result<()> {
             db.clone(),
             config.pump_fun_program_id.clone(),
             control.clone(),
+            trading_settings_state.clone(),
             market_monitor.clone(),
             token_registry.clone(),
         );
@@ -3555,7 +3576,7 @@ async fn main() -> anyhow::Result<()> {
         database: db.clone(),
         control,
         admin_api_key: std::env::var("NODEX_ADMIN_API_KEY").ok(),
-        trading_settings: Arc::new(RwLock::new(trading_settings)),
+        trading_settings: trading_settings_state,
         runtime_enabled,
         market_monitor,
         solana_ws_urls: config.solana_ws_urls.clone(),
