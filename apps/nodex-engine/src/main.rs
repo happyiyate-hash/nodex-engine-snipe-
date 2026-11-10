@@ -2676,19 +2676,16 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
     let total_sol = available_sol + positions_value_sol + locked_rent_sol;
     // Mark the remaining paper SOL balance to market using the quote captured
     // when the wallet was funded. Open token positions are marked separately.
-    let starting_sol_price_usd = if wallet.starting_sol_price_usd.is_finite()
-        && wallet.starting_sol_price_usd > 0.0
-    {
-        wallet.starting_sol_price_usd
-    } else {
-        price.price_usd
-    };
-    let starting_balance_usd =
-        (wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64)
-            * starting_sol_price_usd;
+    let starting_sol_price_usd =
+        if wallet.starting_sol_price_usd.is_finite() && wallet.starting_sol_price_usd > 0.0 {
+            wallet.starting_sol_price_usd
+        } else {
+            price.price_usd
+        };
+    let starting_balance_usd = (wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64)
+        * starting_sol_price_usd;
     let sol_holdings_for_mark = available_sol + locked_rent_sol;
-    let sol_unrealized_pnl_usd =
-        sol_holdings_for_mark * (price.price_usd - starting_sol_price_usd);
+    let sol_unrealized_pnl_usd = sol_holdings_for_mark * (price.price_usd - starting_sol_price_usd);
     let token_unrealized_pnl_usd = unrealized_pnl_sol * price.price_usd;
     let unrealized_pnl_usd = sol_unrealized_pnl_usd + token_unrealized_pnl_usd;
     let account_equity_usd = total_sol * price.price_usd;
@@ -3559,7 +3556,10 @@ async fn main() -> anyhow::Result<()> {
                 && existing.invested_balance_lamports == 0
                 && existing.locked_rent_lamports == 0;
             if untouched && existing.starting_balance_lamports != configured_starting_lamports {
-                let wallet = PaperWallet::new_with_price(configured_starting_lamports, initial_sol_price.price_usd);
+                let wallet = PaperWallet::new_with_price(
+                    configured_starting_lamports,
+                    initial_sol_price.price_usd,
+                );
                 nodex_persistence::save_paper_wallet(&db, &wallet).await?;
                 tracing::info!(
                     starting_balance = trading_settings.paper_starting_balance,
@@ -3573,7 +3573,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => {
-            let wallet = PaperWallet::new_with_price(configured_starting_lamports, initial_sol_price.price_usd);
+            let wallet = PaperWallet::new_with_price(
+                configured_starting_lamports,
+                initial_sol_price.price_usd,
+            );
             nodex_persistence::save_paper_wallet(&db, &wallet).await?;
             wallet
         }
