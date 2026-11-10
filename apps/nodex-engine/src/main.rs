@@ -2813,7 +2813,7 @@ fn calculate_portfolio_snapshot(
         "token_unrealized_pnl_usd": token_unrealized_pnl_usd, "unrealized_pnl_sol": unrealized_pnl_sol,
         "unrealized_pnl_pct": unrealized_pnl_pct, "realized_pnl_usd": realized_pnl_sol * sol_price_usd,
         "realized_pnl_sol": realized_pnl_sol, "total_pnl_usd": total_pnl_usd,
-        "total_pnl_sol": total_pnl_usd / sol_price_usd.max(f64::MIN_POSITIVE), "total_pnl_pct": total_pnl_pct,
+        "total_pnl_sol": if sol_price_usd > 0.0 { total_pnl_usd / sol_price_usd } else { 0.0 }, "total_pnl_pct": total_pnl_pct,
         "positions_value_usd": positions_value_sol * sol_price_usd, "positions_value_sol": positions_value_sol,
         "locked_rent_value_usd": locked_rent_sol * sol_price_usd, "available_balance_sol": available_sol,
         "invested_balance_sol": invested_sol, "locked_rent_sol": locked_rent_sol, "total_value_sol": total_sol,
