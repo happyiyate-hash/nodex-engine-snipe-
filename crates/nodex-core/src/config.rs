@@ -16,6 +16,8 @@ pub struct EngineConfig {
     pub paper_trade_amount_lamports: u64,
     pub solana_http_urls: Vec<String>,
     pub solana_ws_urls: Vec<String>,
+    pub fluxrpc_http_urls: Vec<String>,
+    pub fluxrpc_ws_urls: Vec<String>,
     pub pump_fun_program_id: String,
 }
 
@@ -34,6 +36,22 @@ impl EngineConfig {
                     .filter(|value| !value.is_empty())
             })
             .collect();
+
+        let flux_keys: Vec<String> = (1..=10)
+            .filter_map(|index| {
+                let name = if index == 1 { "FLUXRPC_API_KEY".to_owned() } else { format!("FLUXRPC_API_KEY{index}") };
+                std::env::var(&name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+            })
+            .collect();
+
+        let flux_region = std::env::var("FLUXRPC_REGION").unwrap_or_else(|_| "eu".into());
+        let (flux_http_host, flux_ws_host) = match flux_region.as_str() {
+            "us" => ("https://us.fluxrpc.com", "wss://ws.us.fluxrpc.com"),
+            "cdn" => ("https://cdn.fluxrpc.com", "wss://ws.eu.fluxrpc.com"),
+            _ => ("https://eu.fluxrpc.com", "wss://ws.eu.fluxrpc.com"),
+        };
+        let fluxrpc_http_urls = flux_keys.iter().map(|key| format!("{flux_http_host}?key={key}")).collect();
+        let fluxrpc_ws_urls = flux_keys.iter().map(|key| format!("{flux_ws_host}/?key={key}")).collect();
 
         let mut http_urls = Vec::new();
         let mut ws_urls = Vec::new();
@@ -77,6 +95,8 @@ impl EngineConfig {
                 .unwrap_or(100_000_000),
             solana_http_urls: http_urls,
             solana_ws_urls: ws_urls,
+            fluxrpc_http_urls,
+            fluxrpc_ws_urls,
             pump_fun_program_id: std::env::var("PUMPFUN_PROGRAM_ID")
                 .unwrap_or_else(|_| "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".into()),
         }
