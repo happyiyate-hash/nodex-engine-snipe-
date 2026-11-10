@@ -217,41 +217,59 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
 }
 
 /// Persist portfolio valuations while retaining a bounded, deduplicated history.
-pub async fn save_portfolio_snapshot(pool: &SqlitePool, snapshot: &serde_json::Value) -> Result<()> {
+pub async fn save_portfolio_snapshot(
+    pool: &SqlitePool,
+    snapshot: &serde_json::Value,
+) -> Result<()> {
     let payload = serde_json::to_string(snapshot)?;
-    let captured_at = snapshot.get("updated_at")
+    let captured_at = snapshot
+        .get("updated_at")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let mut transaction = pool.begin().await?;
-    let latest: Option<String> = sqlx::query_scalar(
-        "SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
-    ).fetch_optional(&mut *transaction).await?;
+    let latest: Option<String> =
+        sqlx::query_scalar("SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
+            .fetch_optional(&mut *transaction)
+            .await?;
     let changed = match latest {
         Some(previous) => {
             let mut previous_value: serde_json::Value = serde_json::from_str(&previous)?;
             let mut next_value = snapshot.clone();
-            if let Some(object) = previous_value.as_object_mut() { object.remove("updated_at"); }
-            if let Some(object) = next_value.as_object_mut() { object.remove("updated_at"); }
+            if let Some(object) = previous_value.as_object_mut() {
+                object.remove("updated_at");
+            }
+            if let Some(object) = next_value.as_object_mut() {
+                object.remove("updated_at");
+            }
             previous_value != next_value
         }
         None => true,
     };
     if changed {
         sqlx::query("INSERT INTO portfolio_snapshots (captured_at, payload_json) VALUES (?, ?)")
-            .bind(captured_at).bind(payload).execute(&mut *transaction).await?;
+            .bind(captured_at)
+            .bind(payload)
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query("DELETE FROM portfolio_snapshots WHERE id NOT IN (SELECT id FROM portfolio_snapshots ORDER BY id DESC LIMIT 1000)")
-            .execute(&mut *transaction).await?;
+            .execute(&mut *transaction)
+            .await?;
     }
     transaction.commit().await?;
     Ok(())
 }
 
-pub async fn load_latest_portfolio_snapshot(pool: &SqlitePool) -> Result<Option<serde_json::Value>> {
+pub async fn load_latest_portfolio_snapshot(
+    pool: &SqlitePool,
+) -> Result<Option<serde_json::Value>> {
     let payload = sqlx::query_scalar::<_, String>(
         "SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
-    ).fetch_optional(pool).await?;
-    payload.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    ).fetch_optional(pool)
+    .await?;
+    payload
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
 }
 
 /// Persist the assembled profile snapshot independently from the paper-trading wallet.
@@ -799,7 +817,9 @@ mod cleanup_tests {
             "CREATE TABLE paper_wallets (id TEXT PRIMARY KEY, balance INTEGER NOT NULL)",
             "CREATE TABLE paper_ledger (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)",
         ] {
-            sqlx::query(statement).execute(&pool).await.unwrap();
+            sqlx::query(statement).execute(&pool)
+            .await
+            .unwrap();
         }
 
         for mint in ["paper-open", "paper-closed", "rejected", "failed-fetch"] {
@@ -888,7 +908,11 @@ mod portfolio_snapshot_tests {
 
     #[tokio::test]
     async fn portfolio_snapshots_are_saved_deduplicated_and_restored() {
-        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE portfolio_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at TEXT NOT NULL, payload_json TEXT NOT NULL)")
             .execute(&pool).await.unwrap();
         let snapshot = serde_json::json!({
@@ -900,9 +924,14 @@ mod portfolio_snapshot_tests {
         save_portfolio_snapshot(&pool, &snapshot).await.unwrap();
         save_portfolio_snapshot(&pool, &snapshot).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_snapshots")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(count, 1);
-        let restored = load_latest_portfolio_snapshot(&pool).await.unwrap().unwrap();
+        let restored = load_latest_portfolio_snapshot(&pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(restored, snapshot);
     }
 }
