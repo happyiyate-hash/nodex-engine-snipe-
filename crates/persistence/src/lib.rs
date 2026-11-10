@@ -179,7 +179,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_states_updated_at ON token_states(updated_at DESC)")
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_token_states_updated_at ON token_states(updated_at DESC)",
+    )
         .execute(&pool)
         .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_launches_detected_at ON token_launches(detected_at DESC)")
