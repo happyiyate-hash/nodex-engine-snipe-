@@ -114,6 +114,7 @@ fn redact_provider_value(value: &mut Value) {
             };
             std::env::var(name).ok()
         }))
+        .chain((2..=10).filter_map(|i| std::env::var(format!("RUGCHECK_API_KEY{i}")).ok()))
         .chain(std::env::var("RUGCHECK_API_KEY").ok())
         .filter(|s| !s.trim().is_empty())
         .collect();
