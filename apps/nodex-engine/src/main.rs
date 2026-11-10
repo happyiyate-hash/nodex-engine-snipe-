@@ -275,6 +275,8 @@ fn start_token_state_projector(
     registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
     portfolio_positions: Arc<RwLock<Vec<serde_json::Value>>>,
+    wallet: Arc<RwLock<PaperWallet>>,
+    sol_price: Arc<RwLock<SolPriceSnapshot>>,
     control: Arc<RwLock<EngineControl>>,
     database_changes: mpsc::Sender<serde_json::Value>,
 ) {
@@ -450,51 +452,34 @@ fn start_token_state_projector(
                                     json!({"type":"position_updated","data":position.clone()}),
                                 );
                             }
-                            let open: Vec<serde_json::Value> = positions
-                                .iter()
-                                .filter(|item| {
-                                    item.get("status").and_then(serde_json::Value::as_str)
-                                        == Some("open")
-                                })
-                                .cloned()
-                                .collect();
-                            let sum = |items: &[serde_json::Value], field: &str| -> f64 {
-                                items
-                                    .iter()
-                                    .filter_map(|item| {
-                                        item.get(field).and_then(serde_json::Value::as_f64)
-                                    })
-                                    .sum()
-                            };
-                            let position_count = open.len();
-                            let portfolio = json!({
-                                "total_value_sol": sum(&open, "current_value_sol"),
-                                "total_invested_sol": sum(&open, "cost_basis_sol"),
-                                "unrealized_pnl_sol": sum(&open, "unrealized_pnl_sol"),
-                                "realized_pnl_sol": sum(&positions, "realized_pnl_sol"),
-                                "positions": open,
-                                "position_count": position_count
-                            });
+                            let wallet_snapshot = wallet.read().await.clone();
+                            let price_snapshot = sol_price.read().await.clone();
+                            let portfolio = calculate_portfolio_snapshot(
+                                &wallet_snapshot,
+                                &price_snapshot,
+                                &positions,
+                            );
                             drop(positions);
-                            let mut current_profile = profile.write().await;
-                            if let Some(object) = current_profile.as_object_mut() {
-                                object.insert("portfolio".into(), portfolio.clone());
-                            }
-                            let profile_snapshot = current_profile.clone();
-                            drop(current_profile);
-                            let _ = events
-                                .send(json!({"type":"profile_updated","data":profile_snapshot}));
-                            let _ = events.send(json!({
-                                "type":"portfolio_summary_updated",
-                                "data":{
-                                    "total_value_sol":portfolio["total_value_sol"],
-                                    "total_invested_sol":portfolio["total_invested_sol"],
-                                    "unrealized_pnl_sol":portfolio["unrealized_pnl_sol"],
-                                    "realized_pnl_sol":portfolio["realized_pnl_sol"],
-                                    "position_count":portfolio["position_count"],
-                                    "updated_at":chrono::Utc::now().to_rfc3339()
+                            if let Err(error) = nodex_persistence::save_portfolio_snapshot(&database, &portfolio).await {
+                                tracing::error!(%error, "Could not persist portfolio snapshot after token price update");
+                            } else {
+                                let mut current_profile = profile.write().await;
+                                if let Some(object) = current_profile.as_object_mut() {
+                                    object.insert("paper_wallet".into(), json!(wallet_snapshot));
+                                    object.insert("sol_price".into(), json!(price_snapshot));
+                                    object.insert("portfolio".into(), portfolio.clone());
                                 }
-                            }));
+                                let profile_snapshot = current_profile.clone();
+                                drop(current_profile);
+                                if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await {
+                                    tracing::error!(%error, "Could not persist profile after portfolio price update");
+                                }
+                                let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+                                let _ = events.send(json!({
+                                    "type":"portfolio_summary_updated",
+                                    "data":portfolio
+                                }));
+                            }
                         }
                     }
                 }
@@ -502,6 +487,55 @@ fn start_token_state_projector(
                     tracing::error!(%error, mint_address = mint, "Could not update canonical token state")
                 }
             }
+        }
+    });
+}
+
+/// Recalculate, persist and publish the complete portfolio whenever SOL/USD changes.
+fn start_portfolio_price_projector(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    database: sqlx::SqlitePool,
+    wallet: Arc<RwLock<PaperWallet>>,
+    sol_price: Arc<RwLock<SolPriceSnapshot>>,
+    positions: Arc<RwLock<Vec<serde_json::Value>>>,
+    profile: Arc<RwLock<serde_json::Value>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(dropped_events=count, "Portfolio price projector lagged; next SOL quote will reconcile the snapshot");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if event.get("type").and_then(serde_json::Value::as_str) != Some("sol_price_update") {
+                continue;
+            }
+            let wallet_snapshot = wallet.read().await.clone();
+            let price_snapshot = sol_price.read().await.clone();
+            let position_snapshot = positions.read().await.clone();
+            let portfolio = calculate_portfolio_snapshot(&wallet_snapshot, &price_snapshot, &position_snapshot);
+            if let Err(error) = nodex_persistence::save_portfolio_snapshot(&database, &portfolio).await {
+                tracing::error!(%error, "Could not persist portfolio snapshot after SOL price update");
+                continue;
+            }
+            let profile_snapshot = {
+                let mut current = profile.write().await;
+                if let Some(object) = current.as_object_mut() {
+                    object.insert("paper_wallet".into(), json!(wallet_snapshot));
+                    object.insert("sol_price".into(), json!(price_snapshot));
+                    object.insert("portfolio".into(), portfolio.clone());
+                }
+                current.clone()
+            };
+            if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await {
+                tracing::error!(%error, "Could not persist profile after SOL price update");
+            }
+            let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+            let _ = events.send(json!({"type":"portfolio_summary_updated","data":portfolio}));
         }
     });
 }
@@ -3548,6 +3582,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let wallet_state = Arc::new(RwLock::new(wallet));
+
     // The process starts online but idle. An explicit operator Start/Resume command
     // is required before launch processors accept discovery work.
     let control = Arc::new(RwLock::new(EngineControl {
@@ -3571,8 +3607,14 @@ async fn main() -> anyhow::Result<()> {
         token_registry.clone(),
         profile_state.clone(),
         portfolio_positions.clone(),
+        wallet_state.clone(),
+        sol_price_state.clone(),
         control.clone(),
         database_changes.clone(),
+    );
+    start_portfolio_price_projector(
+        events.subscribe(), events.clone(), db.clone(), wallet_state.clone(),
+        sol_price_state.clone(), portfolio_positions.clone(), profile_state.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let trading_settings_state = Arc::new(RwLock::new(trading_settings.clone()));
@@ -3639,7 +3681,7 @@ async fn main() -> anyhow::Result<()> {
         database_changes,
         stream_status,
         pumpswap_status,
-        wallet: Arc::new(RwLock::new(wallet)),
+        wallet: wallet_state.clone(),
         sol_price: sol_price_state,
         rpc,
         flux_rpc,
