@@ -179,6 +179,12 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_states_updated_at ON token_states(updated_at DESC)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_launches_detected_at ON token_launches(detected_at DESC)")
+        .execute(&pool)
+        .await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS chart_candles (
             mint_address TEXT NOT NULL,
@@ -271,6 +277,61 @@ pub async fn load_portfolio_positions(pool: &SqlitePool) -> Result<Vec<serde_jso
         .collect()
 }
 
+/// Keep only the newest token history rows, while preserving every token with an open paper position.
+/// This bounds both startup memory restoration and SQLite growth on small instances.
+pub async fn prune_token_history(pool: &SqlitePool, limit: u32) -> Result<(u64, u64)> {
+    let safe_limit = limit.clamp(1, 500) as i64;
+    let mut transaction = pool.begin().await?;
+    let states = sqlx::query(
+        r#"DELETE FROM token_states
+           WHERE mint_address NOT IN (
+               SELECT mint_address FROM token_states
+               ORDER BY updated_at DESC LIMIT ?
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM portfolio_positions p
+               WHERE p.mint_address = token_states.mint_address
+                 AND p.status = 'open'
+           )"#,
+    )
+    .bind(safe_limit)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    let launches = sqlx::query(
+        r#"DELETE FROM token_launches
+           WHERE id NOT IN (
+               SELECT id FROM token_launches
+               ORDER BY detected_at DESC LIMIT ?
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM portfolio_positions p
+               WHERE p.mint_address = token_launches.mint_address
+                 AND p.status = 'open'
+           )"#,
+    )
+    .bind(safe_limit)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        r#"DELETE FROM chart_candles
+           WHERE NOT EXISTS (
+               SELECT 1 FROM token_states s
+               WHERE s.mint_address = chart_candles.mint_address
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM portfolio_positions p
+               WHERE p.mint_address = chart_candles.mint_address
+                 AND p.status = 'open'
+           )"#,
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok((states, launches))
+}
+
 pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool> {
     let payload = serde_json::to_string(launch)?;
     let result = sqlx::query(
@@ -288,7 +349,11 @@ pub async fn save_launch(pool: &SqlitePool, launch: &TokenLaunch) -> Result<bool
     .bind(payload)
     .execute(pool)
     .await?;
-    Ok(result.rows_affected() == 1)
+    let inserted = result.rows_affected() == 1;
+    if inserted {
+        prune_token_history(pool, 500).await?;
+    }
+    Ok(inserted)
 }
 
 /// Persist the latest canonical state for a token. Older versions cannot
@@ -316,7 +381,7 @@ pub async fn save_token_state(pool: &SqlitePool, state: &TokenState) -> Result<(
 /// Restore persisted token snapshots during engine startup.
 pub async fn load_token_states(pool: &SqlitePool) -> Result<Vec<TokenState>> {
     let rows = sqlx::query_scalar::<_, String>(
-        "SELECT payload_json FROM token_states ORDER BY updated_at DESC",
+        "SELECT payload_json FROM token_states ORDER BY updated_at DESC LIMIT 500",
     )
     .fetch_all(pool)
     .await?;
