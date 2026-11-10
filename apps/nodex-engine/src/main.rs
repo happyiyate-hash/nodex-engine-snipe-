@@ -2262,7 +2262,11 @@ async fn patch_runtime_config(
             sol_price::usd_to_lamports(candidate.paper_starting_balance, price)
                 .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?
         };
-        next_wallet = PaperWallet::new(starting_lamports);
+        if !price.is_finite() || price <= 0.0 {
+            return Err((StatusCode::SERVICE_UNAVAILABLE,
+                "Cannot reset the paper starting balance without a valid SOL/USD quote.".into()));
+        }
+        next_wallet = PaperWallet::new_with_price(starting_lamports, price);
     }
 
     let serialized = serde_json::to_string(&candidate)
@@ -2281,9 +2285,10 @@ async fn patch_runtime_config(
 
     if balance_changed {
         sqlx::query(
-            "UPDATE paper_wallets SET starting_balance_lamports=?, available_balance_lamports=?, invested_balance_lamports=?, locked_rent_lamports=?, total_network_fees_lamports=?, total_priority_fees_lamports=?, total_swap_fees_lamports=?, total_rent_refunded_lamports=?, updated_at=? WHERE id='default'"
+            "UPDATE paper_wallets SET starting_balance_lamports=?, starting_sol_price_usd=?, available_balance_lamports=?, invested_balance_lamports=?, locked_rent_lamports=?, total_network_fees_lamports=?, total_priority_fees_lamports=?, total_swap_fees_lamports=?, total_rent_refunded_lamports=?, updated_at=? WHERE id='default'"
         )
         .bind(i64::try_from(next_wallet.starting_balance_lamports).unwrap_or(i64::MAX))
+        .bind(next_wallet.starting_sol_price_usd)
         .bind(i64::try_from(next_wallet.available_balance_lamports).unwrap_or(i64::MAX))
         .bind(i64::try_from(next_wallet.invested_balance_lamports).unwrap_or(i64::MAX))
         .bind(i64::try_from(next_wallet.locked_rent_lamports).unwrap_or(i64::MAX))
