@@ -3343,8 +3343,7 @@ async fn main() -> anyhow::Result<()> {
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(&db)
     .await?;
-    let (pruned_states, pruned_launches) =
-        nodex_persistence::prune_token_history(&db, 500).await?;
+    let (pruned_states, pruned_launches) = nodex_persistence::prune_token_history(&db, 500).await?;
     tracing::info!(
         pruned_token_states = pruned_states,
         pruned_token_launches = pruned_launches,
