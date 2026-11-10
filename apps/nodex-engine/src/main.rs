@@ -2378,10 +2378,14 @@ async fn patch_runtime_config(
             }
             profile.clone()
         };
-        if let Err(error) = nodex_persistence::save_profile(&state.database, &profile_snapshot).await {
+        if let Err(error) =
+            nodex_persistence::save_profile(&state.database, &profile_snapshot).await
+        {
             tracing::error!(%error, "Could not persist profile after starting-balance settings change");
         }
-        let _ = state.events.send(json!({"type":"profile_updated","data":profile_snapshot}));
+        let _ = state
+            .events
+            .send(json!({"type":"profile_updated","data":profile_snapshot}));
         let _ = state.events.send(json!({
             "type":"portfolio_summary_updated",
             "data":portfolio_snapshot
