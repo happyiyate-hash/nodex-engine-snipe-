@@ -1214,20 +1214,7 @@ fn start_launch_processor(
                     };
                     match scan_result {
                         Ok(mut report) => {
-                            // Re-read the persisted policy after the scan so a mid-scan operator update
-                            // is reflected in the execution gate for this token.
-                            let current_policy = trading_settings_for_scan.read().await.clone();
-                            let all_checks_verified = !report.checks.is_empty() && report.checks.iter().all(|check| check.status.eq_ignore_ascii_case("verified"));
-                            let execution_gate = json!({
-                                "execution_enabled": current_policy.execution_enabled,
-                                "block_unverified_trades": current_policy.block_unverified_trades,
-                                "diagnostic_mode": current_policy.diagnostic_mode,
-                                "all_checks_verified": all_checks_verified,
-                                "eligible": current_policy.execution_enabled && !current_policy.diagnostic_mode && (!current_policy.block_unverified_trades || all_checks_verified),
-                                "reason": if !current_policy.execution_enabled { "Execution master switch is OFF or execution module is not connected" } else if current_policy.diagnostic_mode { "Diagnostic-only mode blocks execution" } else if current_policy.block_unverified_trades && !all_checks_verified { "Security checks are incomplete or not all VERIFIED" } else { "Qualified by current runtime policy" }
-                            });
-                            let mut report_payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
-                            report_payload["execution_gate"] = execution_gate;
+                            // The final execution gate is calculated after every provider and creator-history check has been appended.
                             // Keep the pre-scan identity authoritative when the scanner has no better value.
                             if report.metadata.name.is_none() {
                                 report.metadata.name = metadata.name.clone();
@@ -1338,6 +1325,29 @@ fn start_launch_processor(
                                     let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"holder_distribution","solana_rpc",check.detail.clone(),provider_error_details(&check.detail))}));
                                 }
                             }
+                            // Read the latest persisted policy after all evidence is collected.
+                            let current_policy = trading_settings_for_scan.read().await.clone();
+                            let all_checks_verified = !report.checks.is_empty()
+                                && report.checks.iter().all(|check| check.status.eq_ignore_ascii_case("verified"));
+                            let execution_gate = json!({
+                                "execution_enabled": current_policy.execution_enabled,
+                                "block_unverified_trades": current_policy.block_unverified_trades,
+                                "diagnostic_mode": current_policy.diagnostic_mode,
+                                "all_checks_verified": all_checks_verified,
+                                "eligible": current_policy.execution_enabled && !current_policy.diagnostic_mode
+                                    && (!current_policy.block_unverified_trades || all_checks_verified),
+                                "reason": if !current_policy.execution_enabled {
+                                    "Execution master switch is OFF or execution module is not connected"
+                                } else if current_policy.diagnostic_mode {
+                                    "Diagnostic-only mode blocks execution"
+                                } else if current_policy.block_unverified_trades && !all_checks_verified {
+                                    "Security checks are incomplete or not all VERIFIED"
+                                } else {
+                                    "Qualified by current runtime policy"
+                                }
+                            });
+                            let mut report_payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                            report_payload["execution_gate"] = execution_gate;
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -2061,6 +2071,10 @@ async fn update_trading_config(
     settings
         .validate()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    if settings.execution_enabled {
+        return Err((StatusCode::CONFLICT,
+            "Execution is not available yet. Keep execution_enabled=false until the paper execution module is connected.".into()));
+    }
     let serialized = serde_json::to_string(&settings)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     sqlx::query(
