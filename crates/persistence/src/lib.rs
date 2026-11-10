@@ -50,9 +50,11 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         .iter()
         .any(|row| row.get::<String, _>("name") == "starting_sol_price_usd");
     if !has_starting_sol_price {
-        sqlx::query("ALTER TABLE paper_wallets ADD COLUMN starting_sol_price_usd REAL NOT NULL DEFAULT 0")
-            .execute(&pool)
-            .await?;
+        sqlx::query(
+            "ALTER TABLE paper_wallets ADD COLUMN starting_sol_price_usd REAL NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await?;
     }
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS paper_ledger (
