@@ -32,6 +32,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS paper_wallets (
             id TEXT PRIMARY KEY NOT NULL, starting_balance_lamports INTEGER NOT NULL,
+            starting_sol_price_usd REAL NOT NULL DEFAULT 0,
             available_balance_lamports INTEGER NOT NULL, invested_balance_lamports INTEGER NOT NULL,
             locked_rent_lamports INTEGER NOT NULL, total_network_fees_lamports INTEGER NOT NULL,
             total_priority_fees_lamports INTEGER NOT NULL, total_swap_fees_lamports INTEGER NOT NULL,
@@ -40,6 +41,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    // Existing paper wallets predate the SOL cost-basis quote. Zero marks a
+    // legacy row whose baseline is initialized once during engine startup.
+    let wallet_columns = sqlx::query("PRAGMA table_info(paper_wallets)")
+        .fetch_all(&pool)
+        .await?;
+    let has_starting_sol_price = wallet_columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "starting_sol_price_usd");
+    if !has_starting_sol_price {
+        sqlx::query("ALTER TABLE paper_wallets ADD COLUMN starting_sol_price_usd REAL NOT NULL DEFAULT 0")
+            .execute(&pool)
+            .await?;
+    }
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS paper_ledger (
             id TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL, amount_lamports INTEGER NOT NULL,
@@ -565,7 +579,7 @@ pub async fn list_recent_launches(pool: &SqlitePool, limit: u32) -> Result<Vec<s
 /// Restore the persisted paper wallet without mixing it with the on-chain wallet.
 pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>> {
     let row = sqlx::query(
-        "SELECT starting_balance_lamports, available_balance_lamports, invested_balance_lamports, locked_rent_lamports, total_network_fees_lamports, total_priority_fees_lamports, total_swap_fees_lamports, total_rent_refunded_lamports FROM paper_wallets WHERE id = 'default'",
+        "SELECT starting_balance_lamports, starting_sol_price_usd, available_balance_lamports, invested_balance_lamports, locked_rent_lamports, total_network_fees_lamports, total_priority_fees_lamports, total_swap_fees_lamports, total_rent_refunded_lamports FROM paper_wallets WHERE id = 'default'",
     )
     .fetch_optional(pool)
     .await?;
@@ -575,6 +589,7 @@ pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>>
             starting_balance_lamports: u64::try_from(
                 row.get::<i64, _>("starting_balance_lamports"),
             )?,
+            starting_sol_price_usd: row.get::<f64, _>("starting_sol_price_usd"),
             available_balance_lamports: u64::try_from(
                 row.get::<i64, _>("available_balance_lamports"),
             )?,
@@ -601,13 +616,14 @@ pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>>
 pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Result<()> {
     sqlx::query(
         r#"INSERT INTO paper_wallets (
-            id, starting_balance_lamports, available_balance_lamports,
+            id, starting_balance_lamports, starting_sol_price_usd, available_balance_lamports,
             invested_balance_lamports, locked_rent_lamports,
             total_network_fees_lamports, total_priority_fees_lamports,
             total_swap_fees_lamports, total_rent_refunded_lamports, updated_at
-        ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             starting_balance_lamports=excluded.starting_balance_lamports,
+            starting_sol_price_usd=excluded.starting_sol_price_usd,
             available_balance_lamports=excluded.available_balance_lamports,
             invested_balance_lamports=excluded.invested_balance_lamports,
             locked_rent_lamports=excluded.locked_rent_lamports,
@@ -618,6 +634,7 @@ pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Resul
             updated_at=excluded.updated_at"#,
     )
     .bind(i64::try_from(wallet.starting_balance_lamports)?)
+    .bind(wallet.starting_sol_price_usd)
     .bind(i64::try_from(wallet.available_balance_lamports)?)
     .bind(i64::try_from(wallet.invested_balance_lamports)?)
     .bind(i64::try_from(wallet.locked_rent_lamports)?)
