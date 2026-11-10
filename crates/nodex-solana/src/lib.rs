@@ -104,7 +104,14 @@ fn redact_provider_value(value: &mut Value) {
     let secrets: Vec<String> = (2..=20)
         .filter_map(|i| std::env::var(format!("HELIUS_API_KEY{i}")).ok())
         .chain(std::env::var("HELIUS_API_KEY").ok())
-        .chain((1..=10).filter_map(|i| { let name = if i == 1 { "FLUXRPC_API_KEY".to_owned() } else { format!("FLUXRPC_API_KEY{i}") }; std::env::var(name).ok() }))
+        .chain((1..=10).filter_map(|i| {
+            let name = if i == 1 {
+                "FLUXRPC_API_KEY".to_owned()
+            } else {
+                format!("FLUXRPC_API_KEY{i}")
+            };
+            std::env::var(name).ok()
+        }))
         .chain(std::env::var("RUGCHECK_API_KEY").ok())
         .filter(|s| !s.trim().is_empty())
         .collect();
