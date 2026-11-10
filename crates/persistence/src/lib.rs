@@ -870,3 +870,29 @@ mod cleanup_tests {
         assert_eq!(remaining_ledger, 1);
     }
 }
+
+#[cfg(test)]
+mod portfolio_snapshot_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn portfolio_snapshots_are_saved_deduplicated_and_restored() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE portfolio_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at TEXT NOT NULL, payload_json TEXT NOT NULL)")
+            .execute(&pool).await.unwrap();
+        let snapshot = serde_json::json!({
+            "portfolio_balance_usd": 10.5,
+            "unrealized_pnl_usd": 0.5,
+            "unrealized_pnl_pct": 5.0,
+            "updated_at": "2026-11-11T12:00:00Z"
+        });
+        save_portfolio_snapshot(&pool, &snapshot).await.unwrap();
+        save_portfolio_snapshot(&pool, &snapshot).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_snapshots")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1);
+        let restored = load_latest_portfolio_snapshot(&pool).await.unwrap().unwrap();
+        assert_eq!(restored, snapshot);
+    }
+}
