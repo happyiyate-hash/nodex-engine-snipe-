@@ -1092,7 +1092,10 @@ impl SolanaRpc {
         if self.http_urls.is_empty() {
             return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
         }
-        let _request_permit = self.request_limit.acquire().await
+        let _request_permit = self
+            .request_limit
+            .acquire()
+            .await
             .map_err(|_| anyhow!("Solana RPC request scheduler is shutting down"))?;
         let mut last_error = None;
         let count = self.http_urls.len();
