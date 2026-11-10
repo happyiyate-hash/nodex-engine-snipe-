@@ -39,8 +39,15 @@ impl EngineConfig {
 
         let flux_keys: Vec<String> = (1..=10)
             .filter_map(|index| {
-                let name = if index == 1 { "FLUXRPC_API_KEY".to_owned() } else { format!("FLUXRPC_API_KEY{index}") };
-                std::env::var(&name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+                let name = if index == 1 {
+                    "FLUXRPC_API_KEY".to_owned()
+                } else {
+                    format!("FLUXRPC_API_KEY{index}")
+                };
+                std::env::var(&name)
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
             })
             .collect();
 
@@ -50,8 +57,14 @@ impl EngineConfig {
             "cdn" => ("https://cdn.fluxrpc.com", "wss://ws.eu.fluxrpc.com"),
             _ => ("https://eu.fluxrpc.com", "wss://ws.eu.fluxrpc.com"),
         };
-        let fluxrpc_http_urls = flux_keys.iter().map(|key| format!("{flux_http_host}?key={key}")).collect();
-        let fluxrpc_ws_urls = flux_keys.iter().map(|key| format!("{flux_ws_host}/?key={key}")).collect();
+        let fluxrpc_http_urls = flux_keys
+            .iter()
+            .map(|key| format!("{flux_http_host}?key={key}"))
+            .collect();
+        let fluxrpc_ws_urls = flux_keys
+            .iter()
+            .map(|key| format!("{flux_ws_host}/?key={key}"))
+            .collect();
 
         let mut http_urls = Vec::new();
         let mut ws_urls = Vec::new();
