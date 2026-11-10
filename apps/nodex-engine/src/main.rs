@@ -3532,7 +3532,7 @@ async fn main() -> anyhow::Result<()> {
                 && existing.invested_balance_lamports == 0
                 && existing.locked_rent_lamports == 0;
             if untouched && existing.starting_balance_lamports != configured_starting_lamports {
-                let wallet = PaperWallet::new(configured_starting_lamports);
+                let wallet = PaperWallet::new_with_price(configured_starting_lamports, initial_sol_price.price_usd);
                 nodex_persistence::save_paper_wallet(&db, &wallet).await?;
                 tracing::info!(
                     starting_balance = trading_settings.paper_starting_balance,
@@ -3546,7 +3546,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => {
-            let wallet = PaperWallet::new(configured_starting_lamports);
+            let wallet = PaperWallet::new_with_price(configured_starting_lamports, initial_sol_price.price_usd);
             nodex_persistence::save_paper_wallet(&db, &wallet).await?;
             wallet
         }
