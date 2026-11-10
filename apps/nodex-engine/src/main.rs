@@ -3543,7 +3543,18 @@ async fn main() -> anyhow::Result<()> {
         )?
     };
     let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
-        Some(existing) => {
+        Some(mut existing) => {
+            // One-time migration for legacy wallets created before the SOL cost basis
+            // was persisted. Freeze the baseline now instead of substituting the live
+            // quote on every portfolio calculation.
+            if !existing.starting_sol_price_usd.is_finite() || existing.starting_sol_price_usd <= 0.0 {
+                existing.starting_sol_price_usd = initial_sol_price.price_usd;
+                nodex_persistence::save_paper_wallet(&db, &existing).await?;
+                tracing::warn!(
+                    starting_sol_price_usd = initial_sol_price.price_usd,
+                    "Initialized missing legacy paper-wallet SOL cost basis"
+                );
+            }
             let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
                 .fetch_one(&db)
                 .await?;
