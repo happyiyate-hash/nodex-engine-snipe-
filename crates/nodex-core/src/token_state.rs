@@ -9,10 +9,7 @@ use std::{
 /// Hard ceiling for in-memory token snapshots on the small monitoring instance.
 pub const MAX_TOKEN_STATES: usize = 500;
 
-fn evict_oldest_if_over_limit(
-    records: &mut HashMap<String, TokenState>,
-    protected_mint: &str,
-) {
+fn evict_oldest_if_over_limit(records: &mut HashMap<String, TokenState>, protected_mint: &str) {
     if records.len() <= MAX_TOKEN_STATES {
         return;
     }
