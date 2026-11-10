@@ -2179,7 +2179,8 @@ async fn patch_runtime_config(
             .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
         let position_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_positions")
-            .fetch_one(&state.database).await
+            .fetch_one(&state.database)
+            .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
         if ledger_count > 0 || position_count > 0 {
             return Err((StatusCode::CONFLICT,
