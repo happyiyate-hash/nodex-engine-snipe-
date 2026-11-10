@@ -26,9 +26,12 @@ impl BuyCostBreakdown {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PaperWallet {
     pub starting_balance_lamports: u64,
+    /// SOL/USD quote captured when the original paper balance was funded.
+    /// This lets the portfolio mark remaining SOL holdings to market.
+    pub starting_sol_price_usd: f64,
     pub available_balance_lamports: u64,
     pub invested_balance_lamports: u64,
     pub locked_rent_lamports: u64,
@@ -65,8 +68,13 @@ impl Default for PaperWallet {
 
 impl PaperWallet {
     pub fn new(starting_balance_lamports: u64) -> Self {
+        Self::new_with_price(starting_balance_lamports, 0.0)
+    }
+
+    pub fn new_with_price(starting_balance_lamports: u64, starting_sol_price_usd: f64) -> Self {
         Self {
             starting_balance_lamports,
+            starting_sol_price_usd,
             available_balance_lamports: starting_balance_lamports,
             invested_balance_lamports: 0,
             locked_rent_lamports: 0,
