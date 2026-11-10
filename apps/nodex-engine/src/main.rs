@@ -3487,7 +3487,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => {
-            let wallet = PaperWallet::new(ten_usd_lamports);
+            let wallet = PaperWallet::new(configured_starting_lamports);
             nodex_persistence::save_paper_wallet(&db, &wallet).await?;
             wallet
         }
