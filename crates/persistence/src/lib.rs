@@ -265,7 +265,8 @@ pub async fn load_latest_portfolio_snapshot(
 ) -> Result<Option<serde_json::Value>> {
     let payload = sqlx::query_scalar::<_, String>(
         "SELECT payload_json FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
-    ).fetch_optional(pool)
+    )
+    .fetch_optional(pool)
     .await?;
     payload
         .map(|value| serde_json::from_str(&value).map_err(Into::into))
