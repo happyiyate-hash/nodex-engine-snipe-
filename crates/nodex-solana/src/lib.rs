@@ -833,7 +833,7 @@ impl SolanaRpc {
                     "provider":"rugcheck",
                     "kind":"http_error",
                     "http_status":status.as_u16(),
-                    "response":value
+                    "response":value.clone()
                 })),
                 raw_response: Some(value),
                 ..Default::default()
