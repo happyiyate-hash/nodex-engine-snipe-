@@ -104,6 +104,7 @@ fn redact_provider_value(value: &mut Value) {
     let secrets: Vec<String> = (2..=20)
         .filter_map(|i| std::env::var(format!("HELIUS_API_KEY{i}")).ok())
         .chain(std::env::var("HELIUS_API_KEY").ok())
+        .chain((1..=10).filter_map(|i| { let name = if i == 1 { "FLUXRPC_API_KEY".to_owned() } else { format!("FLUXRPC_API_KEY{i}") }; std::env::var(name).ok() }))
         .chain(std::env::var("RUGCHECK_API_KEY").ok())
         .filter(|s| !s.trim().is_empty())
         .collect();
@@ -125,16 +126,19 @@ impl SolanaRpc {
     }
 
     pub fn new_with_urls(http_urls: Vec<String>) -> Self {
+        Self::new_with_urls_and_limit(http_urls, "HELIUS_MAX_CONCURRENT_REQUESTS")
+    }
+
+    pub fn new_with_urls_and_limit(http_urls: Vec<String>, limit_env: &str) -> Self {
+        let request_limit = std::env::var(limit_env)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20)
+            .clamp(1, 100);
         Self {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
-            request_limit: Arc::new(Semaphore::new(
-                std::env::var("HELIUS_MAX_CONCURRENT_REQUESTS")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(20)
-                    .clamp(1, 100),
-            )),
+            request_limit: Arc::new(Semaphore::new(request_limit)),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
