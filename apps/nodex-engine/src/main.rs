@@ -2723,94 +2723,72 @@ async fn sol_price(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!(state.sol_price.read().await.clone()))
 }
 
-/// Aggregate paper-account equity in USD: available SOL + open token holdings
-/// + recoverable rent, all valued using the latest SOL/USD quote.
-async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let price = state.sol_price.read().await.clone();
-    let wallet = state.wallet.read().await.clone();
-    let positions = state.portfolio_positions.read().await;
-    let open_positions: Vec<&serde_json::Value> = positions
-        .iter()
-        .filter(|position| {
-            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-        })
-        .collect();
-    let positions_value_sol: f64 = open_positions
-        .iter()
-        .filter_map(|position| {
-            position
-                .get("current_value_sol")
-                .and_then(serde_json::Value::as_f64)
-        })
-        .sum();
-    let unrealized_pnl_sol: f64 = open_positions
-        .iter()
-        .filter_map(|position| {
-            position
-                .get("unrealized_pnl_sol")
-                .and_then(serde_json::Value::as_f64)
-        })
-        .sum();
-    let realized_pnl_sol: f64 = positions
-        .iter()
-        .filter_map(|position| {
-            position
-                .get("realized_pnl_sol")
-                .and_then(serde_json::Value::as_f64)
-        })
-        .sum();
+/// Build the one authoritative USD portfolio valuation used by REST, SQLite and WebSocket.
+fn calculate_portfolio_snapshot(
+    wallet: &PaperWallet,
+    price: &SolPriceSnapshot,
+    positions: &[serde_json::Value],
+) -> serde_json::Value {
+    let sol_price_usd = if price.price_usd.is_finite() && price.price_usd > 0.0 { price.price_usd } else { 0.0 };
+    let open_positions: Vec<&serde_json::Value> = positions.iter().filter(|position| {
+        position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+    }).collect();
+    let sum = |field: &str| -> f64 {
+        open_positions.iter().filter_map(|position| position.get(field).and_then(serde_json::Value::as_f64))
+            .filter(|value| value.is_finite()).sum()
+    };
+    let positions_value_sol = sum("current_value_sol");
+    let unrealized_pnl_sol = sum("unrealized_pnl_sol");
+    let realized_pnl_sol: f64 = positions.iter().filter_map(|position| position.get("realized_pnl_sol").and_then(serde_json::Value::as_f64))
+        .filter(|value| value.is_finite()).sum();
     let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let total_sol = available_sol + positions_value_sol + locked_rent_sol;
-    // Mark the remaining paper SOL balance to market using the quote captured
-    // when the wallet was funded. Open token positions are marked separately.
-    let starting_sol_price_usd =
-        if wallet.starting_sol_price_usd.is_finite() && wallet.starting_sol_price_usd > 0.0 {
-            wallet.starting_sol_price_usd
-        } else {
-            price.price_usd
-        };
-    let starting_balance_usd = (wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64)
-        * starting_sol_price_usd;
-    let sol_holdings_for_mark = available_sol + locked_rent_sol;
-    let sol_unrealized_pnl_usd = sol_holdings_for_mark * (price.price_usd - starting_sol_price_usd);
-    let token_unrealized_pnl_usd = unrealized_pnl_sol * price.price_usd;
+    let starting_sol_price_usd = if wallet.starting_sol_price_usd.is_finite() && wallet.starting_sol_price_usd > 0.0 {
+        wallet.starting_sol_price_usd
+    } else { sol_price_usd };
+    let starting_balance_sol = wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+    let starting_balance_usd = starting_balance_sol * starting_sol_price_usd;
+    let sol_unrealized_pnl_usd = (available_sol + locked_rent_sol) * (sol_price_usd - starting_sol_price_usd);
+    let token_unrealized_pnl_usd = unrealized_pnl_sol * sol_price_usd;
     let unrealized_pnl_usd = sol_unrealized_pnl_usd + token_unrealized_pnl_usd;
-    let account_equity_usd = total_sol * price.price_usd;
-    // Total account P&L includes all equity changes, not just token trades.
-    let total_pnl_usd = account_equity_usd - starting_balance_usd;
-    let total_pnl_pct = if starting_balance_usd > 0.0 {
-        total_pnl_usd / starting_balance_usd * 100.0
-    } else {
-        0.0
-    };
-    Json(json!({
-        "portfolio_balance_usd": account_equity_usd,
-        "total_value_usd": account_equity_usd,
-        "available_balance_usd": available_sol * price.price_usd,
-        "invested_balance_usd": invested_sol * price.price_usd,
-        "starting_balance_usd": starting_balance_usd,
-        "unrealized_pnl_usd": unrealized_pnl_usd,
-        "sol_unrealized_pnl_usd": sol_unrealized_pnl_usd,
-        "token_unrealized_pnl_usd": token_unrealized_pnl_usd,
-        "starting_sol_price_usd": starting_sol_price_usd,
-        "realized_pnl_usd": realized_pnl_sol * price.price_usd,
-        "total_pnl_usd": total_pnl_usd,
-        "total_pnl_pct": total_pnl_pct,
-        "positions_value_usd": positions_value_sol * price.price_usd,
-        "locked_rent_value_usd": locked_rent_sol * price.price_usd,
-        "available_balance_sol": available_sol,
-        "positions_value_sol": positions_value_sol,
-        "locked_rent_sol": locked_rent_sol,
-        "total_value_sol": total_sol,
-        "sol_price_usd": price.price_usd,
-        "sol_price_source": price.source,
-        "price_updated_at": price.updated_at,
-        "price_status": price.status,
-        "position_count": open_positions.len(),
+    let portfolio_balance_usd = total_sol * sol_price_usd;
+    let total_pnl_usd = portfolio_balance_usd - starting_balance_usd;
+    let unrealized_pnl_pct = if starting_balance_usd > 0.0 { unrealized_pnl_usd / starting_balance_usd * 100.0 } else { 0.0 };
+    let total_pnl_pct = if starting_balance_usd > 0.0 { total_pnl_usd / starting_balance_usd * 100.0 } else { 0.0 };
+    json!({
+        "portfolio_balance_sol": total_sol, "total_portfolio_value_sol": total_sol,
+        "portfolio_balance_usd": portfolio_balance_usd, "total_portfolio_value_usd": portfolio_balance_usd,
+        "total_value_usd": portfolio_balance_usd, "available_balance_usd": available_sol * sol_price_usd,
+        "invested_balance_usd": invested_sol * sol_price_usd, "starting_balance_usd": starting_balance_usd,
+        "starting_balance_sol": starting_balance_sol, "starting_sol_price_usd": starting_sol_price_usd,
+        "unrealized_pnl_usd": unrealized_pnl_usd, "sol_unrealized_pnl_usd": sol_unrealized_pnl_usd,
+        "token_unrealized_pnl_usd": token_unrealized_pnl_usd, "unrealized_pnl_sol": unrealized_pnl_sol,
+        "unrealized_pnl_pct": unrealized_pnl_pct, "realized_pnl_usd": realized_pnl_sol * sol_price_usd,
+        "realized_pnl_sol": realized_pnl_sol, "total_pnl_usd": total_pnl_usd,
+        "total_pnl_sol": total_pnl_usd / sol_price_usd.max(f64::MIN_POSITIVE), "total_pnl_pct": total_pnl_pct,
+        "positions_value_usd": positions_value_sol * sol_price_usd, "positions_value_sol": positions_value_sol,
+        "locked_rent_value_usd": locked_rent_sol * sol_price_usd, "available_balance_sol": available_sol,
+        "invested_balance_sol": invested_sol, "locked_rent_sol": locked_rent_sol, "total_value_sol": total_sol,
+        "sol_price_usd": sol_price_usd, "sol_price_source": price.source, "sol_price_updated_at": price.updated_at,
+        "sol_price_status": price.status, "price_updated_at": price.updated_at, "price_status": price.status,
+        "position_count": open_positions.len(), "positions": open_positions.into_iter().cloned().collect::<Vec<_>>(),
         "updated_at": chrono::Utc::now().to_rfc3339()
-    }))
+    })
+}
+
+/// Aggregate paper-account equity in USD: available SOL + open token holdings
+/// + recoverable rent, all valued using the latest SOL/USD quote.
+async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let wallet = state.wallet.read().await.clone();
+    let price = state.sol_price.read().await.clone();
+    let positions = state.portfolio_positions.read().await.clone();
+    let snapshot = calculate_portfolio_snapshot(&wallet, &price, &positions);
+    if let Err(error) = nodex_persistence::save_portfolio_snapshot(&state.database, &snapshot).await {
+        tracing::error!(%error, "Could not persist portfolio valuation snapshot");
+    }
+    Json(snapshot)
 }
 
 /// Returns one assembled profile snapshot. Wallet SOL is the on-chain balance;
@@ -2871,84 +2849,7 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
             .sum()
     };
 
-    let total_value_sol = sum_field(&open_positions, "current_value_sol");
-    let total_invested_sol = sum_field(&open_positions, "cost_basis_sol");
-    let unrealized_pnl_sol = sum_field(&open_positions, "unrealized_pnl_sol");
-    let realized_pnl_sol = sum_field(&positions, "realized_pnl_sol");
-    let total_pnl_sol = unrealized_pnl_sol + realized_pnl_sol;
-    let starting_balance_sol =
-        paper_wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let available_balance_sol =
-        paper_wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let locked_rent_sol = paper_wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let invested_balance_sol =
-        paper_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let invested_balance_usd = invested_balance_sol * sol_price.price_usd;
-
-    // Paper-account equity includes unspent funds, marked open positions, and
-    // recoverable rent reserves. Fees already debited from available funds are
-    // not counted a second time.
-    let portfolio_balance_sol = available_balance_sol + total_value_sol + locked_rent_sol;
-    let portfolio_balance_usd = portfolio_balance_sol * sol_price.price_usd;
-    let total_value_usd = total_value_sol * sol_price.price_usd;
-    let starting_sol_price_usd = if paper_wallet.starting_sol_price_usd.is_finite()
-        && paper_wallet.starting_sol_price_usd > 0.0
-    {
-        paper_wallet.starting_sol_price_usd
-    } else {
-        sol_price.price_usd
-    };
-    let starting_balance_usd = starting_balance_sol * starting_sol_price_usd;
-    let sol_unrealized_pnl_usd =
-        (available_balance_sol + locked_rent_sol) * (sol_price.price_usd - starting_sol_price_usd);
-    let token_unrealized_pnl_usd = unrealized_pnl_sol * sol_price.price_usd;
-    let unrealized_pnl_usd = sol_unrealized_pnl_usd + token_unrealized_pnl_usd;
-    let realized_pnl_usd = realized_pnl_sol * sol_price.price_usd;
-    let total_pnl_usd = portfolio_balance_usd - starting_balance_usd;
-    let unrealized_pnl_pct = if starting_balance_usd > 0.0 {
-        unrealized_pnl_usd / starting_balance_usd * 100.0
-    } else {
-        0.0
-    };
-    let total_pnl_pct = if starting_balance_usd > 0.0 {
-        total_pnl_usd / starting_balance_usd * 100.0
-    } else {
-        0.0
-    };
-
-    let portfolio = json!({
-        "portfolio_balance_sol": portfolio_balance_sol,
-        "total_portfolio_value_sol": portfolio_balance_sol,
-        "portfolio_balance_usd": portfolio_balance_usd,
-        "total_portfolio_value_usd": portfolio_balance_usd,
-        "total_value_usd": total_value_usd,
-        "available_balance_usd": available_balance_sol * sol_price.price_usd,
-        "invested_balance_usd": invested_balance_usd,
-        "starting_balance_usd": starting_balance_usd,
-        "unrealized_pnl_usd": unrealized_pnl_usd,
-        "sol_unrealized_pnl_usd": sol_unrealized_pnl_usd,
-        "token_unrealized_pnl_usd": token_unrealized_pnl_usd,
-        "starting_sol_price_usd": starting_sol_price_usd,
-        "realized_pnl_usd": realized_pnl_usd,
-        "total_pnl_usd": total_pnl_usd,
-        "sol_price_usd": sol_price.price_usd,
-        "sol_price_source": sol_price.source,
-        "sol_price_updated_at": sol_price.updated_at,
-        "sol_price_status": sol_price.status,
-        "total_value_sol": total_value_sol,
-        "available_balance_sol": available_balance_sol,
-        "invested_balance_sol": invested_balance_sol,
-        "locked_rent_sol": locked_rent_sol,
-        "starting_balance_sol": starting_balance_sol,
-        "total_invested_sol": total_invested_sol,
-        "unrealized_pnl_sol": unrealized_pnl_sol,
-        "unrealized_pnl_pct": unrealized_pnl_pct,
-        "realized_pnl_sol": realized_pnl_sol,
-        "total_pnl_sol": total_pnl_sol,
-        "total_pnl_pct": total_pnl_pct,
-        "positions": open_positions,
-        "position_count": open_positions.len()
-    });
+    let portfolio = calculate_portfolio_snapshot(&paper_wallet, &sol_price, &positions);
 
     let mut token_snapshots = state.token_registry.snapshot();
     token_snapshots.sort_by_key(|left| std::cmp::Reverse(left.updated_at));
@@ -2975,6 +2876,11 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
         // The profile endpoint is the frontend's bootstrap request. Include the
         // complete persisted token states so identity metadata is restored by mint.
         object.insert("tokens".into(), json!(token_snapshots));
+    }
+    if let Some(portfolio_snapshot) = profile.get("portfolio") {
+        if let Err(error) = nodex_persistence::save_portfolio_snapshot(&state.database, portfolio_snapshot).await {
+            tracing::error!(%error, "Could not persist profile portfolio snapshot");
+        }
     }
     Json(profile)
 }
