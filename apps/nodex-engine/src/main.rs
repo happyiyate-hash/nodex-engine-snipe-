@@ -146,7 +146,9 @@ impl TradingSettings {
             }
         }
         if self.paper_starting_balance <= 0.0 || self.paper_starting_balance > 1_000_000.0 {
-            return Err("paper_starting_balance must be greater than 0 and no more than 1,000,000.".into());
+            return Err(
+                "paper_starting_balance must be greater than 0 and no more than 1,000,000.".into(),
+            );
         }
         if !matches!(self.paper_starting_balance_currency.as_str(), "USD" | "SOL") {
             return Err("paper_starting_balance_currency must be USD or SOL.".into());
@@ -1328,7 +1330,10 @@ fn start_launch_processor(
                             // Read the latest persisted policy after all evidence is collected.
                             let current_policy = trading_settings_for_scan.read().await.clone();
                             let all_checks_verified = !report.checks.is_empty()
-                                && report.checks.iter().all(|check| check.status.eq_ignore_ascii_case("verified"));
+                                && report
+                                    .checks
+                                    .iter()
+                                    .all(|check| check.status.eq_ignore_ascii_case("verified"));
                             let execution_gate = json!({
                                 "execution_enabled": current_policy.execution_enabled,
                                 "block_unverified_trades": current_policy.block_unverified_trades,
@@ -1346,7 +1351,8 @@ fn start_launch_processor(
                                     "Qualified by current runtime policy"
                                 }
                             });
-                            let mut report_payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                            let mut report_payload =
+                                serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
                             report_payload["execution_gate"] = execution_gate;
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
@@ -2099,7 +2105,6 @@ async fn update_trading_config(
     Ok(Json(json!({"status":"ok","config":settings})))
 }
 
-
 async fn patch_runtime_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2111,27 +2116,54 @@ async fn patch_runtime_config(
         "Configuration patch must be a JSON object.".to_string(),
     ))?;
     const ALLOWED: &[&str] = &[
-        "min_liquidity_usd", "max_entry_price_usd",
-        "max_investment_per_token_sol", "max_investment_per_token_usd",
-        "max_simultaneous_positions", "min_safety_score", "max_slippage_pct",
-        "stop_loss_pct", "take_profit_pct", "min_5m_buy_volume_usd",
-        "max_top10_holder_concentration_pct", "auto_buy_enabled",
-        "trailing_stop_enabled", "trailing_stop_callback_pct",
-        "blacklist_creators_with_prior_rugs", "paper_starting_balance",
-        "paper_starting_balance_currency", "diagnostic_mode",
-        "block_unverified_trades", "execution_enabled",
+        "min_liquidity_usd",
+        "max_entry_price_usd",
+        "max_investment_per_token_sol",
+        "max_investment_per_token_usd",
+        "max_simultaneous_positions",
+        "min_safety_score",
+        "max_slippage_pct",
+        "stop_loss_pct",
+        "take_profit_pct",
+        "min_5m_buy_volume_usd",
+        "max_top10_holder_concentration_pct",
+        "auto_buy_enabled",
+        "trailing_stop_enabled",
+        "trailing_stop_callback_pct",
+        "blacklist_creators_with_prior_rugs",
+        "paper_starting_balance",
+        "paper_starting_balance_currency",
+        "diagnostic_mode",
+        "block_unverified_trades",
+        "execution_enabled",
     ];
-    if let Some(unknown) = patch_object.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
-        return Err((StatusCode::BAD_REQUEST, format!("Unknown configuration field: {unknown}")));
+    if let Some(unknown) = patch_object
+        .keys()
+        .find(|key| !ALLOWED.contains(&key.as_str()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Unknown configuration field: {unknown}"),
+        ));
     }
     let current = state.trading_settings.read().await.clone();
     let mut merged = serde_json::to_value(&current)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let target = merged.as_object_mut().expect("TradingSettings serializes as an object");
-    for (key, value) in patch_object { target.insert(key.clone(), value.clone()); }
-    let candidate: TradingSettings = serde_json::from_value(merged)
-        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Invalid configuration: {error}")))?;
-    candidate.validate().map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let target = merged
+        .as_object_mut()
+        .expect("TradingSettings serializes as an object");
+    for (key, value) in patch_object {
+        target.insert(key.clone(), value.clone());
+    }
+    let candidate: TradingSettings = serde_json::from_value(merged).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid configuration: {error}"),
+        )
+    })?;
+    candidate
+        .validate()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     if candidate.execution_enabled {
         return Err((StatusCode::CONFLICT,
             "Execution is not available yet. Keep execution_enabled=false until the paper execution module is connected. Real execution is unavailable in this build.".into()));
@@ -2143,7 +2175,8 @@ async fn patch_runtime_config(
     let mut next_wallet = wallet_guard.clone();
     if balance_changed {
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
-            .fetch_one(&state.database).await
+            .fetch_one(&state.database)
+            .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
         let position_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_positions")
             .fetch_one(&state.database).await
@@ -2165,7 +2198,10 @@ async fn patch_runtime_config(
     let serialized = serde_json::to_string(&candidate)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let updated_at = chrono::Utc::now().to_rfc3339();
-    let mut transaction = state.database.begin().await
+    let mut transaction = state
+        .database
+        .begin()
+        .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     sqlx::query(
         "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at"
@@ -2185,21 +2221,32 @@ async fn patch_runtime_config(
         .bind(i64::try_from(next_wallet.total_priority_fees_lamports).unwrap_or(i64::MAX))
         .bind(i64::try_from(next_wallet.total_swap_fees_lamports).unwrap_or(i64::MAX))
         .bind(i64::try_from(next_wallet.total_rent_refunded_lamports).unwrap_or(i64::MAX))
-        .bind(&updated_at).execute(&mut *transaction).await
+        .bind(&updated_at)
+        .execute(&mut *transaction)
+        .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not update paper wallet: {error}")))?;
     }
-    transaction.commit().await
+    transaction
+        .commit()
+        .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    if balance_changed { *wallet_guard = next_wallet; }
+    if balance_changed {
+        *wallet_guard = next_wallet;
+    }
     drop(wallet_guard);
     *state.trading_settings.write().await = candidate.clone();
-    let _ = state.database_changes.send(json!({
-        "type":"trading_config_updated","data":candidate,"updated_at":updated_at
-    })).await;
+    let _ = state
+        .database_changes
+        .send(json!({
+            "type":"trading_config_updated","data":candidate,"updated_at":updated_at
+        }))
+        .await;
     let _ = state.events.send(json!({
         "type":"runtime_config_updated","data":candidate,"updated_at":updated_at
     }));
-    Ok(Json(json!({"status":"ok","config":candidate,"updated_at":updated_at})))
+    Ok(Json(
+        json!({"status":"ok","config":candidate,"updated_at":updated_at}),
+    ))
 }
 
 async fn get_engine_control(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -2561,12 +2608,15 @@ async fn scan_token(
         "Solana HTTP RPC is not configured".to_string(),
     ))?;
     let diagnostic_mode = state.trading_settings.read().await.diagnostic_mode;
-    let report = rpc.scan_token_security_with_progress_mode(&mint, diagnostic_mode, |_, _, _| {}).await.map_err(|error| {
-        (
-            axum::http::StatusCode::BAD_GATEWAY,
-            format!("Token security scan failed: {error}"),
-        )
-    })?;
+    let report = rpc
+        .scan_token_security_with_progress_mode(&mint, diagnostic_mode, |_, _, _| {})
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("Token security scan failed: {error}"),
+            )
+        })?;
     Ok(Json(
         serde_json::to_value(report).unwrap_or_else(|_| json!({})),
     ))
@@ -2626,7 +2676,9 @@ async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Va
     let trading_settings = state.trading_settings.read().await.clone();
     let starting_balance_usd = if trading_settings.paper_starting_balance_currency == "SOL" {
         trading_settings.paper_starting_balance * price.price_usd
-    } else { trading_settings.paper_starting_balance };
+    } else {
+        trading_settings.paper_starting_balance
+    };
     let total_pnl_usd = total_pnl_sol * price.price_usd;
     let total_pnl_pct = if starting_balance_usd > 0.0 {
         total_pnl_usd / starting_balance_usd * 100.0
@@ -3454,10 +3506,14 @@ async fn main() -> anyhow::Result<()> {
     // Seed the paper account from persisted runtime configuration. Existing
     // balances are migrated only when no paper trades, positions, or invested
     // funds exist; accounts with trading history are left untouched.
-    let configured_starting_lamports = if trading_settings.paper_starting_balance_currency == "SOL" {
+    let configured_starting_lamports = if trading_settings.paper_starting_balance_currency == "SOL"
+    {
         (trading_settings.paper_starting_balance * LAMPORTS_PER_SOL as f64).round() as u64
     } else {
-        sol_price::usd_to_lamports(trading_settings.paper_starting_balance, initial_sol_price.price_usd)?
+        sol_price::usd_to_lamports(
+            trading_settings.paper_starting_balance,
+            initial_sol_price.price_usd,
+        )?
     };
     let wallet = match nodex_persistence::load_paper_wallet(&db).await? {
         Some(existing) => {
@@ -3529,7 +3585,8 @@ async fn main() -> anyhow::Result<()> {
         SolanaRpc::new_with_urls_and_limit(
             config.fluxrpc_http_urls.clone(),
             "FLUXRPC_MAX_CONCURRENT_REQUESTS",
-        ).with_activity_events(events.clone())
+        )
+        .with_activity_events(events.clone())
     });
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
@@ -3610,7 +3667,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/config/trading",
             get(get_trading_config).put(update_trading_config),
         )
-        .route("/api/config", get(get_trading_config).patch(patch_runtime_config))
+        .route(
+            "/api/config",
+            get(get_trading_config).patch(patch_runtime_config),
+        )
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/market/sol-price", get(sol_price))
         .route("/api/v1/portfolio/balance", get(portfolio_balance))
