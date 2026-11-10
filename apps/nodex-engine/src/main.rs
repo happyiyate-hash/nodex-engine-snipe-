@@ -132,16 +132,25 @@ impl TradingSettings {
         let mut owner_addresses = HashSet::new();
         for owner in &self.preferred_owners {
             if owner.address.trim() != owner.address || owner.address.is_empty() {
-                return Err("Each preferred owner must have a non-empty, trimmed Solana wallet address.".into());
+                return Err(
+                    "Each preferred owner must have a non-empty, trimmed Solana wallet address."
+                        .into(),
+                );
             }
             let decoded = bs58::decode(&owner.address)
                 .into_vec()
                 .map_err(|_| format!("Invalid Solana wallet address: {}", owner.address))?;
             if decoded.len() != 32 {
-                return Err(format!("Solana wallet address must decode to 32 bytes: {}", owner.address));
+                return Err(format!(
+                    "Solana wallet address must decode to 32 bytes: {}",
+                    owner.address
+                ));
             }
             if !owner_addresses.insert(owner.address.as_str()) {
-                return Err(format!("Duplicate preferred owner address: {}", owner.address));
+                return Err(format!(
+                    "Duplicate preferred owner address: {}",
+                    owner.address
+                ));
             }
             if owner.label.len() > 80 {
                 return Err("Preferred owner labels must be 80 characters or fewer.".into());
@@ -1039,8 +1048,14 @@ fn start_launch_processor(
                 let whitelist_settings = trading_settings.read().await;
                 if whitelist_settings.whitelist_only_mode {
                     let creator = launch.creator_address.as_deref();
-                    let preferred = creator.map(|address| whitelist_settings.preferred_owners.iter()
-                        .any(|owner| owner.address == address)).unwrap_or(false);
+                    let preferred = creator
+                        .map(|address| {
+                            whitelist_settings
+                                .preferred_owners
+                                .iter()
+                                .any(|owner| owner.address == address)
+                        })
+                        .unwrap_or(false);
                     if !preferred {
                         tracing::debug!(
                             mint_address = %launch.mint_address,
