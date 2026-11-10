@@ -546,9 +546,7 @@ fn start_portfolio_price_projector(
             {
                 tracing::error!(%error, "Could not persist profile after SOL price update");
             }
-            let _ = events.send(
-                json!({"type":"profile_updated","data":profile_snapshot}),
-            );
+            let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
             let _ = events.send(json!({"type":"portfolio_summary_updated","data":portfolio}));
         }
     });
