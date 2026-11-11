@@ -229,14 +229,12 @@ fn main_bot_config_from_settings(
     sol_price_usd: f64,
 ) -> TradingBotConfig {
     let position_size_usd = settings.max_investment_per_token_usd.max(0.0);
-    let position_size_sol = if position_size_usd > 0.0
-        && sol_price_usd.is_finite()
-        && sol_price_usd > 0.0
-    {
-        position_size_usd / sol_price_usd
-    } else {
-        settings.max_investment_per_token_sol
-    };
+    let position_size_sol =
+        if position_size_usd > 0.0 && sol_price_usd.is_finite() && sol_price_usd > 0.0 {
+            position_size_usd / sol_price_usd
+        } else {
+            settings.max_investment_per_token_sol
+        };
 
     TradingBotConfig {
         minimum_safety_score: f64::from(settings.min_safety_score),
@@ -2315,7 +2313,9 @@ async fn update_trading_config(
         .await;
     let sol_price_usd = state.sol_price.read().await.price_usd;
     let bot_config = main_bot_config_from_settings(&settings, sol_price_usd);
-    Ok(Json(json!({"status":"ok","config":settings,"main_bot_config":bot_config})))
+    Ok(Json(
+        json!({"status":"ok","config":settings,"main_bot_config":bot_config}),
+    ))
 }
 
 async fn patch_runtime_config(
@@ -4077,7 +4077,10 @@ mod main_bot_config_tests {
     fn sol_position_size_is_used_when_usd_size_is_not_configured() {
         let settings = TradingSettings::default();
         let config = main_bot_config_from_settings(&settings, 200.0);
-        assert_eq!(config.position_size_sol, settings.max_investment_per_token_sol);
+        assert_eq!(
+            config.position_size_sol,
+            settings.max_investment_per_token_sol
+        );
         assert_eq!(config.position_size_usd, 0.0);
     }
 }
