@@ -17,9 +17,8 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
-    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream,
-    start_market_monitor, MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus,
-    PUMPSWAP_PROGRAM_ID,
+    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream, start_market_monitor,
+    MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::{Deserialize, Serialize};
@@ -992,21 +991,39 @@ fn start_pumpswap_activity_processor(
             let notification = match receiver.recv().await {
                 Ok(value) => value,
                 Err(broadcast::error::RecvError::Lagged(count)) => {
-                    tracing::warn!(dropped_notifications = count, "PumpSwap activity consumer lagged");
+                    tracing::warn!(
+                        dropped_notifications = count,
+                        "PumpSwap activity consumer lagged"
+                    );
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
-            if notification.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
-                || notification.get("nodex_program_id").and_then(serde_json::Value::as_str)
+            if notification
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                != Some("logsNotification")
+                || notification
+                    .get("nodex_program_id")
+                    .and_then(serde_json::Value::as_str)
                     != Some(PUMPSWAP_PROGRAM_ID)
             {
                 continue;
             }
-            let Some(value) = notification.pointer("/params/result/value") else { continue };
-            if !value.get("err").is_some_and(serde_json::Value::is_null) { continue; }
-            let Some(signature) = value.get("signature").and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty()).map(str::to_owned) else { continue };
+            let Some(value) = notification.pointer("/params/result/value") else {
+                continue;
+            };
+            if !value.get("err").is_some_and(serde_json::Value::is_null) {
+                continue;
+            }
+            let Some(signature) = value
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
             let transaction = match rpc.get_transaction(&signature).await {
                 Ok(Some(transaction)) => transaction,
                 Ok(None) => continue,
@@ -1015,15 +1032,26 @@ fn start_pumpswap_activity_processor(
                     continue;
                 }
             };
-            if !transaction.pointer("/meta/err").is_some_and(serde_json::Value::is_null) {
+            if !transaction
+                .pointer("/meta/err")
+                .is_some_and(serde_json::Value::is_null)
+            {
                 continue;
             }
-            let logs = transaction.pointer("/meta/logMessages")
+            let logs = transaction
+                .pointer("/meta/logMessages")
                 .and_then(serde_json::Value::as_array)
-                .map(|items| items.iter().filter_map(serde_json::Value::as_str)
-                    .map(str::to_owned).collect::<Vec<_>>())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
-            if logs.is_empty() { continue; }
+            if logs.is_empty() {
+                continue;
+            }
             let decoded = match decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID) {
                 Ok(events) => events,
                 Err(error) => {
@@ -1038,12 +1066,22 @@ fn start_pumpswap_activity_processor(
             }
             for activity in decoded {
                 let (kind, timestamp, pool, user, base_amount, quote_amount) = match activity {
-                    PumpSwapActivityEvent::Buy { timestamp, pool, user, base_amount, quote_amount } =>
-                        ("buy", timestamp, pool, user, base_amount, quote_amount),
-                    PumpSwapActivityEvent::Sell { timestamp, pool, user, base_amount, quote_amount } =>
-                        ("sell", timestamp, pool, user, base_amount, quote_amount),
-                    PumpSwapActivityEvent::Deposit { .. } | PumpSwapActivityEvent::Withdraw { .. } =>
-                        continue,
+                    PumpSwapActivityEvent::Buy {
+                        timestamp,
+                        pool,
+                        user,
+                        base_amount,
+                        quote_amount,
+                    } => ("buy", timestamp, pool, user, base_amount, quote_amount),
+                    PumpSwapActivityEvent::Sell {
+                        timestamp,
+                        pool,
+                        user,
+                        base_amount,
+                        quote_amount,
+                    } => ("sell", timestamp, pool, user, base_amount, quote_amount),
+                    PumpSwapActivityEvent::Deposit { .. }
+                    | PumpSwapActivityEvent::Withdraw { .. } => continue,
                 };
                 let _ = events.send(json!({
                     "type":"pumpswap_trade_activity",
@@ -2810,7 +2848,10 @@ async fn recent_launches(
 async fn creator_intelligence(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<nodex_persistence::creator_intelligence::CreatorIntelligence>>, (StatusCode, String)> {
+) -> Result<
+    Json<Vec<nodex_persistence::creator_intelligence::CreatorIntelligence>>,
+    (StatusCode, String),
+> {
     let limit = query
         .get("limit")
         .and_then(|value| value.parse::<u32>().ok())
@@ -3878,7 +3919,8 @@ async fn main() -> anyhow::Result<()> {
                 activity_events,
                 activity_status,
                 None,
-            ).await;
+            )
+            .await;
         });
     }
 
