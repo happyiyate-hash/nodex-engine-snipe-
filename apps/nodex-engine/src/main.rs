@@ -3821,7 +3821,10 @@ async fn ensure_market_monitor(state: &AppState) {
         Ok(launches) => {
             let mut restored = 0usize;
             for launch in launches {
-                let Some(mint) = launch.get("mint_address").and_then(serde_json::Value::as_str) else {
+                let Some(mint) = launch
+                    .get("mint_address")
+                    .and_then(serde_json::Value::as_str)
+                else {
                     continue;
                 };
                 match monitor
@@ -3829,12 +3832,16 @@ async fn ensure_market_monitor(state: &AppState) {
                     .await
                 {
                     Ok(_) => restored += 1,
-                    Err(error) => tracing::warn!(%error, mint_address = mint, "Could not restore persisted market subscription"),
+                    Err(error) => {
+                        tracing::warn!(%error, mint_address = mint, "Could not restore persisted market subscription")
+                    }
                 }
             }
             tracing::info!(restored, "Restored persisted Pump.fun market subscriptions");
         }
-        Err(error) => tracing::warn!(%error, "Could not load launches for market subscription recovery"),
+        Err(error) => {
+            tracing::warn!(%error, "Could not load launches for market subscription recovery")
+        }
     }
 }
 
