@@ -319,6 +319,29 @@ struct Health {
     service: &'static str,
 }
 
+/// Build transient scan-progress fields without allowing late progress events
+/// to downgrade a terminal approval or rejection in the canonical token state.
+fn scan_progress_security_patch(
+    current_security: Option<&serde_json::Value>,
+    data: &serde_json::Value,
+) -> serde_json::Value {
+    let current_decision = current_security
+        .and_then(|security| security.get("decision"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let preserve_terminal_verdict = matches!(current_decision.as_str(), "APPROVED" | "REJECTED");
+    let mut security_patch = json!({
+        "progress": data.get("progress").cloned().unwrap_or(serde_json::Value::Null),
+        "stage": data.get("stage").cloned().unwrap_or(serde_json::Value::Null),
+        "message": data.get("message").cloned().unwrap_or(serde_json::Value::Null)
+    });
+    if !preserve_terminal_verdict {
+        security_patch["status"] = json!("scanning");
+    }
+    json!({"security":security_patch})
+}
+
 /// Projects independent worker events into the canonical shared token state.
 /// Workers remain decoupled: they publish domain events and this projector updates
 /// only the matching domain of the token record.
@@ -405,14 +428,13 @@ fn start_token_state_projector(
                 continue;
             }
             let transient_scan_event = matches!(kind, "token_scan_started" | "token_scan_progress");
+            let current_security = registry
+                .get(mint)
+                .and_then(|snapshot| snapshot.data.get("security").cloned());
             let domain_patch = match kind {
-                "token_scan_started" => json!({"security":{"status":"scanning"}}),
-                "token_scan_progress" => json!({"security":{
-                    "status":"scanning",
-                    "progress":data.get("progress").cloned().unwrap_or(serde_json::Value::Null),
-                    "stage":data.get("stage").cloned().unwrap_or(serde_json::Value::Null),
-                    "message":data.get("message").cloned().unwrap_or(serde_json::Value::Null)
-                }}),
+                "token_scan_started" | "token_scan_progress" => {
+                    scan_progress_security_patch(current_security.as_ref(), &data)
+                },
                 "token_scan_update" => json!({"security":data}),
                 "creator_history_update" => {
                     json!({"security":{"creator_history":data.get("history").cloned().unwrap_or(serde_json::Value::Null)}})
@@ -1828,6 +1850,9 @@ fn start_launch_processor(
                                 "APPROVED" => "completed",
                                 _ => "unverified",
                             };
+                            // Persist the terminal lifecycle status alongside the verdict.
+                            // A report can carry a stale intermediate "scanning" field.
+                            report_payload["status"] = json!(terminal_status);
                             match decision.as_str() {
                                 "APPROVED" => {
                                     let launch_saved = match nodex_persistence::save_launch(
@@ -1880,10 +1905,17 @@ fn start_launch_processor(
                                     } else {
                                         terminal_status = "unverified";
                                         let message="Security approval could not be persisted to SQLite; token is retained as unverified.";
-                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",message,json!({"kind":"database_persistence_error","message":message}))}));
-                                        if let Some(snapshot) = approved_registry.get(&scan_mint) {
-                                            let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                                        report_payload["decision"] = json!("UNVERIFIED");
+                                        report_payload["status"] = json!("unverified");
+                                        report_payload["decision_reason"] = json!(message);
+                                        if let Ok(snapshot) = approved_registry.upsert_patch(
+                                            &scan_mint,
+                                            json!({"security":report_payload.clone(),"market":{"status":"not_started"}}),
+                                        ) {
+                                            let _ = nodex_persistence::save_token_state(&approved_database, &snapshot).await;
+                                            let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
                                         }
+                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",message,json!({"kind":"database_persistence_error","message":message}))}));
                                     }
                                 }
                                 "REJECTED" => {
@@ -4332,6 +4364,33 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%address, mode = "paper", "NodeX engine API listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod scan_progress_state_tests {
+    use super::*;
+
+    #[test]
+    fn late_scan_progress_does_not_downgrade_approved_verdict() {
+        let current = json!({"decision":"APPROVED","status":"completed"});
+        let patch = scan_progress_security_patch(
+            Some(&current),
+            &json!({"progress":42,"stage":"holder_check","message":"still processing"}),
+        );
+        assert_eq!(patch["security"]["progress"], 42);
+        assert!(patch["security"].get("status").is_none());
+    }
+
+    #[test]
+    fn scan_progress_sets_scanning_before_terminal_verdict() {
+        let current = json!({"decision":"PENDING","status":"pending"});
+        let patch = scan_progress_security_patch(
+            Some(&current),
+            &json!({"progress":42,"stage":"holder_check"}),
+        );
+        assert_eq!(patch["security"]["status"], "scanning");
+        assert_eq!(patch["security"]["progress"], 42);
+    }
 }
 
 #[cfg(test)]
