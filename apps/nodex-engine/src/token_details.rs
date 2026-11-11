@@ -148,6 +148,9 @@ pub fn build_token_detail_snapshot(
         "version": state.map(|item| item.version).unwrap_or(0),
         "updated_at": state.map(|item| item.updated_at.to_rfc3339()),
         "diagnostics": data.and_then(|value| value.get("diagnostics")).cloned().unwrap_or_else(|| json!([])),
+        // Return the canonical persisted scanner report with the detail snapshot.
+        // Missing evidence remains absent/null; the UI must not infer a pass.
+        "security": data.and_then(|value| value.get("security")).cloned().unwrap_or(Value::Null),
         "identity": {
             "name": identity.get("name").cloned().unwrap_or(Value::Null),
             "symbol": identity.get("symbol").cloned().unwrap_or(Value::Null),
