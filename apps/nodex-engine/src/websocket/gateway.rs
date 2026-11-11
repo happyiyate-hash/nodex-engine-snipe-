@@ -33,6 +33,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("chart_candle_closed")
             | Some("position_updated")
             | Some("portfolio_summary_updated")
+            | Some("paper_buy_started")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
             | Some("paper_sell_executed")
