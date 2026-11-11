@@ -113,17 +113,21 @@ pub fn evaluate_entry(
     let mut rejected = false;
     let mut waiting = false;
 
-    let mut reject = |reason: &str| {
-        rejected = true;
-        reasons.push(reason.to_owned());
-    };
-    let mut wait = |reason: &str| {
-        waiting = true;
-        reasons.push(reason.to_owned());
-    };
+    macro_rules! reject {
+        ($reason:expr) => {{
+            rejected = true;
+            reasons.push($reason.to_owned());
+        }};
+    }
+    macro_rules! wait {
+        ($reason:expr) => {{
+            waiting = true;
+            reasons.push($reason.to_owned());
+        }};
+    }
 
     if !security.mint_authority_disabled || !security.freeze_authority_disabled {
-        reject("Mint and freeze authorities must both be disabled.");
+        reject!("Mint and freeze authorities must both be disabled.");
     }
     if !security.rugcheck_available {
         reject("RugCheck is unavailable; token cannot be paper-entry eligible.");
@@ -156,7 +160,7 @@ pub fn evaluate_entry(
     }
     match market.liquidity_usd {
         Some(value) if value.is_finite() && value >= config.minimum_liquidity_usd => {}
-        Some(_) => wait("Waiting for minimum liquidity."),
+        Some(_) => wait!("Waiting for minimum liquidity."),
         None => wait("Waiting for a verified liquidity value."),
     }
     match market.price_usd {
