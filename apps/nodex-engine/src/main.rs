@@ -434,6 +434,7 @@ async fn evaluate_and_execute_paper_entry(
     mint: &str,
     market_data: &serde_json::Value,
     trades: &VecDeque<ConfirmedTradeObservation>,
+    quote_is_sol: bool,
     registry: &TokenRegistry,
     database: &sqlx::SqlitePool,
     profile: &Arc<RwLock<serde_json::Value>>,
@@ -505,12 +506,16 @@ async fn evaluate_and_execute_paper_entry(
     let price_sol = market_data
         .get("price_sol")
         .and_then(serde_json::Value::as_f64);
-    let reserve_lamports = json_u64(
-        market_data
-            .get("real_sol_reserves")
-            .or_else(|| market_data.get("quote_vault_reserves"))
-            .or_else(|| market_data.get("virtual_sol_reserves")),
-    );
+    let reserve_lamports = if quote_is_sol {
+        json_u64(
+            market_data
+                .get("real_sol_reserves")
+                .or_else(|| market_data.get("quote_vault_reserves"))
+                .or_else(|| market_data.get("virtual_sol_reserves")),
+        )
+    } else {
+        None
+    };
     let reserve_sol = reserve_lamports
         .map(|value| value as f64 / LAMPORTS_PER_SOL as f64)
         .filter(|value| value.is_finite() && *value > 0.0);
@@ -953,6 +958,7 @@ fn start_token_state_projector(
     tokio::spawn(async move {
         let mut trade_observations = HashMap::<String, VecDeque<ConfirmedTradeObservation>>::new();
         let mut pool_to_mint = HashMap::<String, String>::new();
+        let mut pool_quote_is_sol = HashSet::<String>::new();
         let mut seen_trade_keys = HashSet::<String>::new();
         let mut last_evaluation_signatures = HashMap::<String, String>::new();
         let mut last_entry_attempts = HashMap::<String, Instant>::new();
@@ -980,6 +986,13 @@ fn start_token_state_projector(
                     data.get("pool_address").and_then(serde_json::Value::as_str),
                 ) {
                     pool_to_mint.insert(pool.to_owned(), mint.to_owned());
+                    if data.get("quote_mint").and_then(serde_json::Value::as_str)
+                        == Some("So11111111111111111111111111111111111111112")
+                    {
+                        pool_quote_is_sol.insert(pool.to_owned());
+                    } else {
+                        pool_quote_is_sol.remove(pool);
+                    }
                 }
                 continue;
             }
@@ -991,6 +1004,11 @@ fn start_token_state_projector(
                 let Some(mint) = pool_to_mint.get(pool).cloned() else {
                     continue;
                 };
+                // quote_amount_raw is lamports only for WSOL-quoted pools. Do not
+                // misread USDC or another quote mint as SOL volume.
+                if !pool_quote_is_sol.contains(pool) {
+                    continue;
+                }
                 let signature = data
                     .get("signature")
                     .and_then(serde_json::Value::as_str)
@@ -1140,10 +1158,20 @@ fn start_token_state_projector(
                         let empty_observations = VecDeque::new();
                         let observations =
                             trade_observations.get(mint).unwrap_or(&empty_observations);
+                        let venue = data.get("venue").and_then(serde_json::Value::as_str).unwrap_or_default();
+                        let quote_is_sol = match venue {
+                            "pump_fun_bonding_curve" => true,
+                            "pump_swap" => data
+                                .get("pool_address")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|pool| pool_quote_is_sol.contains(pool)),
+                            _ => false,
+                        };
                         evaluate_and_execute_paper_entry(
                             mint,
                             &data,
                             observations,
+                            quote_is_sol,
                             &registry,
                             &database,
                             &profile,
