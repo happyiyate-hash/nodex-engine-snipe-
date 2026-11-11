@@ -4,6 +4,7 @@ use tokio::sync::{broadcast, RwLock};
 
 const POSITION_SCOPED_MARKET_EVENTS: &[&str] = &[
     "market_price_update",
+    "token_state_updated",
     "token_market_update",
     "token_statistics_update",
     "chart_candle_update",
