@@ -74,6 +74,8 @@ struct PreferredOwner {
     label: String,
 }
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct TradingSettings {
@@ -90,6 +92,9 @@ struct TradingSettings {
     min_5m_buy_volume_usd: f64,
     max_top10_holder_concentration_pct: f64,
     auto_buy_enabled: bool,
+    /// Close simulated token accounts and refund locked rent after a fully settled exit.
+    #[serde(default = "default_true")]
+    auto_recover_token_account_rent: bool,
     trailing_stop_enabled: bool,
     trailing_stop_callback_pct: f64,
     blacklist_creators_with_prior_rugs: bool,
@@ -119,6 +124,7 @@ impl Default for TradingSettings {
             min_5m_buy_volume_usd: 1_000.0,
             max_top10_holder_concentration_pct: 20.0,
             auto_buy_enabled: false,
+            auto_recover_token_account_rent: true,
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 10.0,
             blacklist_creators_with_prior_rugs: true,
@@ -2422,6 +2428,7 @@ async fn patch_runtime_config(
         "min_5m_buy_volume_usd",
         "max_top10_holder_concentration_pct",
         "auto_buy_enabled",
+        "auto_recover_token_account_rent",
         "trailing_stop_enabled",
         "trailing_stop_callback_pct",
         "blacklist_creators_with_prior_rugs",
@@ -4345,6 +4352,7 @@ mod main_bot_config_tests {
             min_5m_buy_volume_usd: 1_000.0,
             max_top10_holder_concentration_pct: 20.0,
             auto_buy_enabled: true,
+            auto_recover_token_account_rent: true,
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 10.0,
             blacklist_creators_with_prior_rugs: true,
