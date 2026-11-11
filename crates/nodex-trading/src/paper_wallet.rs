@@ -158,6 +158,20 @@ impl PaperWallet {
         Ok(LedgerEntry { reference: Some(mint.to_owned()), ..entry })
     }
 
+    /// Apply the configured rent-recovery policy after a confirmed full sale.
+    /// Partial balances and a disabled setting leave rent locked in the account.
+    pub fn close_token_account_after_full_exit(
+        &mut self,
+        mint: &str,
+        remaining_token_amount: u64,
+        auto_recover_rent: bool,
+    ) -> Result<Option<LedgerEntry>, PaperWalletError> {
+        if !auto_recover_rent || remaining_token_amount != 0 {
+            return Ok(None);
+        }
+        self.close_token_account_and_recover_rent(mint)
+    }
+
     /// Simulate closing a token account after a fully settled zero-balance sale.
     /// A repeated close is a no-op, preventing duplicate rent credits.
     pub fn close_token_account_and_recover_rent(
@@ -249,6 +263,18 @@ mod tests {
         let after_first_close = wallet.available_balance_lamports;
         assert!(wallet.close_token_account_and_recover_rent("mint-1").unwrap().is_none());
         assert_eq!(wallet.available_balance_lamports, after_first_close);
+    }
+
+    #[test]
+    fn rent_recovery_waits_for_zero_balance_and_enabled_setting() {
+        let mut wallet = PaperWallet::default();
+        wallet.reserve_buy_for_token("mint-1", &costs()).unwrap();
+        let before = wallet.available_balance_lamports;
+        assert!(wallet.close_token_account_after_full_exit("mint-1", 1, true).unwrap().is_none());
+        assert!(wallet.close_token_account_after_full_exit("mint-1", 0, false).unwrap().is_none());
+        assert_eq!(wallet.available_balance_lamports, before);
+        assert!(wallet.close_token_account_after_full_exit("mint-1", 0, true).unwrap().is_some());
+        assert_eq!(wallet.locked_rent_lamports, 0);
     }
 
     #[test]
