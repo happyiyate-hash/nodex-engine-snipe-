@@ -22,7 +22,9 @@ use nodex_solana::{
     StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::{
-    main_bot::{capture_position_risk, evaluate_position_exit, PositionRiskPolicy, TradingBotConfig},
+    main_bot::{
+        capture_position_risk, evaluate_position_exit, PositionRiskPolicy, TradingBotConfig,
+    },
     paper_wallet::{PaperWallet, LAMPORTS_PER_SOL},
 };
 use serde::{Deserialize, Serialize};
@@ -499,19 +501,40 @@ fn start_token_state_projector(
                                     if let Ok(mut policy) =
                                         serde_json::from_value::<PositionRiskPolicy>(value)
                                     {
-                                        let trigger = evaluate_position_exit(&mut policy, price_sol);
+                                        let trigger =
+                                            evaluate_position_exit(&mut policy, price_sol);
                                         if let Some(object) = position.as_object_mut() {
                                             object.insert(
                                                 "risk_policy".into(),
-                                                serde_json::to_value(&policy).unwrap_or(serde_json::Value::Null),
+                                                serde_json::to_value(&policy)
+                                                    .unwrap_or(serde_json::Value::Null),
                                             );
                                             if let Some(trigger) = trigger {
-                                                if object.get("exit_requested").and_then(serde_json::Value::as_bool) != Some(true) {
-                                                    object.insert("exit_requested".into(), json!(true));
-                                                    object.insert("exit_trigger_reason".into(), json!(trigger.reason));
-                                                    object.insert("exit_trigger_price_sol".into(), json!(trigger.trigger_price_sol));
-                                                    object.insert("exit_trigger_pnl_pct".into(), json!(trigger.pnl_pct));
-                                                    object.insert("exit_triggered_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+                                                if object
+                                                    .get("exit_requested")
+                                                    .and_then(serde_json::Value::as_bool)
+                                                    != Some(true)
+                                                {
+                                                    object.insert(
+                                                        "exit_requested".into(),
+                                                        json!(true),
+                                                    );
+                                                    object.insert(
+                                                        "exit_trigger_reason".into(),
+                                                        json!(trigger.reason),
+                                                    );
+                                                    object.insert(
+                                                        "exit_trigger_price_sol".into(),
+                                                        json!(trigger.trigger_price_sol),
+                                                    );
+                                                    object.insert(
+                                                        "exit_trigger_pnl_pct".into(),
+                                                        json!(trigger.pnl_pct),
+                                                    );
+                                                    object.insert(
+                                                        "exit_triggered_at".into(),
+                                                        json!(chrono::Utc::now().to_rfc3339()),
+                                                    );
                                                     exit_was_triggered = true;
                                                 }
                                             }
@@ -3057,39 +3080,81 @@ async fn update_position_risk(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
     if !update.stop_loss_pct.is_finite() || !(0.0..=100.0).contains(&update.stop_loss_pct) {
-        return Err((StatusCode::BAD_REQUEST, "stop_loss_pct must be between 0 and 100.".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "stop_loss_pct must be between 0 and 100.".into(),
+        ));
     }
     if !update.take_profit_pct.is_finite() || !(0.0..=1_000.0).contains(&update.take_profit_pct) {
-        return Err((StatusCode::BAD_REQUEST, "take_profit_pct must be between 0 and 1000.".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "take_profit_pct must be between 0 and 1000.".into(),
+        ));
     }
 
     let mut positions = state.portfolio_positions.write().await;
-    let index = positions.iter().position(|position| {
-        position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id.as_str())
-            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id.as_str())
-    }).ok_or((StatusCode::NOT_FOUND, "Paper position was not found.".to_string()))?;
+    let index = positions
+        .iter()
+        .position(|position| {
+            position
+                .get("position_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(position_id.as_str())
+                || position.get("id").and_then(serde_json::Value::as_str)
+                    == Some(position_id.as_str())
+        })
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Paper position was not found.".to_string(),
+        ))?;
 
     let mut updated = positions[index].clone();
-    let status = updated.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let status = updated
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
     if !status.eq_ignore_ascii_case("open") {
-        return Err((StatusCode::CONFLICT, "Risk settings can only be changed for an open position.".into()));
+        return Err((
+            StatusCode::CONFLICT,
+            "Risk settings can only be changed for an open position.".into(),
+        ));
     }
-    if updated.get("exit_requested").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Err((StatusCode::CONFLICT, "An exit has already been triggered for this position. Its risk policy cannot be changed.".into()));
+    if updated
+        .get("exit_requested")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "An exit has already been triggered for this position.".into(),
+        ));
     }
     let risk_value = updated.get("risk_policy").cloned();
     let mut policy: PositionRiskPolicy = if let Some(value) = risk_value {
-        serde_json::from_value(value)
-            .map_err(|error| (StatusCode::CONFLICT, format!("Saved position risk policy is invalid: {error}")))?
+        serde_json::from_value(value).map_err(|error| {
+            (
+                StatusCode::CONFLICT,
+                format!("Saved position risk policy is invalid: {error}"),
+            )
+        })?
     } else {
         // Older open positions may predate per-position policies. Bootstrap one
         // from their original fill and current trailing-stop configuration.
-        let entry_sol = updated.get("entry_price_sol").and_then(serde_json::Value::as_f64)
-            .or_else(|| updated.get("average_entry_price_sol").and_then(serde_json::Value::as_f64))
+        let entry_sol = updated
+            .get("entry_price_sol")
+            .and_then(serde_json::Value::as_f64)
+            .or_else(|| {
+                updated
+                    .get("average_entry_price_sol")
+                    .and_then(serde_json::Value::as_f64)
+            })
             .unwrap_or(0.0);
         let sol_usd = state.sol_price.read().await.price_usd;
-        let entry_usd = updated.get("entry_price_usd").and_then(serde_json::Value::as_f64)
-            .filter(|value| *value > 0.0).unwrap_or(entry_sol * sol_usd);
+        let entry_usd = updated
+            .get("entry_price_usd")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| *value > 0.0)
+            .unwrap_or(entry_sol * sol_usd);
         let settings = state.trading_settings.read().await.clone();
         let mut config = main_bot_config_from_settings(&settings, sol_usd);
         config.stop_loss_pct = update.stop_loss_pct;
@@ -3111,27 +3176,66 @@ async fn update_position_risk(
         StatusCode::INTERNAL_SERVER_ERROR,
         "Stored paper position is not a JSON object.".to_string(),
     ))?;
-    object.insert("risk_policy".into(), serde_json::to_value(&policy).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?);
+    object.insert(
+        "risk_policy".into(),
+        serde_json::to_value(&policy)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
     object.insert("stop_loss_pct".into(), json!(policy.stop_loss_pct));
     object.insert("take_profit_pct".into(), json!(policy.take_profit_pct));
-    object.insert("stop_loss_price_sol".into(), json!(policy.stop_loss_price_sol));
-    object.insert("take_profit_price_sol".into(), json!(policy.take_profit_price_sol));
-    object.insert("stop_loss_price_usd".into(), json!(policy.stop_loss_price_usd));
-    object.insert("take_profit_price_usd".into(), json!(policy.take_profit_price_usd));
+    object.insert(
+        "stop_loss_price_sol".into(),
+        json!(policy.stop_loss_price_sol),
+    );
+    object.insert(
+        "take_profit_price_sol".into(),
+        json!(policy.take_profit_price_sol),
+    );
+    object.insert(
+        "stop_loss_price_usd".into(),
+        json!(policy.stop_loss_price_usd),
+    );
+    object.insert(
+        "take_profit_price_usd".into(),
+        json!(policy.take_profit_price_usd),
+    );
 
-    let mint = updated.get("mint_address").and_then(serde_json::Value::as_str)
+    let mint = updated
+        .get("mint_address")
+        .and_then(serde_json::Value::as_str)
         .or_else(|| updated.get("mint").and_then(serde_json::Value::as_str))
-        .ok_or((StatusCode::CONFLICT, "Position is missing its mint address.".to_string()))?
+        .ok_or((
+            StatusCode::CONFLICT,
+            "Position is missing its mint address.".to_string(),
+        ))?
         .to_string();
-    nodex_persistence::save_portfolio_position(&state.database, &position_id, &mint, "open", &updated)
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist position risk update: {error}")))?;
+    nodex_persistence::save_portfolio_position(
+        &state.database,
+        &position_id,
+        &mint,
+        "open",
+        &updated,
+    )
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not persist position risk update: {error}"),
+        )
+    })?;
 
     positions[index] = updated.clone();
     drop(positions);
-    let _ = state.events.send(json!({"type":"position_updated","data":updated.clone()}));
-    let _ = state.database_changes.send(json!({"type":"position_risk_updated","data":updated.clone()})).await;
-    Ok(Json(json!({"status":"ok","position":updated,"risk_policy":policy})))
+    let _ = state
+        .events
+        .send(json!({"type":"position_updated","data":updated.clone()}));
+    let _ = state
+        .database_changes
+        .send(json!({"type":"position_risk_updated","data":updated.clone()}))
+        .await;
+    Ok(Json(
+        json!({"status":"ok","position":updated,"risk_policy":policy}),
+    ))
 }
 
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -4084,7 +4188,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/paper-wallet", get(paper_wallet))
         .route("/api/v1/market/sol-price", get(sol_price))
         .route("/api/v1/portfolio/balance", get(portfolio_balance))
-        .route("/api/v1/portfolio/positions/:position_id/risk", put(update_position_risk))
+        .route(
+            "/api/v1/portfolio/positions/:position_id/risk",
+            put(update_position_risk),
+        )
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/creators/intelligence", get(creator_intelligence))
