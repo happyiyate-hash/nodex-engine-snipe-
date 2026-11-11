@@ -2720,6 +2720,21 @@ async fn recent_launches(
     Ok(Json(launches))
 }
 
+async fn creator_intelligence(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<nodex_persistence::creator_intelligence::CreatorIntelligence>>, (StatusCode, String)> {
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let creators = nodex_persistence::creator_intelligence::list(&state.database, limit)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(creators))
+}
+
 async fn engine_activity_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3821,6 +3836,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/portfolio/balance", get(portfolio_balance))
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
+        .route("/api/v1/creators/intelligence", get(creator_intelligence))
         .route("/api/v1/tokens/:mint/state", get(token_state))
         .route(
             "/api/v1/tokens/:mint/metadata/refresh",
