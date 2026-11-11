@@ -1125,56 +1125,124 @@ fn start_token_state_projector(
                 .get(mint)
                 .and_then(|snapshot| snapshot.data.get("security").cloned());
             let activity_patch = match kind {
-                "token_scan_started" => Some(json!({"status":"scanning","label":"Scanning","progress":0,"stage":"initializing"})),
-                "token_scan_progress" => Some(json!({
-                    "status":"scanning","label":"Scanning",
-                    "progress":data.get("progress").cloned().unwrap_or(json!(0)),
-                    "stage":data.get("stage").cloned().unwrap_or(json!("security_checks"))
+                "token_scan_started" => Some(json!({
+                    "status": "scanning",
+                    "label": "Scanning",
+                    "progress": 0,
+                    "stage": "initializing"
                 })),
-                "token_scan_completed" | "token_scan_update" => {
-                    let decision = data.get("decision").and_then(serde_json::Value::as_str).unwrap_or_default().to_ascii_lowercase();
+                "token_scan_progress" => Some(json!({
+                    "status": "scanning",
+                    "label": "Scanning",
+                    "progress": data.get("progress").cloned().unwrap_or(json!(0)),
+                    "stage": data.get("stage").cloned().unwrap_or(json!("security_checks"))
+                })),
+                "token_scan_completed" => {
+                    let decision = data
+                        .get("decision")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
                     if decision.contains("approv") || decision.contains("qualif") {
-                        Some(json!({"status":"verified","label":"Verified","progress":100,"stage":"security_complete"}))
+                        Some(json!({
+                            "status": "verified",
+                            "label": "Verified",
+                            "progress": 100,
+                            "stage": "security_complete"
+                        }))
                     } else if decision.contains("reject") {
-                        Some(json!({"status":"rejected","label":"Rejected","progress":100,"stage":"security_complete"}))
+                        Some(json!({
+                            "status": "rejected",
+                            "label": "Rejected",
+                            "progress": 100,
+                            "stage": "security_complete"
+                        }))
                     } else if decision.contains("unverified") || decision.contains("unknown") {
-                        Some(json!({"status":"unverified","label":"Unverified","progress":100,"stage":"security_complete"}))
-                    } else { None }
+                        Some(json!({
+                            "status": "unverified",
+                            "label": "Unverified",
+                            "progress": 100,
+                            "stage": "security_complete"
+                        }))
+                    } else {
+                        None
+                    }
                 }
-                "token_scan_failed" => Some(json!({"status":"failed","label":"Scan failed","progress":100,"stage":"security_failed"})),
-                "token_monitoring_started" | "token_monitoring_update" => Some(json!({"status":"monitoring","label":"Monitoring","stage":"market_watch"})),
-                "market_subscription_requested" | "market_subscription_waiting" => Some(json!({"status":"monitoring","label":"Monitoring","stage":"waiting_for_market_feed"})),
-                "market_subscription_active" => Some(json!({"status":"monitoring","label":"Monitoring","stage":"market_feed_active"})),
-                "paper_entry_evaluation" => Some(json!({"status":"evaluating","label":"Evaluating entry","stage":"strategy_checks"})),
-                "paper_buy_executed" => Some(json!({"status":"bought_paper","label":"Paper buy executed","stage":"position_open"})),
-                "paper_buy_failed" => Some(json!({"status":"buy_failed","label":"Buy failed","stage":"entry_failed"})),
-                "paper_sell_executed" => Some(json!({"status":"closed","label":"Position closed","stage":"position_closed"})),
+                "token_scan_failed" => Some(json!({
+                    "status": "failed",
+                    "label": "Scan failed",
+                    "progress": 100,
+                    "stage": "security_failed"
+                })),
+                "token_monitoring_started" | "token_monitoring_update" => Some(json!({
+                    "status": "monitoring",
+                    "label": "Monitoring",
+                    "stage": "market_watch"
+                })),
+                "market_subscription_requested" | "market_subscription_waiting" => Some(json!({
+                    "status": "monitoring",
+                    "label": "Monitoring",
+                    "stage": "waiting_for_market_feed"
+                })),
+                "market_subscription_active" => Some(json!({
+                    "status": "monitoring",
+                    "label": "Monitoring",
+                    "stage": "market_feed_active"
+                })),
+                "paper_entry_evaluation" => Some(json!({
+                    "status": "evaluating",
+                    "label": "Evaluating entry",
+                    "stage": "strategy_checks"
+                })),
+                "paper_buy_executed" => Some(json!({
+                    "status": "bought_paper",
+                    "label": "Paper buy executed",
+                    "stage": "position_open"
+                })),
+                "paper_buy_failed" => Some(json!({
+                    "status": "buy_failed",
+                    "label": "Buy failed",
+                    "stage": "entry_failed"
+                })),
+                "paper_sell_executed" => Some(json!({
+                    "status": "closed",
+                    "label": "Position closed",
+                    "stage": "position_closed"
+                })),
                 _ => None,
             };
-            let domain_patch = match kind {
+            let mut domain_patch = match kind {
                 "token_scan_started" | "token_scan_progress" => {
                     scan_progress_security_patch(current_security.as_ref(), &data)
                 }
-                "token_scan_update" => json!({"security":data}),
-                "creator_history_update" => {
-                    json!({"security":{"creator_history":data.get("history").cloned().unwrap_or(serde_json::Value::Null)}})
-                }
-                "market_price_update" => json!({"market":data}),
-                "pumpswap_volume_update" => json!({"statistics":{"pumpswap_volume":data}}),
-                "token_scan_completed" | "token_scan_failed" | "token_monitoring_started" | "token_monitoring_update"
-                | "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_active"
-                | "paper_entry_evaluation" | "paper_buy_executed" | "paper_buy_failed" | "paper_sell_executed" => {
-                    json!({"activity":activity_patch.clone().unwrap_or_else(|| json!({}))})
-                }
+                "creator_history_update" => json!({
+                    "security": {
+                        "creator_history": data
+                            .get("history")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)
+                    }
+                }),
+                "market_price_update" => json!({"market": data}),
+                "pumpswap_volume_update" => json!({
+                    "statistics": {"pumpswap_volume": data}
+                }),
+                "token_scan_completed"
+                | "token_scan_failed"
+                | "token_monitoring_started"
+                | "token_monitoring_update"
+                | "market_subscription_requested"
+                | "market_subscription_waiting"
+                | "market_subscription_active"
+                | "paper_entry_evaluation"
+                | "paper_buy_executed"
+                | "paper_buy_failed"
+                | "paper_sell_executed" => json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))}),
                 _ => continue,
             };
-            let domain_patch = if let Some(activity) = activity_patch {
-                if matches!(kind, "token_scan_started" | "token_scan_progress" | "token_scan_update") {
-                    let mut patch = domain_patch;
-                    patch["activity"] = activity;
-                    patch
-                } else { domain_patch }
-            } else { domain_patch };
+            if let Some(activity) = activity_patch {
+                domain_patch["activity"] = activity;
+            }
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
                     // Price ticks are runtime state, not durable history. Persist only
