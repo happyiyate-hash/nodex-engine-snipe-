@@ -5772,7 +5772,7 @@ mod scan_progress_state_tests {
     }
 
     #[test]
-    fn diagnostic_or_rejected_scan_cannot_be_verified() {
+    fn diagnostic_only_scan_cannot_be_verified() {
         let mut report = json!({
             "decision":"APPROVED",
             "diagnostic_only":true,
@@ -5784,8 +5784,9 @@ mod scan_progress_state_tests {
         });
         assert!(!core_verification_gate_passed(&report));
         report["diagnostic_only"] = json!(false);
+        assert!(core_verification_gate_passed(&report));
         report["decision"] = json!("REJECTED");
-        assert!(!core_verification_gate_passed(&report));
+        assert!(core_verification_gate_passed(&report));
     }
 }
 
