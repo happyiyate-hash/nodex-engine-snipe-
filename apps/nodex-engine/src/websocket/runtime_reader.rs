@@ -67,6 +67,16 @@ fn has_open_position(positions: &[Value], mint: &str) -> bool {
     })
 }
 
+pub(super) fn enforce_exact_mint(mut event: Value) -> Option<Value> {
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    if !TOKEN_SCOPED_EVENTS.contains(&event_type) {
+        return Some(event);
+    }
+    let mint = event_mint(&event)?;
+    attach_exact_mint(&mut event, &mint);
+    Some(event)
+}
+
 pub(super) fn spawn(
     mut runtime_events: broadcast::Receiver<Value>,
     frontend_events: broadcast::Sender<Value>,
@@ -78,13 +88,11 @@ pub(super) fn spawn(
                 Ok(mut event) => {
                     if !super::is_frontend_event(&event) { continue; }
                     let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
-                    if TOKEN_SCOPED_EVENTS.contains(&event_type) {
-                        let Some(mint) = event_mint(&event) else {
-                            tracing::warn!(event_type, "Dropped token-scoped event without exact mint address");
-                            continue;
-                        };
-                        attach_exact_mint(&mut event, &mint);
-                    }
+                    let Some(prepared_event) = enforce_exact_mint(event) else {
+                        tracing::warn!(event_type, "Dropped token-scoped event without exact mint address");
+                        continue;
+                    };
+                    event = prepared_event;
                     if POSITION_SCOPED_MARKET_EVENTS.contains(&event_type) {
                         let Some(mint) = event_mint(&event) else { continue; };
                         let positions = portfolio_positions.read().await;
