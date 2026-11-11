@@ -59,6 +59,18 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         .execute(&pool)
         .await?;
     }
+    // Persist per-token-account rent reservations so automatic rent recovery
+    // remains correct after the paper wallet is restored on restart.
+    let has_rent_by_token_account = wallet_columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "rent_by_token_account_json");
+    if !has_rent_by_token_account {
+        sqlx::query(
+            "ALTER TABLE paper_wallets ADD COLUMN rent_by_token_account_json TEXT NOT NULL DEFAULT '{}'",
+        )
+        .execute(&pool)
+        .await?;
+    }
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS paper_ledger (
             id TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL, amount_lamports INTEGER NOT NULL,
@@ -730,7 +742,7 @@ pub async fn list_recent_launches(pool: &SqlitePool, limit: u32) -> Result<Vec<s
 /// Restore the persisted paper wallet without mixing it with the on-chain wallet.
 pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>> {
     let row = sqlx::query(
-        "SELECT starting_balance_lamports, starting_sol_price_usd, available_balance_lamports, invested_balance_lamports, locked_rent_lamports, total_network_fees_lamports, total_priority_fees_lamports, total_swap_fees_lamports, total_rent_refunded_lamports FROM paper_wallets WHERE id = 'default'",
+        "SELECT starting_balance_lamports, starting_sol_price_usd, available_balance_lamports, invested_balance_lamports, locked_rent_lamports, total_network_fees_lamports, total_priority_fees_lamports, total_swap_fees_lamports, total_rent_refunded_lamports, rent_by_token_account_json FROM paper_wallets WHERE id = 'default'",
     )
     .fetch_optional(pool)
     .await?;
@@ -758,6 +770,9 @@ pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>>
             total_rent_refunded_lamports: u64::try_from(
                 row.get::<i64, _>("total_rent_refunded_lamports"),
             )?,
+            rent_by_token_account: serde_json::from_str(
+                &row.get::<String, _>("rent_by_token_account_json"),
+            )?,
         })
     })
     .transpose()
@@ -770,8 +785,9 @@ pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Resul
             id, starting_balance_lamports, starting_sol_price_usd, available_balance_lamports,
             invested_balance_lamports, locked_rent_lamports,
             total_network_fees_lamports, total_priority_fees_lamports,
-            total_swap_fees_lamports, total_rent_refunded_lamports, updated_at
-        ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            total_swap_fees_lamports, total_rent_refunded_lamports,
+            rent_by_token_account_json, updated_at
+        ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             starting_balance_lamports=excluded.starting_balance_lamports,
             starting_sol_price_usd=excluded.starting_sol_price_usd,
@@ -782,6 +798,7 @@ pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Resul
             total_priority_fees_lamports=excluded.total_priority_fees_lamports,
             total_swap_fees_lamports=excluded.total_swap_fees_lamports,
             total_rent_refunded_lamports=excluded.total_rent_refunded_lamports,
+            rent_by_token_account_json=excluded.rent_by_token_account_json,
             updated_at=excluded.updated_at"#,
     )
     .bind(i64::try_from(wallet.starting_balance_lamports)?)
@@ -793,6 +810,7 @@ pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Resul
     .bind(i64::try_from(wallet.total_priority_fees_lamports)?)
     .bind(i64::try_from(wallet.total_swap_fees_lamports)?)
     .bind(i64::try_from(wallet.total_rent_refunded_lamports)?)
+    .bind(serde_json::to_string(&wallet.rent_by_token_account)?)
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(pool)
     .await?;
