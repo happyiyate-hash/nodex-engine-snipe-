@@ -456,6 +456,11 @@ fn start_token_state_projector(
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
                         {
                             // Mark open positions in memory. Never read/write SQLite for every tick.
+                            let price_snapshot = sol_price.read().await.clone();
+                            let sol_usd = price_snapshot.price_usd;
+                            let usd_quote_valid = price_snapshot.status == "live"
+                                && sol_usd.is_finite()
+                                && sol_usd > 0.0;
                             let mut positions = portfolio_positions.write().await;
                             let mut triggered_positions = Vec::new();
                             for position in positions.iter_mut().filter(|position| {
@@ -478,8 +483,6 @@ fn start_token_state_projector(
                                     .unwrap_or(0.0);
                                 let current_value = quantity * price_sol;
                                 let pnl = current_value - cost_basis;
-                                let price_snapshot = sol_price.read().await.clone();
-                                let sol_usd = price_snapshot.price_usd;
                                 let entry_sol_usd = position
                                     .get("entry_sol_price_usd")
                                     .or_else(|| position.get("sol_usd_at_entry"))
@@ -492,6 +495,17 @@ fn start_token_state_projector(
                                     .and_then(serde_json::Value::as_f64)
                                     .filter(|value| value.is_finite() && *value >= 0.0)
                                     .unwrap_or(cost_basis * entry_sol_usd);
+                                let entry_price_usd = position
+                                    .get("entry_price_usd")
+                                    .and_then(serde_json::Value::as_f64)
+                                    .filter(|value| value.is_finite() && *value > 0.0)
+                                    .unwrap_or_else(|| {
+                                        position
+                                            .get("entry_price_sol")
+                                            .and_then(serde_json::Value::as_f64)
+                                            .unwrap_or(price_sol)
+                                            * entry_sol_usd
+                                    });
                                 let current_price_usd = price_sol * sol_usd;
                                 let current_value_usd = current_value * sol_usd;
                                 let pnl_usd = current_value_usd - invested_usd;
@@ -504,29 +518,18 @@ fn start_token_state_projector(
                                     object.insert("current_price_sol".into(), json!(price_sol));
                                     object.insert("current_value_sol".into(), json!(current_value));
                                     object.insert("unrealized_pnl_sol".into(), json!(pnl));
-                                    object.insert("current_price_usd".into(), json!(current_price_usd));
-                                    object.insert("entry_price_usd".into(), json!(
-                                        position.get("entry_price_usd")
-                                            .and_then(serde_json::Value::as_f64)
-                                            .filter(|value| value.is_finite() && *value > 0.0)
-                                            .unwrap_or_else(|| {
-                                                position.get("entry_price_sol")
-                                                    .and_then(serde_json::Value::as_f64)
-                                                    .unwrap_or(price_sol) * entry_sol_usd
-                                            })
-                                    ));
-                                    object.insert("initial_investment_usd".into(), json!(invested_usd));
-                                    object.insert("current_position_value_usd".into(), json!(current_value_usd));
-                                    object.insert("pnl_usd".into(), json!(pnl_usd));
-                                    object.insert("unrealized_pnl_usd".into(), json!(pnl_usd));
-                                    object.insert("pnl_pct".into(), json!(pnl_pct));
-                                    object.insert("unrealized_pnl_pct".into(), json!(pnl_pct));
-                                    object.insert("sol_price_usd_at_mark".into(), json!(sol_usd));
-                                    object.insert("sol_price_source_at_mark".into(), json!(price_snapshot.source));
-                                    object.insert(
-                                        "unrealized_pnl_sol".into(),
-                                        json!(pnl),
-                                    );
+                                    if usd_quote_valid {
+                                        object.insert("current_price_usd".into(), json!(current_price_usd));
+                                        object.insert("entry_price_usd".into(), json!(entry_price_usd));
+                                        object.insert("initial_investment_usd".into(), json!(invested_usd));
+                                        object.insert("current_position_value_usd".into(), json!(current_value_usd));
+                                        object.insert("pnl_usd".into(), json!(pnl_usd));
+                                        object.insert("unrealized_pnl_usd".into(), json!(pnl_usd));
+                                        object.insert("pnl_pct".into(), json!(pnl_pct));
+                                        object.insert("unrealized_pnl_pct".into(), json!(pnl_pct));
+                                        object.insert("sol_price_usd_at_mark".into(), json!(sol_usd));
+                                        object.insert("sol_price_source_at_mark".into(), json!(price_snapshot.source.clone()));
+                                    }
                                     object.insert(
                                         "marked_at".into(),
                                         json!(chrono::Utc::now().to_rfc3339()),
