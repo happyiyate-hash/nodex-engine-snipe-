@@ -1,3 +1,5 @@
+pub mod creator_intelligence;
+
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
 use nodex_trading::paper_wallet::PaperWallet;
@@ -20,6 +22,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         .max_connections(5)
         .connect_with(options)
         .await?;
+    creator_intelligence::initialize(&pool).await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS token_launches (
             id TEXT PRIMARY KEY NOT NULL, mint_address TEXT NOT NULL, creator_address TEXT,
