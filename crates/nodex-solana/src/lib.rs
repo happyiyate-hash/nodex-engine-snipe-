@@ -1669,6 +1669,108 @@ pub fn parse_mint_security_report(
     })
 }
 
+/// Confirmed Pump.fun TradeEvent fields needed for activity and volume analytics.
+/// The decoder consumes the stable IDL prefix and tolerates appended event fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PumpFunTradeEvent {
+    pub mint_address: String,
+    pub sol_amount_lamports: u64,
+    pub token_amount_raw: u64,
+    pub is_buy: bool,
+    pub trader_address: String,
+    pub timestamp: i64,
+}
+
+const PUMP_FUN_TRADE_EVENT_DISCRIMINATOR: [u8; 8] =
+    [189, 219, 127, 211, 78, 230, 97, 238];
+
+/// Decode Pump.fun TradeEvent logs only while the configured Pump.fun program
+/// is the active invocation. The first 89 Borsh bytes are stable in the official
+/// IDL; newer appended fields are intentionally ignored.
+pub fn decode_pump_fun_trade_logs(
+    logs: &[String],
+    target_program_id: &str,
+) -> Result<Vec<PumpFunTradeEvent>> {
+    let mut invocation_stack: Vec<(String, usize)> = Vec::new();
+    let mut decoded = Vec::new();
+
+    for line in logs {
+        if let Some(rest) = line.strip_prefix("Program ") {
+            if let Some((program_id, depth_text)) = rest.split_once(" invoke [") {
+                if let Some(depth) = depth_text
+                    .strip_suffix(']')
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    while invocation_stack
+                        .last()
+                        .is_some_and(|(_, active_depth)| *active_depth >= depth)
+                    {
+                        invocation_stack.pop();
+                    }
+                    invocation_stack.push((program_id.to_owned(), depth));
+                    continue;
+                }
+            }
+            if let Some((program_id, _)) = rest.split_once(" success") {
+                if let Some(index) = invocation_stack
+                    .iter()
+                    .rposition(|(active, _)| active == program_id)
+                {
+                    invocation_stack.truncate(index);
+                }
+                continue;
+            }
+            if let Some((program_id, _)) = rest.split_once(" failed:") {
+                if let Some(index) = invocation_stack
+                    .iter()
+                    .rposition(|(active, _)| active == program_id)
+                {
+                    invocation_stack.truncate(index);
+                }
+                continue;
+            }
+        }
+
+        if !invocation_stack
+            .last()
+            .is_some_and(|(program_id, _)| program_id == target_program_id)
+        {
+            continue;
+        }
+        let Some(encoded) = line.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            encoded.trim(),
+        )
+        .context("decoding Pump.fun TradeEvent base64")?;
+        if bytes.len() < 89 || bytes[..8] != PUMP_FUN_TRADE_EVENT_DISCRIMINATOR {
+            continue;
+        }
+        let is_buy = match bytes[48] {
+            0 => false,
+            1 => true,
+            value => return Err(anyhow!("invalid Pump.fun TradeEvent is_buy flag: {value}")),
+        };
+        decoded.push(PumpFunTradeEvent {
+            mint_address: bs58::encode(&bytes[8..40]).into_string(),
+            sol_amount_lamports: u64::from_le_bytes(
+                bytes[40..48].try_into().expect("eight-byte SOL amount"),
+            ),
+            token_amount_raw: u64::from_le_bytes(
+                bytes[48 + 1 + 32..48 + 1 + 32 + 8]
+                    .try_into()
+                    .expect("eight-byte timestamp"),
+            ),
+            is_buy,
+            trader_address: bs58::encode(&bytes[49..81]).into_string(),
+            timestamp: i64::from_le_bytes(bytes[81..89].try_into().expect("eight-byte timestamp")),
+        });
+    }
+    Ok(decoded)
+}
+
 /// A Pump.fun create/create_v2 instruction decoded from a confirmed transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedPumpFunCreate {
@@ -2538,3 +2640,59 @@ mod transaction_decoder_tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+mod pump_fun_trade_event_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_program_scoped_pump_fun_trade_event_prefix() {
+        let mint = [3u8; 32];
+        let trader = [4u8; 32];
+        let mut bytes = PUMP_FUN_TRADE_EVENT_DISCRIMINATOR.to_vec();
+        bytes.extend_from_slice(&mint);
+        bytes.extend_from_slice(&250_000_000_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_500_000_u64.to_le_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&trader);
+        bytes.extend_from_slice(&1_700_000_000_i64.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 24]); // appended IDL fields
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let logs = vec![
+            "Program PumpProgram invoke [1]".to_owned(),
+            format!("Program data: {encoded}"),
+            "Program PumpProgram success".to_owned(),
+        ];
+        let trades = decode_pump_fun_trade_logs(&logs, "PumpProgram").unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].mint_address, bs58::encode(mint).into_string());
+        assert_eq!(trades[0].trader_address, bs58::encode(trader).into_string());
+        assert_eq!(trades[0].sol_amount_lamports, 250_000_000);
+        assert_eq!(trades[0].token_amount_raw, 1_500_000);
+        assert!(trades[0].is_buy);
+        assert_eq!(trades[0].timestamp, 1_700_000_000);
+    }
+
+    #[test]
+    fn ignores_trade_event_emitted_by_nested_unrelated_program() {
+        let mut bytes = PUMP_FUN_TRADE_EVENT_DISCRIMINATOR.to_vec();
+        bytes.extend_from_slice(&[3u8; 32]);
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&[4u8; 32]);
+        bytes.extend_from_slice(&1_i64.to_le_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let logs = vec![
+            "Program PumpProgram invoke [1]".to_owned(),
+            "Program OtherProgram invoke [2]".to_owned(),
+            format!("Program data: {encoded}"),
+            "Program OtherProgram success".to_owned(),
+            "Program PumpProgram success".to_owned(),
+        ];
+        assert!(decode_pump_fun_trade_logs(&logs, "PumpProgram")
+            .unwrap()
+            .is_empty());
+    }
+}
+
