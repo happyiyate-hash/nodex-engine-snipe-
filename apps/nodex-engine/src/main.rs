@@ -578,9 +578,16 @@ async fn evaluate_and_execute_paper_entry(
             json_u64(value.get("resolved_accounts")).unwrap_or(0) >= 10
                 && json_u64(value.get("sampled_token_accounts")).unwrap_or(0) >= 10
         })
-        .and_then(|value| value.get("top_10_observed_owner_share_percent"))
-        .and_then(serde_json::Value::as_f64)
-        .map(|observed| (observed + 10.0).min(100.0));
+        .and_then(|value| {
+            let observed = value
+                .get("top_10_observed_owner_share_percent")
+                .and_then(serde_json::Value::as_f64)?;
+            let partial = value
+                .get("sample_is_partial")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            Some((observed + if partial { 10.0 } else { 0.0 }).min(100.0))
+        });
     let safety_score = rugcheck_score
         .filter(|score| score.is_finite() && (0.0..=100.0).contains(score))
         .map(|score| 100.0 - score);
