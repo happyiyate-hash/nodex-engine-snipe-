@@ -345,11 +345,18 @@ pub fn evaluate_entry(
     if market.price_change_1m_pct.is_some_and(|change| change.is_finite() && change > 12.0) {
         wait!("One-minute price expansion is too sharp; waiting for a pullback.");
     }
-    if market.price_change_5m_pct.is_some_and(|change| change.is_finite() && change > 35.0) {
+    if market
+        .price_change_5m_pct
+        .is_some_and(|change| change.is_finite() && change > 35.0)
+    {
         wait!("Five-minute price expansion is too extended; avoiding a late entry.");
     }
-    if market.price_change_1m_pct.is_some_and(|change| change.is_finite() && change < -20.0)
-        || market.price_change_5m_pct.is_some_and(|change| change.is_finite() && change < -40.0)
+    if market
+        .price_change_1m_pct
+        .is_some_and(|change| change.is_finite() && change < -20.0)
+        || market
+            .price_change_5m_pct
+            .is_some_and(|change| change.is_finite() && change < -40.0)
     {
         wait!("Recent sell pressure is too sharp; waiting for price stabilization.");
     }
@@ -504,7 +511,10 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert!(result.reasons.iter().any(|reason| reason.contains("pullback")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("pullback")));
     }
 
     #[test]
@@ -519,7 +529,10 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert!(result.reasons.iter().any(|reason| reason.contains("stabilization")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("stabilization")));
     }
 
     #[test]
