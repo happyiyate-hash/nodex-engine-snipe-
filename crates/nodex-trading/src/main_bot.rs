@@ -302,7 +302,7 @@ pub fn evaluate_entry(
             Some(true) => reject!("Creator is on the known-rug blacklist."),
             Some(false) => {}
             None => reject!(
-                "Creator rug-history status is unknown while blacklist protection is enabled.",
+                "Creator rug-history status is unknown while blacklist protection is enabled."
             ),
         }
     }
