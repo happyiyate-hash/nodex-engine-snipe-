@@ -2,7 +2,7 @@ pub mod creator_intelligence;
 
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
-use nodex_trading::paper_wallet::PaperWallet;
+use nodex_trading::paper_wallet::{LedgerEntry, PaperWallet};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     Row, SqlitePool,
@@ -814,6 +814,80 @@ pub async fn load_paper_wallet(pool: &SqlitePool) -> Result<Option<PaperWallet>>
 }
 
 /// Persist the single engine paper wallet using an atomic upsert.
+/// Commit a simulated paper buy atomically across wallet, ledger, and position rows.
+/// This function has no Solana RPC, signer, or transaction-submission dependency.
+pub async fn commit_paper_buy(
+    pool: &SqlitePool,
+    wallet: &PaperWallet,
+    ledger: &LedgerEntry,
+    position_id: &str,
+    mint: &str,
+    position: &serde_json::Value,
+) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        r#"INSERT INTO paper_wallets (
+            id, starting_balance_lamports, starting_sol_price_usd, available_balance_lamports,
+            invested_balance_lamports, locked_rent_lamports,
+            total_network_fees_lamports, total_priority_fees_lamports,
+            total_swap_fees_lamports, total_rent_refunded_lamports,
+            rent_by_token_account_json, updated_at
+        ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            starting_balance_lamports=excluded.starting_balance_lamports,
+            starting_sol_price_usd=excluded.starting_sol_price_usd,
+            available_balance_lamports=excluded.available_balance_lamports,
+            invested_balance_lamports=excluded.invested_balance_lamports,
+            locked_rent_lamports=excluded.locked_rent_lamports,
+            total_network_fees_lamports=excluded.total_network_fees_lamports,
+            total_priority_fees_lamports=excluded.total_priority_fees_lamports,
+            total_swap_fees_lamports=excluded.total_swap_fees_lamports,
+            total_rent_refunded_lamports=excluded.total_rent_refunded_lamports,
+            rent_by_token_account_json=excluded.rent_by_token_account_json,
+            updated_at=excluded.updated_at"#,
+    )
+    .bind(i64::try_from(wallet.starting_balance_lamports)?)
+    .bind(wallet.starting_sol_price_usd)
+    .bind(i64::try_from(wallet.available_balance_lamports)?)
+    .bind(i64::try_from(wallet.invested_balance_lamports)?)
+    .bind(i64::try_from(wallet.locked_rent_lamports)?)
+    .bind(i64::try_from(wallet.total_network_fees_lamports)?)
+    .bind(i64::try_from(wallet.total_priority_fees_lamports)?)
+    .bind(i64::try_from(wallet.total_swap_fees_lamports)?)
+    .bind(i64::try_from(wallet.total_rent_refunded_lamports)?)
+    .bind(serde_json::to_string(&wallet.rent_by_token_account)?)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO paper_ledger (id, kind, amount_lamports, available_after_lamports, reference, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(ledger.id.to_string())
+    .bind(&ledger.kind)
+    .bind(i64::try_from(ledger.amount_lamports)?)
+    .bind(i64::try_from(ledger.available_after_lamports)?)
+    .bind(&ledger.reference)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        r#"INSERT INTO portfolio_positions
+            (position_id, mint_address, status, payload_json, updated_at)
+        VALUES (?, ?, 'open', ?, ?)"#,
+    )
+    .bind(position_id)
+    .bind(mint)
+    .bind(serde_json::to_string(position)?)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(())
+}
+
 pub async fn save_paper_wallet(pool: &SqlitePool, wallet: &PaperWallet) -> Result<()> {
     sqlx::query(
         r#"INSERT INTO paper_wallets (
@@ -992,3 +1066,54 @@ mod portfolio_snapshot_tests {
         assert_eq!(restored, snapshot);
     }
 }
+#[cfg(test)]
+mod paper_buy_transaction_tests {
+    use super::*;
+    use nodex_trading::paper_wallet::{BuyCostBreakdown, PaperWallet, LAMPORTS_PER_SOL};
+
+    #[tokio::test]
+    async fn paper_buy_commits_wallet_ledger_and_position_together() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        let mut wallet = PaperWallet::new_with_price(100_000_000, 200.0);
+        let costs = BuyCostBreakdown {
+            token_input_lamports: 10_000_000,
+            network_fee_lamports: 0,
+            priority_fee_lamports: 0,
+            swap_fee_lamports: 0,
+            rent_reserve_lamports: 0,
+        };
+        let ledger = wallet.reserve_buy_for_token("mint-a", &costs).unwrap();
+        let position = serde_json::json!({
+            "position_id":"paper-position-1",
+            "mint_address":"mint-a",
+            "status":"open",
+            "cost_basis_sol":0.01
+        });
+
+        commit_paper_buy(
+            &pool,
+            &wallet,
+            &ledger,
+            "paper-position-1",
+            "mint-a",
+            &position,
+        )
+        .await
+        .unwrap();
+
+        let restored_wallet = load_paper_wallet(&pool).await.unwrap().unwrap();
+        let positions = load_portfolio_positions(&pool).await.unwrap();
+        let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(restored_wallet.available_balance_lamports, 90_000_000);
+        assert_eq!(restored_wallet.invested_balance_lamports, 10_000_000);
+        assert_eq!(restored_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64, 0.01);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0]["mint_address"], "mint-a");
+        assert_eq!(ledger_count, 1);
+    }
+}
+
