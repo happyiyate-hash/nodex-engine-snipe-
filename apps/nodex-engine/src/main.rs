@@ -1263,6 +1263,27 @@ fn start_token_state_projector(
                 incoming_rank > current_rank
                     || incoming_rank == current_rank && incoming_progress >= current_progress
             });
+            if activity_patch.is_none()
+                && matches!(
+                    kind,
+                    "token_scan_started"
+                        | "token_scan_progress"
+                        | "token_scan_completed"
+                        | "token_scan_failed"
+                        | "token_monitoring_started"
+                        | "token_monitoring_update"
+                        | "market_subscription_requested"
+                        | "market_subscription_waiting"
+                        | "market_subscription_active"
+                        | "paper_entry_evaluation"
+                        | "paper_buy_started"
+                        | "paper_buy_executed"
+                        | "paper_buy_failed"
+                        | "paper_sell_executed"
+                )
+            {
+                continue;
+            }
             let mut domain_patch = match kind {
                 "token_scan_started" | "token_scan_progress" => {
                     scan_progress_security_patch(current_security.as_ref(), &data)
