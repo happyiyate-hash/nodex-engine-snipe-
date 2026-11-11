@@ -79,6 +79,7 @@ struct PreferredOwner {
 struct TradingSettings {
     min_liquidity_usd: f64,
     max_entry_price_usd: f64,
+    #[serde(default, skip_serializing)]
     max_investment_per_token_sol: f64,
     max_investment_per_token_usd: f64,
     max_simultaneous_positions: u32,
