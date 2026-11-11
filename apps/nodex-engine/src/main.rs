@@ -1236,7 +1236,8 @@ fn start_token_state_projector(
                     "monitoring" => 3,
                     "evaluating" => 4,
                     "executing_buy" => 5,
-                    "rejected" | "unverified" | "failed" | "bought_paper" | "buy_failed" | "closed" => 6,
+                    "rejected" | "unverified" | "failed" | "bought_paper" | "buy_failed"
+                    | "closed" => 6,
                     _ => 0,
                 };
                 let current_status = current_activity
