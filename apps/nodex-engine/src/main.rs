@@ -3866,9 +3866,6 @@ async fn main() -> anyhow::Result<()> {
     // program-scoped Buy/Sell Anchor events; price ticks and liquidity events
     // are never counted as trades or buyers.
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
-    if let (Some(activity_rpc), false) = (rpc.clone(), config.solana_ws_urls.is_empty()) {
-        let _ = activity_rpc;
-    }
     if let Some(activity_rpc) = rpc.clone() {
         start_pumpswap_activity_processor(events.subscribe(), events.clone(), activity_rpc);
         let activity_ws_urls = config.solana_ws_urls.clone();
