@@ -44,6 +44,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("market_monitor_status")
             | Some("market_subscription_requested")
             | Some("market_subscription_active")
+            | Some("market_subscription_waiting")
             | Some("creator_history_started")
             | Some("creator_history_update")
             | Some("stream_warning")
