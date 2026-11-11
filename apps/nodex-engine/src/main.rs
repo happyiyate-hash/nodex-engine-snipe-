@@ -4834,7 +4834,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     let (database_changes, database_change_receiver) = mpsc::channel(512);
-    let gateway = websocket::Gateway::start(events.subscribe(), database_change_receiver, 4096);
+    let gateway = websocket::Gateway::start(
+        events.subscribe(),
+        database_change_receiver,
+        4096,
+        portfolio_positions.clone(),
+    );
     if let (Some(rpc_client), Some(address)) = (
         (!config.solana_http_urls.is_empty()).then(|| {
             SolanaRpc::new_with_urls(config.solana_http_urls.clone())
