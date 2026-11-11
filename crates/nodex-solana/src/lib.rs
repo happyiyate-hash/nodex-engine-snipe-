@@ -2677,7 +2677,7 @@ mod pump_fun_trade_event_tests {
         bytes.push(1);
         bytes.extend_from_slice(&[4u8; 32]);
         bytes.extend_from_slice(&1_i64.to_le_bytes());
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
         let logs = vec![
             "Program PumpProgram invoke [1]".to_owned(),
             "Program OtherProgram invoke [2]".to_owned(),
