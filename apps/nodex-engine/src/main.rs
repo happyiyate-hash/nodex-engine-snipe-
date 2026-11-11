@@ -2029,100 +2029,10 @@ fn start_pump_fun_trade_processor(
 fn start_pumpswap_activity_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
     events: broadcast::Sender<serde_json::Value>,
-    rpc: SolanaRpc,
 ) {
-    const ACTIVITY_QUEUE_CAPACITY: usize = 512;
-    const ACTIVITY_WORKER_COUNT: usize = 4;
-    let (work_tx, work_rx) = mpsc::channel::<String>(ACTIVITY_QUEUE_CAPACITY);
-    let work_rx = Arc::new(Mutex::new(work_rx));
-
-    // Keep transaction RPC work off the shared broadcast receiver. A slow
-    // getTransaction call must not block this consumer from draining the
-    // engine-wide event channel and dropping unrelated market/launch events.
-    for _ in 0..ACTIVITY_WORKER_COUNT {
-        let work_rx = work_rx.clone();
-        let worker_events = events.clone();
-        let worker_rpc = rpc.clone();
-        tokio::spawn(async move {
-            loop {
-                let signature = { work_rx.lock().await.recv().await };
-                let Some(signature) = signature else {
-                    break;
-                };
-                let transaction = match worker_rpc.get_transaction(&signature).await {
-                    Ok(Some(transaction)) => transaction,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        tracing::warn!(%error, signature, "Could not fetch PumpSwap transaction for activity decoding");
-                        continue;
-                    }
-                };
-                if !transaction
-                    .pointer("/meta/err")
-                    .is_some_and(serde_json::Value::is_null)
-                {
-                    continue;
-                }
-                let logs = transaction
-                    .pointer("/meta/logMessages")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if logs.is_empty() {
-                    continue;
-                }
-                let decoded = match decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID) {
-                    Ok(events) => events,
-                    Err(error) => {
-                        tracing::warn!(%error, signature, "PumpSwap activity event decoding failed");
-                        continue;
-                    }
-                };
-                for activity in decoded {
-                    let (kind, timestamp, pool, user, base_amount, quote_amount) = match activity {
-                        PumpSwapActivityEvent::Buy {
-                            timestamp,
-                            pool,
-                            user,
-                            base_amount,
-                            quote_amount,
-                        } => ("buy", timestamp, pool, user, base_amount, quote_amount),
-                        PumpSwapActivityEvent::Sell {
-                            timestamp,
-                            pool,
-                            user,
-                            base_amount,
-                            quote_amount,
-                        } => ("sell", timestamp, pool, user, base_amount, quote_amount),
-                        PumpSwapActivityEvent::Deposit { .. }
-                        | PumpSwapActivityEvent::Withdraw { .. } => continue,
-                    };
-                    let _ = worker_events.send(json!({
-                        "type":"pumpswap_trade_activity",
-                        "data":{
-                            "signature":signature,
-                            "event_type":kind,
-                            "timestamp":timestamp,
-                            "pool_address":pool,
-                            "trader_address":user,
-                            "base_amount_raw":base_amount.to_string(),
-                            "quote_amount_raw":quote_amount.to_string(),
-                            "evidence":"confirmed_transaction_program_scoped_anchor_event",
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }
-                    }));
-                }
-            }
-        });
-    }
-
-    // This loop performs only cheap filtering and non-blocking queue insertion.
+    // logsNotification already contains the confirmed transaction's program
+    // logs. Decode those directly instead of issuing one getTransaction RPC
+    // request per PumpSwap swap; the old fan-out was exhausting provider quotas.
     let mut seen = HashSet::<String>::new();
     tokio::spawn(async move {
         loop {
@@ -2165,27 +2075,69 @@ fn start_pumpswap_activity_processor(
             if seen.contains(&signature) {
                 continue;
             }
-            match work_tx.try_send(signature.clone()) {
-                Ok(()) => {
-                    seen.insert(signature.clone());
-                    if seen.len() > 20_000 {
-                        seen.clear();
-                        seen.insert(signature);
-                    }
-                }
+            let logs = value
+                .get("logs")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if logs.is_empty() {
+                continue;
+            }
+            let decoded = match decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID) {
+                Ok(events) => events,
                 Err(error) => {
-                    let _ = events.send(json!({
-                        "type":"diagnostic",
-                        "data":{
-                            "severity":"warning",
-                            "component":"pumpswap_activity_queue",
-                            "message":format!("Could not enqueue PumpSwap activity transaction: {error}"),
-                            "signature":signature,
-                            "queue_capacity":ACTIVITY_QUEUE_CAPACITY,
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }
-                    }));
+                    tracing::warn!(%error, signature, "PumpSwap activity event decoding failed");
+                    continue;
                 }
+            };
+            seen.insert(signature.clone());
+            if seen.len() > 20_000 {
+                seen.clear();
+                seen.insert(signature.clone());
+            }
+            let slot = notification
+                .pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64);
+            for activity in decoded {
+                let (kind, timestamp, pool, user, base_amount, quote_amount) = match activity {
+                    PumpSwapActivityEvent::Buy {
+                        timestamp,
+                        pool,
+                        user,
+                        base_amount,
+                        quote_amount,
+                    } => ("buy", timestamp, pool, user, base_amount, quote_amount),
+                    PumpSwapActivityEvent::Sell {
+                        timestamp,
+                        pool,
+                        user,
+                        base_amount,
+                        quote_amount,
+                    } => ("sell", timestamp, pool, user, base_amount, quote_amount),
+                    PumpSwapActivityEvent::Deposit { .. }
+                    | PumpSwapActivityEvent::Withdraw { .. } => continue,
+                };
+                let _ = events.send(json!({
+                    "type":"pumpswap_trade_activity",
+                    "data":{
+                        "signature":signature,
+                        "slot":slot,
+                        "event_type":kind,
+                        "timestamp":timestamp,
+                        "pool_address":pool,
+                        "trader_address":user,
+                        "base_amount_raw":base_amount.to_string(),
+                        "quote_amount_raw":quote_amount.to_string(),
+                        "evidence":"confirmed_program_scoped_logs_notification",
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
+                }));
             }
         }
     });
@@ -5101,8 +5053,8 @@ async fn main() -> anyhow::Result<()> {
     // program-scoped Buy/Sell Anchor events; price ticks and liquidity events
     // are never counted as trades or buyers.
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
-    if let Some(activity_rpc) = rpc.clone() {
-        start_pumpswap_activity_processor(events.subscribe(), events.clone(), activity_rpc);
+    if !config.solana_ws_urls.is_empty() {
+        start_pumpswap_activity_processor(events.subscribe(), events.clone());
         let activity_ws_urls = config.solana_ws_urls.clone();
         let activity_events = events.clone();
         let activity_status = pumpswap_status.clone();
