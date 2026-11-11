@@ -20,18 +20,26 @@ fn event_mint(event: &Value) -> Option<&str> {
         .or_else(|| data.get("token_mint"))
         .or_else(|| data.get("base_mint"))
         .or_else(|| data.get("mint"))
-        .or_else(|| data.get("position").and_then(|position| {
-            position.get("mint_address").or_else(|| position.get("mint"))
-        }))
+        .or_else(|| {
+            data.get("position").and_then(|position| {
+                position
+                    .get("mint_address")
+                    .or_else(|| position.get("mint"))
+            })
+        })
         .and_then(Value::as_str)
 }
 
 fn has_open_position(positions: &[Value], mint: &str) -> bool {
     positions.iter().any(|position| {
-        let position_mint = position.get("mint_address")
+        let position_mint = position
+            .get("mint_address")
             .or_else(|| position.get("mint"))
             .and_then(Value::as_str);
-        let status = position.get("status").and_then(Value::as_str).unwrap_or("open");
+        let status = position
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("open");
         position_mint == Some(mint) && status.eq_ignore_ascii_case("open")
     })
 }
