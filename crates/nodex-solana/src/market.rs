@@ -12,7 +12,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
-const MAX_MARKET_SUBSCRIPTIONS: usize = 300;
+// Bound account subscriptions to the upper end of the workstation's 100–500 token target.
+const MAX_MARKET_SUBSCRIPTIONS: usize = 500;
 const MARKET_COMMAND_CAPACITY: usize = 512;
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
