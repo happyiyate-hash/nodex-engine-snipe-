@@ -164,10 +164,11 @@ impl PaperWallet {
         &mut self,
         mint: &str,
     ) -> Result<Option<LedgerEntry>, PaperWalletError> {
-        let Some(amount) = self.rent_by_token_account.remove(mint) else {
+        let Some(amount) = self.rent_by_token_account.get(mint).copied() else {
             return Ok(None);
         };
         let entry = self.refund_rent(amount)?;
+        self.rent_by_token_account.remove(mint);
         Ok(Some(LedgerEntry { reference: Some(mint.to_owned()), ..entry }))
     }
 
