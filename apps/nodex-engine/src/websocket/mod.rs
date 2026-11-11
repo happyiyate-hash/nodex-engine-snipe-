@@ -18,9 +18,10 @@ impl Gateway {
         runtime_events: broadcast::Receiver<Value>,
         database_changes: mpsc::Receiver<Value>,
         capacity: usize,
+        portfolio_positions: std::sync::Arc<tokio::sync::RwLock<Vec<Value>>>,
     ) -> Self {
         let (frontend_events, _) = broadcast::channel(capacity.max(64));
-        runtime_reader::spawn(runtime_events, frontend_events.clone());
+        runtime_reader::spawn(runtime_events, frontend_events.clone(), portfolio_positions);
         sqlite_reader::spawn(database_changes, frontend_events.clone());
         Self { frontend_events }
     }
