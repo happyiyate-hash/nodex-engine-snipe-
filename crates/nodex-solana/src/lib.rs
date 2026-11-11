@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
 use std::{
-    collections::HashMap,
     str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
