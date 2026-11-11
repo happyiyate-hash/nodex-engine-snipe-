@@ -1348,10 +1348,7 @@ fn start_token_state_projector(
                                 .get("diagnostic_only")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
-                            && security
-                                .get("verification_gate_passed")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or_else(|| core_verification_gate_passed(security))
+                            && core_verification_gate_passed(security)
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
@@ -1392,10 +1389,7 @@ fn start_token_state_projector(
                                 .get("diagnostic_only")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
-                            && security
-                                .get("verification_gate_passed")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or_else(|| core_verification_gate_passed(security))
+                            && core_verification_gate_passed(security)
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
@@ -4572,10 +4566,9 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
             let mut value = snapshot.data;
             if let Some(fields) = value.as_object_mut() {
                 let security = fields.get("security").cloned().unwrap_or_else(|| json!({}));
-                let verified = security
-                    .get("verification_gate_passed")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or_else(|| core_verification_gate_passed(&security));
+                // Recompute from the three authoritative checks so a stale
+                // legacy flag cannot mislabel a token in the profile snapshot.
+                let verified = core_verification_gate_passed(&security);
                 let rejected = security
                     .get("decision")
                     .and_then(serde_json::Value::as_str)
