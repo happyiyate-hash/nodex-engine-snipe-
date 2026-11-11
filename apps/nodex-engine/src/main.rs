@@ -493,7 +493,7 @@ fn start_token_state_projector(
                                     .get("initial_investment_usd")
                                     .or_else(|| position.get("cost_basis_usd"))
                                     .and_then(serde_json::Value::as_f64)
-                                    .filter(|value| value.is_finite() && *value >= 0.0)
+                                    .filter(|value| value.is_finite() && *value > 0.0)
                                     .unwrap_or(cost_basis * entry_sol_usd);
                                 let entry_price_usd = position
                                     .get("entry_price_usd")
@@ -519,16 +519,32 @@ fn start_token_state_projector(
                                     object.insert("current_value_sol".into(), json!(current_value));
                                     object.insert("unrealized_pnl_sol".into(), json!(pnl));
                                     if usd_quote_valid {
-                                        object.insert("current_price_usd".into(), json!(current_price_usd));
-                                        object.insert("entry_price_usd".into(), json!(entry_price_usd));
-                                        object.insert("initial_investment_usd".into(), json!(invested_usd));
-                                        object.insert("current_position_value_usd".into(), json!(current_value_usd));
+                                        object.insert(
+                                            "current_price_usd".into(),
+                                            json!(current_price_usd),
+                                        );
+                                        object.insert(
+                                            "entry_price_usd".into(),
+                                            json!(entry_price_usd),
+                                        );
+                                        object.insert(
+                                            "initial_investment_usd".into(),
+                                            json!(invested_usd),
+                                        );
+                                        object.insert(
+                                            "current_position_value_usd".into(),
+                                            json!(current_value_usd),
+                                        );
                                         object.insert("pnl_usd".into(), json!(pnl_usd));
                                         object.insert("unrealized_pnl_usd".into(), json!(pnl_usd));
                                         object.insert("pnl_pct".into(), json!(pnl_pct));
                                         object.insert("unrealized_pnl_pct".into(), json!(pnl_pct));
-                                        object.insert("sol_price_usd_at_mark".into(), json!(sol_usd));
-                                        object.insert("sol_price_source_at_mark".into(), json!(price_snapshot.source.clone()));
+                                        object
+                                            .insert("sol_price_usd_at_mark".into(), json!(sol_usd));
+                                        object.insert(
+                                            "sol_price_source_at_mark".into(),
+                                            json!(price_snapshot.source.clone()),
+                                        );
                                     }
                                     object.insert(
                                         "marked_at".into(),
