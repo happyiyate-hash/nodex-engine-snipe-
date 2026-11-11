@@ -22,7 +22,7 @@ use nodex_solana::{
     StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::{
-    main_bot::TradingBotConfig,
+    main_bot::{evaluate_position_exit, PositionRiskPolicy, TradingBotConfig},
     paper_wallet::{PaperWallet, LAMPORTS_PER_SOL},
 };
 use serde::{Deserialize, Serialize};
@@ -490,6 +490,36 @@ fn start_token_state_projector(
                                         "marked_at".into(),
                                         json!(chrono::Utc::now().to_rfc3339()),
                                     );
+                                }
+                                // Each open position carries its own frozen exit policy.
+                                // A trigger is recorded once for this position only; it does
+                                // not change or close any other token's position.
+                                let risk_value = position.get("risk_policy").cloned();
+                                if let Some(value) = risk_value {
+                                    if let Ok(mut policy) =
+                                        serde_json::from_value::<PositionRiskPolicy>(value)
+                                    {
+                                        let trigger = evaluate_position_exit(&mut policy, price_sol);
+                                        if let Some(object) = position.as_object_mut() {
+                                            object.insert(
+                                                "risk_policy".into(),
+                                                serde_json::to_value(&policy).unwrap_or(serde_json::Value::Null),
+                                            );
+                                            if let Some(trigger) = trigger {
+                                                if object.get("exit_requested").and_then(serde_json::Value::as_bool) != Some(true) {
+                                                    object.insert("exit_requested".into(), json!(true));
+                                                    object.insert("exit_trigger_reason".into(), json!(trigger.reason));
+                                                    object.insert("exit_trigger_price_sol".into(), json!(trigger.trigger_price_sol));
+                                                    object.insert("exit_trigger_pnl_pct".into(), json!(trigger.pnl_pct));
+                                                    object.insert("exit_triggered_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+                                                    let _ = events.send(json!({
+                                                        "type":"paper_exit_triggered",
+                                                        "data":position.clone()
+                                                    }));
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 let _ = events.send(
                                     json!({"type":"position_updated","data":position.clone()}),
