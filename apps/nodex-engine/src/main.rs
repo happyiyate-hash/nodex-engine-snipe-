@@ -434,7 +434,7 @@ fn start_token_state_projector(
             let domain_patch = match kind {
                 "token_scan_started" | "token_scan_progress" => {
                     scan_progress_security_patch(current_security.as_ref(), &data)
-                },
+                }
                 "token_scan_update" => json!({"security":data}),
                 "creator_history_update" => {
                     json!({"security":{"creator_history":data.get("history").cloned().unwrap_or(serde_json::Value::Null)}})
