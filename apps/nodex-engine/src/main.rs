@@ -4428,6 +4428,7 @@ mod portfolio_accounting_tests {
             total_priority_fees_lamports: 0,
             total_swap_fees_lamports: 0,
             total_rent_refunded_lamports: 0,
+            rent_by_token_account: HashMap::new(),
         };
         let positions = vec![json!({
             "mint_address":"token",
