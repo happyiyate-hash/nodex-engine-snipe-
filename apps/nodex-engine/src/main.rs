@@ -4377,14 +4377,14 @@ mod main_bot_config_tests {
     }
 
     #[test]
-    fn sol_position_size_is_used_when_usd_size_is_not_configured() {
+    fn usd_position_size_is_canonical_and_converted_to_sol() {
         let settings = TradingSettings::default();
         let config = main_bot_config_from_settings(&settings, 200.0);
+        assert_eq!(config.position_size_usd, settings.max_investment_per_token_usd);
         assert_eq!(
             config.position_size_sol,
-            settings.max_investment_per_token_sol
+            settings.max_investment_per_token_usd / 200.0
         );
-        assert_eq!(config.position_size_usd, 0.0);
     }
 }
 
