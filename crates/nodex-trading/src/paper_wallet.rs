@@ -155,7 +155,7 @@ impl PaperWallet {
             self.rent_by_token_account
                 .insert(mint.to_owned(), costs.rent_reserve_lamports);
         }
-        Ok(LedgerEntry { reference: Some(mint.to_owned()), ..entry })
+        Ok(LedgerEntry {\n            reference: Some(mint.to_owned()),\n            ..entry\n        })
     }
 
     /// Apply the configured rent-recovery policy after a confirmed full sale.
@@ -183,7 +183,7 @@ impl PaperWallet {
         };
         let entry = self.refund_rent(amount)?;
         self.rent_by_token_account.remove(mint);
-        Ok(Some(LedgerEntry { reference: Some(mint.to_owned()), ..entry }))
+        Ok(Some(LedgerEntry {\n            reference: Some(mint.to_owned()),\n            ..entry\n        }))
     }
 
     pub fn refund_rent(&mut self, amount_lamports: u64) -> Result<LedgerEntry, PaperWalletError> {
@@ -256,12 +256,12 @@ mod tests {
         let mut wallet = PaperWallet::default();
         wallet.reserve_buy_for_token("mint-1", &costs()).unwrap();
         let before = wallet.available_balance_lamports;
-        let first = wallet.close_token_account_and_recover_rent("mint-1").unwrap();
+        let first = wallet\n            .close_token_account_and_recover_rent("mint-1")\n            .unwrap();
         assert_eq!(first.as_ref().unwrap().amount_lamports, 2_039_280);
         assert_eq!(wallet.available_balance_lamports, before + 2_039_280);
         assert_eq!(wallet.locked_rent_lamports, 0);
         let after_first_close = wallet.available_balance_lamports;
-        assert!(wallet.close_token_account_and_recover_rent("mint-1").unwrap().is_none());
+        assert!(wallet\n            .close_token_account_and_recover_rent("mint-1")\n            .unwrap()\n            .is_none());
         assert_eq!(wallet.available_balance_lamports, after_first_close);
     }
 
@@ -270,10 +270,10 @@ mod tests {
         let mut wallet = PaperWallet::default();
         wallet.reserve_buy_for_token("mint-1", &costs()).unwrap();
         let before = wallet.available_balance_lamports;
-        assert!(wallet.close_token_account_after_full_exit("mint-1", 1, true).unwrap().is_none());
-        assert!(wallet.close_token_account_after_full_exit("mint-1", 0, false).unwrap().is_none());
+        assert!(wallet\n            .close_token_account_after_full_exit("mint-1", 1, true)\n            .unwrap()\n            .is_none());
+        assert!(wallet\n            .close_token_account_after_full_exit("mint-1", 0, false)\n            .unwrap()\n            .is_none());
         assert_eq!(wallet.available_balance_lamports, before);
-        assert!(wallet.close_token_account_after_full_exit("mint-1", 0, true).unwrap().is_some());
+        assert!(wallet\n            .close_token_account_after_full_exit("mint-1", 0, true)\n            .unwrap()\n            .is_some());
         assert_eq!(wallet.locked_rent_lamports, 0);
     }
 
