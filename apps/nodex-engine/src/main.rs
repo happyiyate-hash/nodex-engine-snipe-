@@ -1007,11 +1007,6 @@ fn start_pumpswap_activity_processor(
             if !value.get("err").is_some_and(serde_json::Value::is_null) { continue; }
             let Some(signature) = value.get("signature").and_then(serde_json::Value::as_str)
                 .filter(|value| !value.is_empty()).map(str::to_owned) else { continue };
-            if !seen.insert(signature.clone()) { continue; }
-            if seen.len() > 20_000 {
-                seen.clear();
-                seen.insert(signature.clone());
-            }
             let transaction = match rpc.get_transaction(&signature).await {
                 Ok(Some(transaction)) => transaction,
                 Ok(None) => continue,
@@ -1036,6 +1031,11 @@ fn start_pumpswap_activity_processor(
                     continue;
                 }
             };
+            if !seen.insert(signature.clone()) { continue; }
+            if seen.len() > 20_000 {
+                seen.clear();
+                seen.insert(signature.clone());
+            }
             for activity in decoded {
                 let (kind, timestamp, pool, user, base_amount, quote_amount) = match activity {
                     PumpSwapActivityEvent::Buy { timestamp, pool, user, base_amount, quote_amount } =>
