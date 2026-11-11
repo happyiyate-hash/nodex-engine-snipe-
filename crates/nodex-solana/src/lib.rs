@@ -747,14 +747,23 @@ impl SolanaRpc {
         if sampled.is_empty() {
             return Err(anyhow!("getTokenLargestAccounts returned no token accounts"));
         }
-        let account_addresses = sampled
+        let indexed_accounts = sampled
             .iter()
-            .filter_map(|account| account.get("address").and_then(Value::as_str))
-            .map(str::to_owned)
+            .enumerate()
+            .filter_map(|(index, account)| {
+                account
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .map(|address| (index, address.to_owned()))
+            })
             .collect::<Vec<_>>();
-        if account_addresses.is_empty() {
+        if indexed_accounts.is_empty() {
             return Err(anyhow!("largest-account response did not include account addresses"));
         }
+        let account_addresses = indexed_accounts
+            .iter()
+            .map(|(_, address)| address.clone())
+            .collect::<Vec<_>>();
 
         let account_details: Value = self
             .call(
@@ -770,7 +779,8 @@ impl SolanaRpc {
         let mut owner_balances = HashMap::<String, u128>::new();
         let mut top_account_total = 0_u128;
         let mut resolved_accounts = 0_usize;
-        for (index, account) in sampled.iter().enumerate() {
+        for (response_index, (sample_index, _)) in indexed_accounts.iter().enumerate() {
+            let account = sampled[*sample_index];
             let amount = account
                 .get("amount")
                 .and_then(Value::as_str)
@@ -778,7 +788,7 @@ impl SolanaRpc {
                 .unwrap_or(0);
             top_account_total = top_account_total.saturating_add(amount);
             let Some(owner) = resolved
-                .get(index)
+                .get(response_index)
                 .and_then(|value| value.pointer("/data/parsed/info/owner"))
                 .and_then(Value::as_str)
             else {
