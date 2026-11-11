@@ -1254,12 +1254,19 @@ fn start_token_state_projector(
                         "sub_event": data.get("message").cloned().unwrap_or(json!("Monitoring token conditions"))
                     }))
                 }
-                "token_monitoring_completed" => Some(json!({
-                    "status": "monitoring_stopped",
-                    "label": "Monitoring stopped",
-                    "stage": data.get("stage").cloned().unwrap_or(json!("monitoring_complete")),
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Token is no longer being monitored"))
-                })),
+                "token_monitoring_completed" => {
+                    let was_monitoring = current_activity
+                        .as_ref()
+                        .and_then(|activity| activity.get("status"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("monitoring");
+                    was_monitoring.then(|| json!({
+                        "status": "monitoring_stopped",
+                        "label": "Monitoring stopped",
+                        "stage": data.get("stage").cloned().unwrap_or(json!("monitoring_complete")),
+                        "sub_event": data.get("message").cloned().unwrap_or(json!("Token is no longer being monitored"))
+                    }))
+                }
                 "market_subscriptions_removed" => {
                     let was_monitoring = current_activity
                         .as_ref()
