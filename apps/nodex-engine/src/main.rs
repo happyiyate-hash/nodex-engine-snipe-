@@ -17,8 +17,9 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
-    decode_pump_fun_create, run_logs_stream, start_market_monitor, MarketMonitor, SolanaRpc,
-    StreamStatus,
+    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream,
+    start_market_monitor, MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus,
+    PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
 use serde::{Deserialize, Serialize};
@@ -975,6 +976,92 @@ async fn resolve_discovery_metadata(
         "unavailable"
     };
     Ok(result)
+}
+
+/// Consume confirmed PumpSwap logs and emit only trade events decoded while
+/// the PumpSwap program is the active invocation. This is observation only:
+/// it never signs, submits, or simulates a transaction.
+fn start_pumpswap_activity_processor(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    rpc: SolanaRpc,
+) {
+    tokio::spawn(async move {
+        let mut seen = HashSet::<String>::new();
+        loop {
+            let notification = match receiver.recv().await {
+                Ok(value) => value,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(dropped_notifications = count, "PumpSwap activity consumer lagged");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if notification.get("method").and_then(serde_json::Value::as_str) != Some("logsNotification")
+                || notification.get("nodex_program_id").and_then(serde_json::Value::as_str)
+                    != Some(PUMPSWAP_PROGRAM_ID)
+            {
+                continue;
+            }
+            let Some(value) = notification.pointer("/params/result/value") else { continue };
+            if !value.get("err").is_some_and(serde_json::Value::is_null) { continue; }
+            let Some(signature) = value.get("signature").and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty()).map(str::to_owned) else { continue };
+            if !seen.insert(signature.clone()) { continue; }
+            if seen.len() > 20_000 {
+                seen.clear();
+                seen.insert(signature.clone());
+            }
+            let transaction = match rpc.get_transaction(&signature).await {
+                Ok(Some(transaction)) => transaction,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%error, signature, "Could not fetch PumpSwap transaction for activity decoding");
+                    continue;
+                }
+            };
+            if !transaction.pointer("/meta/err").is_some_and(serde_json::Value::is_null) {
+                continue;
+            }
+            let logs = transaction.pointer("/meta/logMessages")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| items.iter().filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if logs.is_empty() { continue; }
+            let decoded = match decode_pump_swap_activity_logs(&logs, PUMPSWAP_PROGRAM_ID) {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(%error, signature, "PumpSwap activity event decoding failed");
+                    continue;
+                }
+            };
+            for activity in decoded {
+                let (kind, timestamp, pool, user, base_amount, quote_amount) = match activity {
+                    PumpSwapActivityEvent::Buy { timestamp, pool, user, base_amount, quote_amount } =>
+                        ("buy", timestamp, pool, user, base_amount, quote_amount),
+                    PumpSwapActivityEvent::Sell { timestamp, pool, user, base_amount, quote_amount } =>
+                        ("sell", timestamp, pool, user, base_amount, quote_amount),
+                    PumpSwapActivityEvent::Deposit { .. } | PumpSwapActivityEvent::Withdraw { .. } =>
+                        continue,
+                };
+                let _ = events.send(json!({
+                    "type":"pumpswap_trade_activity",
+                    "data":{
+                        "signature":signature,
+                        "event_type":kind,
+                        "timestamp":timestamp,
+                        "pool_address":pool,
+                        "trader_address":user,
+                        "base_amount_raw":base_amount.to_string(),
+                        "quote_amount_raw":quote_amount.to_string(),
+                        "evidence":"confirmed_transaction_program_scoped_anchor_event",
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
+                }));
+            }
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3775,9 +3862,28 @@ async fn main() -> anyhow::Result<()> {
         }}));
     }
 
-    // PumpSwap activity/volume analytics are intentionally outside the slim core engine.
-    // Keep the compatibility status field idle until the separate analytics service owns it.
+    // PumpSwap has its own confirmed-log stream. The consumer decodes only
+    // program-scoped Buy/Sell Anchor events; price ticks and liquidity events
+    // are never counted as trades or buyers.
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
+    if let (Some(activity_rpc), false) = (rpc.clone(), config.solana_ws_urls.is_empty()) {
+        let _ = activity_rpc;
+    }
+    if let Some(activity_rpc) = rpc.clone() {
+        start_pumpswap_activity_processor(events.subscribe(), events.clone(), activity_rpc);
+        let activity_ws_urls = config.solana_ws_urls.clone();
+        let activity_events = events.clone();
+        let activity_status = pumpswap_status.clone();
+        tokio::spawn(async move {
+            run_logs_stream(
+                activity_ws_urls,
+                PUMPSWAP_PROGRAM_ID.to_owned(),
+                activity_events,
+                activity_status,
+                None,
+            ).await;
+        });
+    }
 
     // Raw upstream JSON notifications are transient and are not written to SQLite.
 
