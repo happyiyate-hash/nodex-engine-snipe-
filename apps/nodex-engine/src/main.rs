@@ -115,8 +115,8 @@ impl Default for TradingSettings {
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
-            diagnostic_mode: true,
-            block_unverified_trades: true,
+            diagnostic_mode: false,
+            block_unverified_trades: false,
             execution_enabled: false,
             whitelist_only_mode: false,
             preferred_owners: Vec::new(),
@@ -1487,68 +1487,8 @@ fn start_launch_processor(
                                     .upsert_patch(&scan_mint, json!({"identity":identity_patch}));
                             }
 
-                            // Creator history is evidence, not a standalone verdict. A bounded sample
-                            // can reveal prior launches, but cannot prove wallet clusters or early selling.
-                            let _ = scan_events.send(json!({"type":"token_scan_progress","data":{
-                                "mint_address":scan_mint,
-                                "stage":"creator_history",
-                                "progress":72,
-                                "message":"Reviewing recent creator activity",
-                                "received_at":chrono::Utc::now().to_rfc3339()
-                            }}));
-                            match tokio::time::timeout(
-                                Duration::from_secs(15),
-                                scan_rpc.scan_creator_history(
-                                    creator_address_for_scan.as_deref().unwrap_or_default(),
-                                    &launch_signature_for_scan,
-                                    &approved_program_id,
-                                ),
-                            )
-                            .await
-                            {
-                                Ok(Ok(creator_report)) => {
-                                    let status = creator_report.status.clone();
-                                    let detail = format!(
-                                        "Sampled {} creator signatures and resolved {} transactions; found {} prior Pump.fun launches. Early selling and linked-wallet behaviour remain unverified. {}",
-                                        creator_report.signatures_sampled,
-                                        creator_report.transactions_resolved,
-                                        creator_report.prior_pump_fun_launches,
-                                        creator_report.caveat
-                                    );
-                                    report.checks.push(nodex_solana::SecurityCheck {
-                                        name: "creator_history".into(),
-                                        status: if status == "unverified" {
-                                            "unverified"
-                                        } else {
-                                            "partial"
-                                        }
-                                        .into(),
-                                        severity: "high".into(),
-                                        detail,
-                                    });
-                                    report.creator_history = Some(creator_report);
-                                }
-                                Ok(Err(error)) => {
-                                    let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"creator_history","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))}));
-                                    report.checks.push(nodex_solana::SecurityCheck {
-                                        name: "creator_history".into(),
-                                        status: "unverified".into(),
-                                        severity: "high".into(),
-                                        detail: format!("Creator history lookup failed: {error}"),
-                                    });
-                                }
-                                Err(_) => {
-                                    let message="Creator history lookup exceeded its 15-second time budget.";
-                                    let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"creator_history","solana_rpc",message,json!({"kind":"timeout","timeout_seconds":15}))}));
-                                    report.checks.push(nodex_solana::SecurityCheck {
-                                        name: "creator_history".into(),
-                                        status: "unverified".into(),
-                                        severity: "high".into(),
-                                        detail: message.into(),
-                                    });
-                                }
-                            }
-
+                            // Creator history is optional enrichment. It is not a launch
+                            // verification prerequisite and must not delay the first market subscription.
                             if let Some(details) = report.rugcheck.error_details.clone() {
                                 let message =
                                     report.rugcheck.error.clone().unwrap_or_else(|| {
@@ -1936,184 +1876,9 @@ fn start_launch_processor(
                             }
                         }
                     }
-                    // Keep every discovered launch under a bounded, time-limited
-                    // authority monitor, including tokens that are still unverified.
-                    // This lightweight pass reads only the mint account; it does not
-                    // repeat holder sampling or call external security providers.
-                    if let Ok(monitor_permit) = authority_monitor_slots_for_scan.try_acquire_owned()
-                    {
-                        let monitor_rpc = scan_rpc.clone();
-                        let monitor_events = scan_events.clone();
-                        let monitor_registry = approved_registry.clone();
-                        let monitor_database = approved_database.clone();
-                        let monitor_mint = scan_mint.clone();
-                        tokio::spawn(async move {
-                            let _monitor_permit = monitor_permit;
-                            let started = Instant::now();
-                            let max_runtime = Duration::from_secs(300);
-                            let mut rechecks = 0u32;
-                            let mut previous_authorities: Option<(Option<String>, Option<String>)> =
-                                None;
-                            let _ = monitor_events.send(json!({
-                                "type":"token_monitoring_started",
-                                "data":{"mint_address":monitor_mint,"status":"watching",
-                                    "max_runtime_seconds":300,
-                                    "received_at":chrono::Utc::now().to_rfc3339()}
-                            }));
-                            while started.elapsed() < max_runtime {
-                                let age = started.elapsed();
-                                let interval = if age < Duration::from_secs(15) {
-                                    Duration::from_secs(2)
-                                } else if age < Duration::from_secs(60) {
-                                    Duration::from_secs(5)
-                                } else {
-                                    Duration::from_secs(15)
-                                };
-                                tokio::time::sleep(interval).await;
-                                if started.elapsed() >= max_runtime {
-                                    break;
-                                }
-                                let checked_at = chrono::Utc::now().to_rfc3339();
-                                match tokio::time::timeout(
-                                    Duration::from_secs(6),
-                                    monitor_rpc.scan_token_authorities(&monitor_mint),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(report)) => {
-                                        rechecks = rechecks.saturating_add(1);
-                                        let authorities = (
-                                            report.mint_authority.clone(),
-                                            report.freeze_authority.clone(),
-                                        );
-                                        let changed =
-                                            previous_authorities.as_ref() != Some(&authorities);
-                                        previous_authorities = Some(authorities.clone());
-                                        let active =
-                                            authorities.0.is_some() || authorities.1.is_some();
-                                        let reason = if active {
-                                            "Mint or freeze authority remains active. Monitoring continues; paper entry is blocked."
-                                        } else {
-                                            "Mint and freeze authorities are now disabled. Other safety checks remain incomplete; paper entry is still blocked."
-                                        };
-                                        let patch = json!({
-                                            "security":{
-                                                "status":"watching",
-                                                "decision":"UNVERIFIED",
-                                                "decision_reason":reason,
-                                                "mint_authority":authorities.0,
-                                                "freeze_authority":authorities.1,
-                                                "authority_recheck":{
-                                                    "status":if active {"active"} else {"cleared"},
-                                                    "checked_at":checked_at,
-                                                    "context_slot":report.context_slot
-                                                }
-                                            },
-                                            "monitoring":{
-                                                "status":"watching",
-                                                "authority_rechecks":rechecks,
-                                                "last_checked_at":checked_at,
-                                                "elapsed_seconds":started.elapsed().as_secs()
-                                            }
-                                        });
-                                        match monitor_registry.upsert_patch(&monitor_mint, patch) {
-                                            Ok(snapshot) => {
-                                                if changed {
-                                                    if let Err(error) =
-                                                        nodex_persistence::save_token_state(
-                                                            &monitor_database,
-                                                            &snapshot,
-                                                        )
-                                                        .await
-                                                    {
-                                                        let _ = monitor_events.send(json!({
-                                                            "type":"token_diagnostic",
-                                                            "data":token_diagnostic(&monitor_mint,"authority_monitor_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))
-                                                        }));
-                                                    }
-                                                    let _ = monitor_events.send(json!({"type":"token_state_updated","data":snapshot}));
-                                                }
-                                                let _ = monitor_events.send(json!({
-                                                    "type":"token_monitoring_update",
-                                                    "data":{
-                                                        "mint_address":monitor_mint,
-                                                        "status":"watching",
-                                                        "authority_status":if active {"active"} else {"cleared"},
-                                                        "mint_authority":authorities.0,
-                                                        "freeze_authority":authorities.1,
-                                                        "rechecks":rechecks,
-                                                        "checked_at":checked_at,
-                                                        "paper_entry_eligible":false
-                                                    }
-                                                }));
-                                            }
-                                            Err(error) => {
-                                                let _ = monitor_events.send(json!({
-                                                    "type":"token_diagnostic",
-                                                    "data":token_diagnostic(&monitor_mint,"authority_monitor","token_registry",error.to_string(),json!({"kind":"registry_error","message":error.to_string()}))
-                                                }));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Ok(Err(error)) => {
-                                        let _ = monitor_events.send(json!({
-                                            "type":"token_monitoring_update",
-                                            "data":{"mint_address":monitor_mint,"status":"watching",
-                                                "authority_status":"unknown","rechecks":rechecks,
-                                                "error":error.to_string(),
-                                                "checked_at":checked_at,
-                                                "paper_entry_eligible":false}
-                                        }));
-                                        let _ = monitor_events.send(json!({
-                                            "type":"token_diagnostic",
-                                            "data":token_diagnostic(&monitor_mint,"authority_monitor","solana_rpc",error.to_string(),provider_error_details(&format!("{error:#}")))
-                                        }));
-                                    }
-                                    Err(_) => {
-                                        let message =
-                                            "Authority recheck timed out after 6 seconds.";
-                                        let _ = monitor_events.send(json!({
-                                            "type":"token_monitoring_update",
-                                            "data":{"mint_address":monitor_mint,"status":"watching",
-                                                "authority_status":"unknown","rechecks":rechecks,
-                                                "error":message,"checked_at":checked_at,
-                                                "paper_entry_eligible":false}
-                                        }));
-                                    }
-                                }
-                            }
-                            let finished_at = chrono::Utc::now().to_rfc3339();
-                            if let Ok(snapshot) = monitor_registry.upsert_patch(
-                                &monitor_mint,
-                                json!({
-                                    "monitoring":{"status":"completed","completed_at":finished_at,
-                                        "authority_rechecks":rechecks}
-                                }),
-                            ) {
-                                let _ = nodex_persistence::save_token_state(
-                                    &monitor_database,
-                                    &snapshot,
-                                )
-                                .await;
-                                let _ = monitor_events
-                                    .send(json!({"type":"token_state_updated","data":snapshot}));
-                            }
-                            let _ = monitor_events.send(json!({
-                                "type":"token_monitoring_completed",
-                                "data":{"mint_address":monitor_mint,"status":"completed",
-                                    "rechecks":rechecks,"duration_seconds":started.elapsed().as_secs(),
-                                    "completed_at":finished_at}
-                            }));
-                        });
-                    } else {
-                        let _ = scan_events.send(json!({
-                            "type":"token_diagnostic",
-                            "data":token_diagnostic(&scan_mint,"authority_monitor","nodex_engine",
-                                "Background authority-monitor capacity is full; token remains retained but will not receive periodic rechecks.",
-                                json!({"kind":"monitor_capacity_reached","capacity":24}))
-                        }));
-                    }
+                    // Mint/freeze authorities are checked once in the launch scan.
+                    // Do not run a second polling loop that can overwrite a completed
+                    // verification verdict with a generic UNVERIFIED monitoring state.
                     // Market data is discovery/monitoring, not a security approval. Subscribe
                     // every detected Pump.fun curve, including unverified and rejected launches.
                     if let Some(monitor) = approved_monitor.read().await.clone() {
@@ -3534,13 +3299,39 @@ async fn main() -> anyhow::Result<()> {
     )
     .fetch_optional(&db)
     .await?;
-    let trading_settings = match stored_trading_config {
+    let mut trading_settings = match stored_trading_config {
         Some(raw) => serde_json::from_str::<TradingSettings>(&raw)
             .ok()
             .filter(|settings| settings.validate().is_ok())
             .unwrap_or_default(),
         None => TradingSettings::default(),
     };
+    // One-time migration from the old diagnostic-only / require-every-checks
+    // defaults. The operator explicitly chose the faster authority + RugCheck
+    // launch gate; retain future manual changes after this migration marker.
+    let fast_verification_migrated: Option<String> = sqlx::query_scalar(
+        "SELECT config_json FROM nodex_runtime_config WHERE config_key = 'fast_verification_policy_v2'",
+    )
+    .fetch_optional(&db)
+    .await?;
+    if fast_verification_migrated.is_none() {
+        trading_settings.diagnostic_mode = false;
+        trading_settings.block_unverified_trades = false;
+        sqlx::query(
+            "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('fast_verification_policy_v2', 'enabled', ?)",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&db)
+        .await?;
+        let migrated = serde_json::to_string(&trading_settings)?;
+        sqlx::query(
+            "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at",
+        )
+        .bind(migrated)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&db)
+        .await?;
+    }
     let trading_settings_json = serde_json::to_string(&trading_settings)?;
     sqlx::query(
         "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO NOTHING"
