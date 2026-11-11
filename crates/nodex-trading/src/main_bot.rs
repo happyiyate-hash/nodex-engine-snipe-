@@ -220,6 +220,8 @@ pub struct SecurityAssessment {
 pub struct LiveMarketActivity {
     pub price_usd: Option<f64>,
     pub liquidity_usd: Option<f64>,
+    pub price_change_1m_pct: Option<f64>,
+    pub price_change_5m_pct: Option<f64>,
     pub buy_volume_5m_usd: f64,
     pub distinct_buyers_5m: usize,
     pub buy_count_5m: u64,
@@ -337,6 +339,20 @@ pub fn evaluate_entry(
         Some(_) => reject!("Estimated entry slippage exceeds the configured maximum."),
         None => wait!("Waiting for an entry-slippage estimate."),
     }
+
+    // Avoid buying the top of a fast candle. A modest negative 1m move while the
+    // 5m trend remains positive is treated as a pullback, not a reason to chase.
+    if market.price_change_1m_pct.is_some_and(|change| change.is_finite() && change > 12.0) {
+        wait!("One-minute price expansion is too sharp; waiting for a pullback.");
+    }
+    if market.price_change_5m_pct.is_some_and(|change| change.is_finite() && change > 35.0) {
+        wait!("Five-minute price expansion is too extended; avoiding a late entry.");
+    }
+    if market.price_change_1m_pct.is_some_and(|change| change.is_finite() && change < -20.0)
+        || market.price_change_5m_pct.is_some_and(|change| change.is_finite() && change < -40.0)
+    {
+        wait!("Recent sell pressure is too sharp; waiting for price stabilization.");
+    }
     if market.buy_volume_5m_usd < config.minimum_5m_buy_volume_usd {
         wait!("Five-minute confirmed buy volume is below the configured minimum.");
     }
@@ -390,6 +406,8 @@ mod tests {
         LiveMarketActivity {
             price_usd: Some(0.0001),
             liquidity_usd: Some(10_000.0),
+            price_change_1m_pct: Some(-4.0),
+            price_change_5m_pct: Some(12.0),
             buy_volume_5m_usd: 2_000.0,
             distinct_buyers_5m: 3,
             buy_count_5m: 8,
