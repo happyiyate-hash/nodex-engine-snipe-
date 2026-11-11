@@ -493,6 +493,36 @@ mod tests {
     }
 
     #[test]
+    fn strategy_waits_for_pullback_after_a_sharp_one_minute_pump() {
+        let mut live = market();
+        live.price_change_1m_pct = Some(16.0);
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert!(result.reasons.iter().any(|reason| reason.contains("pullback")));
+    }
+
+    #[test]
+    fn strategy_waits_for_stabilization_after_a_sharp_selloff() {
+        let mut live = market();
+        live.price_change_1m_pct = Some(-24.0);
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert!(result.reasons.iter().any(|reason| reason.contains("stabilization")));
+    }
+
+    #[test]
     fn unknown_creator_waits_for_three_wallets_and_confirmation_time() {
         let mut live = market();
         live.distinct_buyers_5m = 2;
