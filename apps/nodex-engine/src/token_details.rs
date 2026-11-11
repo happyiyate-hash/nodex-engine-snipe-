@@ -186,7 +186,12 @@ mod tests {
         let mut state = TokenState::new("mint-1");
         state.data = json!({
             "identity": {"name":"Example", "symbol":"EX"},
-            "market": {"price_sol":0.25}
+            "market": {"price_sol":0.25},
+            "security": {
+                "decision":"UNVERIFIED",
+                "decision_reason":"Holder evidence is incomplete.",
+                "checks":[{"name":"mint_authority","status":"passed"}]
+            }
         });
         let positions = vec![json!({
             "mint_address":"mint-1", "status":"open",
@@ -196,6 +201,8 @@ mod tests {
         let snapshot = build_token_detail_snapshot("mint-1", Some(&state), &positions);
         assert_eq!(snapshot["identity"]["name"], "Example");
         assert_eq!(snapshot["market"]["price_sol"], 0.25);
+        assert_eq!(snapshot["security"]["decision"], "UNVERIFIED");
+        assert_eq!(snapshot["security"]["checks"][0]["name"], "mint_authority");
         assert!(snapshot["market"]["holders"].is_null());
         assert_eq!(snapshot["position"]["token_balance"], 10.0);
         assert_eq!(snapshot["position"]["unrealized_pnl_sol"], 1.5);
