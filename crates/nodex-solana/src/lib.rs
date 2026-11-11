@@ -624,6 +624,20 @@ impl SolanaRpc {
         // gate. It is optional enrichment and must not hold a launch in diagnostics.
         on_progress("rugcheck", 70, "Checking RugCheck risk report");
         report.rugcheck = self.get_rugcheck_summary(mint).await;
+        if !diagnostic_mode {
+            if let Some(supply_raw) = report.supply_raw.as_deref() {
+                on_progress("holder_distribution", 82, "Sampling the largest token holders");
+                match self.sample_holder_distribution(mint, supply_raw).await {
+                    Ok(distribution) => report.holder_distribution = Some(distribution),
+                    Err(error) => report.checks.push(SecurityCheck {
+                        name: "holder_distribution".into(),
+                        status: "unverified".into(),
+                        severity: "warning".into(),
+                        detail: format!("Top-holder sampling was unavailable; paper strategy will require stronger market confirmation: {error}"),
+                    }),
+                }
+            }
+        }
         let blocking_rugcheck_risks = report
             .rugcheck
             .risks
@@ -693,6 +707,96 @@ impl SolanaRpc {
         }
         on_progress("complete", 100, "Security scan completed");
         Ok(report)
+    }
+
+    async fn sample_holder_distribution(
+        &self,
+        mint: &str,
+        supply_raw: &str,
+    ) -> Result<HolderDistribution> {
+        const HOLDER_SAMPLE_LIMIT: usize = 20;
+        let supply = supply_raw
+            .parse::<u128>()
+            .map_err(|error| anyhow!("invalid raw mint supply: {error}"))?;
+        if supply == 0 {
+            return Err(anyhow!("mint supply is zero"));
+        }
+
+        let largest: Value = self
+            .call(
+                "getTokenLargestAccounts",
+                json!([mint, {"commitment":"confirmed"}]),
+            )
+            .await?;
+        let accounts = largest
+            .pointer("/value")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("getTokenLargestAccounts returned no value array"))?;
+        let sampled = accounts.iter().take(HOLDER_SAMPLE_LIMIT).collect::<Vec<_>>();
+        if sampled.is_empty() {
+            return Err(anyhow!("getTokenLargestAccounts returned no token accounts"));
+        }
+        let account_addresses = sampled
+            .iter()
+            .filter_map(|account| account.get("address").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if account_addresses.is_empty() {
+            return Err(anyhow!("largest-account response did not include account addresses"));
+        }
+
+        let account_details: Value = self
+            .call(
+                "getMultipleAccounts",
+                json!([account_addresses, {"encoding":"jsonParsed","commitment":"confirmed"}]),
+            )
+            .await?;
+        let resolved = account_details
+            .pointer("/value")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("getMultipleAccounts returned no value array"))?;
+
+        let mut owner_balances = HashMap::<String, u128>::new();
+        let mut top_account_total = 0_u128;
+        let mut resolved_accounts = 0_usize;
+        for (index, account) in sampled.iter().enumerate() {
+            let amount = account
+                .get("amount")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u128>().ok())
+                .unwrap_or(0);
+            top_account_total = top_account_total.saturating_add(amount);
+            let Some(owner) = resolved
+                .get(index)
+                .and_then(|value| value.pointer("/data/parsed/info/owner"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if amount == 0 {
+                continue;
+            }
+            resolved_accounts = resolved_accounts.saturating_add(1);
+            let balance = owner_balances.entry(owner.to_owned()).or_default();
+            *balance = balance.saturating_add(amount);
+        }
+
+        let mut owner_amounts = owner_balances.into_values().collect::<Vec<_>>();
+        owner_amounts.sort_unstable_by(|left, right| right.cmp(left));
+        let top_ten_owner_total = owner_amounts
+            .iter()
+            .take(10)
+            .fold(0_u128, |total, amount| total.saturating_add(*amount));
+
+        Ok(HolderDistribution {
+            sampled_token_accounts: sampled.len(),
+            resolved_accounts,
+            top_20_account_share_percent: top_account_total as f64 / supply as f64 * 100.0,
+            top_10_observed_owner_share_percent: top_ten_owner_total as f64 / supply as f64 * 100.0,
+            // The RPC returns only the largest accounts, not every token account.
+            sample_is_partial: true,
+            caveat: "Concentration is aggregated by owner across the top-20 token-account sample. The sample is partial; paper entry applies an additional concentration buffer.".into(),
+        })
     }
 
     async fn get_rugcheck_summary(&self, mint: &str) -> RugCheckSummary {
