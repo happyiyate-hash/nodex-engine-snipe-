@@ -1312,28 +1312,31 @@ fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
-                // Creator is decoded from the Pump.fun create transaction above. Apply
-                // strict filtering before metadata resolution and security-provider work.
-                // If creator data is absent, strict mode fails closed and skips the launch.
+                // Unknown/unpreferred creators remain visible and monitored. Strict
+                // preferred-owner mode is an entry restriction, not a discovery filter.
                 let whitelist_settings = trading_settings.read().await;
-                if whitelist_settings.whitelist_only_mode {
-                    let creator = launch.creator_address.as_deref();
-                    let preferred = creator
-                        .map(|address| {
-                            whitelist_settings
-                                .preferred_owners
-                                .iter()
-                                .any(|owner| owner.address == address)
-                        })
-                        .unwrap_or(false);
-                    if !preferred {
-                        tracing::debug!(
-                            mint_address = %launch.mint_address,
-                            creator_address = creator.unwrap_or("unknown"),
-                            "Launch skipped by strict preferred-owner whitelist"
-                        );
-                        continue;
-                    }
+                let whitelist_only_mode = whitelist_settings.whitelist_only_mode;
+                let creator_is_preferred = launch
+                    .creator_address
+                    .as_deref()
+                    .map(|address| {
+                        whitelist_settings
+                            .preferred_owners
+                            .iter()
+                            .any(|owner| owner.address == address)
+                    })
+                    .unwrap_or(false);
+                if whitelist_only_mode && !creator_is_preferred {
+                    let _ = events.send(json!({
+                        "type":"creator_watchlist_status",
+                        "data":{
+                            "mint_address":launch.mint_address,
+                            "creator_address":launch.creator_address,
+                            "status":"monitor_only",
+                            "preferred_owner":false,
+                            "reason":"Creator is not in the preferred-owner list; discovery and market monitoring continue, but strict whitelist mode blocks paper entry."
+                        }
+                    }));
                 }
                 drop(whitelist_settings);
                 let mint_address = launch.mint_address.clone();
@@ -1439,6 +1442,8 @@ fn start_launch_processor(
                         "discovery": {
                             "source": "pump_fun",
                             "creator_address": creator_address,
+                            "creator_preferred": creator_is_preferred,
+                            "whitelist_only_mode": whitelist_only_mode,
                             "signature": launch.signature,
                             "slot": launch.slot,
                             "detected_at": launch.detected_at,
