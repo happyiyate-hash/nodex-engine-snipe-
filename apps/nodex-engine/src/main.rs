@@ -468,12 +468,15 @@ async fn evaluate_and_execute_paper_entry(
     }
 
     let sol_quote = sol_price.read().await.clone();
-    let sol_quote_valid = sol_quote.status == "live"
-        && sol_quote.price_usd.is_finite()
-        && sol_quote.price_usd > 0.0;
+    let sol_quote_valid =
+        sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0;
     let config = main_bot_config_from_settings(
         &settings,
-        if sol_quote_valid { sol_quote.price_usd } else { 0.0 },
+        if sol_quote_valid {
+            sol_quote.price_usd
+        } else {
+            0.0
+        },
     );
 
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -498,7 +501,9 @@ async fn evaluate_and_execute_paper_entry(
         }
     }
 
-    let price_sol = market_data.get("price_sol").and_then(serde_json::Value::as_f64);
+    let price_sol = market_data
+        .get("price_sol")
+        .and_then(serde_json::Value::as_f64);
     let reserve_lamports = json_u64(
         market_data
             .get("real_sol_reserves")
@@ -511,7 +516,11 @@ async fn evaluate_and_execute_paper_entry(
     let liquidity_usd = reserve_sol
         .filter(|_| sol_quote_valid)
         .map(|reserve| reserve * sol_quote.price_usd * 2.0)
-        .or_else(|| market_data.get("liquidity_usd").and_then(serde_json::Value::as_f64));
+        .or_else(|| {
+            market_data
+                .get("liquidity_usd")
+                .and_then(serde_json::Value::as_f64)
+        });
     let price_usd = price_sol
         .filter(|value| value.is_finite() && *value > 0.0 && sol_quote_valid)
         .map(|value| value * sol_quote.price_usd);
