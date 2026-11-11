@@ -4584,6 +4584,19 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|decision| decision.eq_ignore_ascii_case("REJECTED"));
                 let status = if verified { "VERIFIED" } else if rejected { "REJECTED" } else { "UNVERIFIED" };
+                let security_status = match status {
+                    "VERIFIED" => "verified",
+                    "REJECTED" => "rejected",
+                    _ => "unverified"
+                };
+                if let Some(security_object) = fields
+                    .get_mut("security")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    security_object.insert("status".into(), json!(security_status));
+                    security_object.insert("verification_status".into(), json!(status));
+                    security_object.insert("verification_gate_passed".into(), json!(verified));
+                }
                 fields.insert("verification_status".into(), json!(status));
                 fields.insert("verification_label".into(), json!(
                     match status {
