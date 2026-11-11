@@ -3800,16 +3800,20 @@ async fn ensure_market_monitor(state: &AppState) {
     // Create the monitor once, then restore the newest persisted launch subscriptions.
     // The monitor itself retains its desired set across WebSocket reconnects; this
     // rehydration closes the process-restart gap as well.
-    let monitor = {
+    let (monitor, should_restore) = {
         let mut guard = state.market_monitor.write().await;
-        if guard.is_none() && !state.solana_ws_urls.is_empty() {
+        let should_restore = guard.is_none() && !state.solana_ws_urls.is_empty();
+        if should_restore {
             *guard = Some(start_market_monitor(
                 state.solana_ws_urls.clone(),
                 state.events.clone(),
             ));
         }
-        guard.clone()
+        (guard.clone(), should_restore)
     };
+    if !should_restore {
+        return;
+    }
     let Some(monitor) = monitor else {
         return;
     };
