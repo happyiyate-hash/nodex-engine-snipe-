@@ -570,7 +570,10 @@ mod tests {
         );
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
         assert_eq!(result.entry_speed, "confirmation");
-        assert!(result.reasons.iter().any(|reason| reason.contains("inconclusive")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("inconclusive")));
     }
 
     #[test]
