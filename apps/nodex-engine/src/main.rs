@@ -364,7 +364,7 @@ fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
 fn timestamp_ms_from_value(value: Option<&serde_json::Value>) -> Option<i64> {
     let value = value?;
     if let Some(number) = value.as_i64() {
-        return Some(if number.abs() < 10_000_000_000 {
+        return Some(if (-10_000_000_000..10_000_000_000).contains(&number) {
             number.saturating_mul(1_000)
         } else {
             number
@@ -422,7 +422,7 @@ fn record_confirmed_trade(
     });
     while trades.front().is_some_and(|trade| {
         now_ms.saturating_sub(trade.timestamp_ms) > 300_000
-    }) || trades.len() > 2_000
+    }) || trades.len() > 500
     {
         trades.pop_front();
     }
@@ -554,6 +554,7 @@ async fn evaluate_and_execute_paper_entry(
         && rugcheck_score.is_some_and(|score| score.is_finite() && (0.0..=20.0).contains(&score));
     let holder_distribution = security.and_then(|value| value.get("holder_distribution"));
     let top10_concentration_pct = holder_distribution
+        .filter(|value| value.get("sample_is_partial").and_then(serde_json::Value::as_bool) != Some(true))
         .and_then(|value| value.get("top_10_observed_owner_share_percent"))
         .and_then(serde_json::Value::as_f64);
     let safety_score = rugcheck_score
@@ -573,7 +574,19 @@ async fn evaluate_and_execute_paper_entry(
     let creator_address = creator_history
         .and_then(|value| value.get("creator_address"))
         .and_then(serde_json::Value::as_str)
-        .or_else(|| security.and_then(|value| value.get("mint_address")).and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            token_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.data.get("identity"))
+                .and_then(|identity| identity.get("creator_wallet"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            token_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.data.get("creator_wallet"))
+                .and_then(serde_json::Value::as_str)
+        })
         .unwrap_or_default();
     let preferred_owner = settings
         .preferred_owners
@@ -744,19 +757,37 @@ async fn evaluate_and_execute_paper_entry(
             return;
         }
     };
+    let slippage_pct = market_assessment.estimated_slippage_pct.unwrap_or(0.0).max(0.0);
+    let fill_price_sol = price_sol * (1.0 + slippage_pct / 100.0);
+    let fill_price_usd = fill_price_sol * sol_quote.price_usd;
+    if !fill_price_sol.is_finite() || fill_price_sol <= 0.0 || !fill_price_usd.is_finite() {
+        let _ = events.send(json!({"type":"paper_buy_failed","data":{
+            "mint_address":mint,"reason":"Estimated paper fill price is invalid.","paper_only":true
+        }}));
+        return;
+    }
     let position_id = uuid::Uuid::new_v4().to_string();
-    let token_quantity = position_size_sol / price_sol;
+    let token_quantity = position_size_sol / fill_price_sol;
+    let current_value_sol = token_quantity * price_sol;
+    let current_value_usd = current_value_sol * sol_quote.price_usd;
+    let unrealized_pnl_sol = current_value_sol - position_size_sol;
+    let unrealized_pnl_usd = current_value_usd - config.position_size_usd;
+    let unrealized_pnl_pct = if config.position_size_usd > 0.0 {
+        unrealized_pnl_usd / config.position_size_usd * 100.0
+    } else {
+        0.0
+    };
     let opened_at = chrono::Utc::now().to_rfc3339();
     let mut position = json!({
-        "position_id":position_id,
-        "id":position_id,
+        "position_id":position_id.clone(),
+        "id":position_id.clone(),
         "mint_address":mint,
         "status":"open",
         "venue":market_data.get("venue").cloned().unwrap_or(json!("unknown")),
         "source":"automatic_paper_entry",
-        "entry_price_sol":price_sol,
-        "average_entry_price_sol":price_sol,
-        "entry_price_usd":price_usd,
+        "entry_price_sol":fill_price_sol,
+        "average_entry_price_sol":fill_price_sol,
+        "entry_price_usd":fill_price_usd,
         "entry_sol_price_usd":sol_quote.price_usd,
         "token_quantity":token_quantity,
         "quantity":token_quantity,
@@ -766,14 +797,15 @@ async fn evaluate_and_execute_paper_entry(
         "cost_basis_usd":config.position_size_usd,
         "current_price_sol":price_sol,
         "current_price_usd":price_usd,
-        "current_value_sol":position_size_sol,
-        "current_position_value_usd":config.position_size_usd,
-        "unrealized_pnl_sol":0.0,
-        "unrealized_pnl_usd":0.0,
-        "pnl_usd":0.0,
-        "pnl_pct":0.0,
-        "opened_at":opened_at,
-        "marked_at":opened_at,
+        "current_value_sol":current_value_sol,
+        "current_position_value_usd":current_value_usd,
+        "unrealized_pnl_sol":unrealized_pnl_sol,
+        "unrealized_pnl_usd":unrealized_pnl_usd,
+        "pnl_usd":unrealized_pnl_usd,
+        "pnl_pct":unrealized_pnl_pct,
+        "unrealized_pnl_pct":unrealized_pnl_pct,
+        "opened_at":opened_at.clone(),
+        "marked_at":opened_at.clone(),
         "paper_only":true,
         "entry_evidence":{
             "decision":"evaluate_paper_entry",
@@ -784,7 +816,7 @@ async fn evaluate_and_execute_paper_entry(
             "security_decision":security_decision
         }
     });
-    let Some(risk_policy) = capture_position_risk(&config, price_sol, price_usd) else {
+    let Some(risk_policy) = capture_position_risk(&config, fill_price_sol, fill_price_usd) else {
         let _ = events.send(json!({"type":"paper_buy_failed","data":{
             "mint_address":mint,"reason":"Could not capture a valid per-position risk policy.","paper_only":true
         }}));
@@ -826,7 +858,7 @@ async fn evaluate_and_execute_paper_entry(
     let portfolio = calculate_portfolio_snapshot(&next_wallet, &sol_quote, &next_positions);
     let mut profile_snapshot = profile.write().await;
     if let Some(object) = profile_snapshot.as_object_mut() {
-        object.insert("paper_wallet".into(), json!(next_wallet));
+        object.insert("paper_wallet".into(), json!(next_wallet.clone()));
         object.insert("portfolio".into(), portfolio.clone());
     }
     let profile_value = profile_snapshot.clone();
@@ -838,7 +870,7 @@ async fn evaluate_and_execute_paper_entry(
             "mint_address":mint,
             "position":position.clone(),
             "ledger":ledger,
-            "wallet":next_wallet,
+            "wallet":next_wallet.clone(),
             "paper_only":true,
             "execution_mode":"simulated"
         }
