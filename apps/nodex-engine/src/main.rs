@@ -1604,8 +1604,6 @@ fn start_launch_processor(
                 };
 
                 let creator_address = launch.creator_address.clone();
-                let creator_address_for_scan = creator_address.clone();
-                let launch_signature_for_scan = launch.signature.clone();
                 let mut identity = serde_json::Map::new();
                 identity.insert("mint_address".into(), json!(mint_address));
                 if let Some(value) = metadata.name.as_ref() {
