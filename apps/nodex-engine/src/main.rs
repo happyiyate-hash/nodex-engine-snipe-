@@ -1204,6 +1204,11 @@ fn start_token_state_projector(
                     "label": "Evaluating entry",
                     "stage": "strategy_checks"
                 })),
+                "paper_buy_started" => Some(json!({
+                    "status": "executing_buy",
+                    "label": "Executing buy order",
+                    "stage": data.get("stage").cloned().unwrap_or(json!("paper_order_start"))
+                })),
                 "paper_buy_executed" => Some(json!({
                     "status": "bought_paper",
                     "label": "Paper buy executed",
@@ -1245,6 +1250,7 @@ fn start_token_state_projector(
                 | "market_subscription_waiting"
                 | "market_subscription_active"
                 | "paper_entry_evaluation"
+                | "paper_buy_started"
                 | "paper_buy_executed"
                 | "paper_buy_failed"
                 | "paper_sell_executed" => {
