@@ -743,9 +743,14 @@ impl SolanaRpc {
             .pointer("/value")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("getTokenLargestAccounts returned no value array"))?;
-        let sampled = accounts.iter().take(HOLDER_SAMPLE_LIMIT).collect::<Vec<_>>();
+        let sampled = accounts
+            .iter()
+            .take(HOLDER_SAMPLE_LIMIT)
+            .collect::<Vec<_>>();
         if sampled.is_empty() {
-            return Err(anyhow!("getTokenLargestAccounts returned no token accounts"));
+            return Err(anyhow!(
+                "getTokenLargestAccounts returned no token accounts"
+            ));
         }
         let indexed_accounts = sampled
             .iter()
@@ -758,7 +763,9 @@ impl SolanaRpc {
             })
             .collect::<Vec<_>>();
         if indexed_accounts.is_empty() {
-            return Err(anyhow!("largest-account response did not include account addresses"));
+            return Err(anyhow!(
+                "largest-account response did not include account addresses"
+            ));
         }
         let account_addresses = indexed_accounts
             .iter()
