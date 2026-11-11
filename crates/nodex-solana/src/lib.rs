@@ -1745,10 +1745,10 @@ pub fn decode_pump_fun_trade_logs(
             encoded.trim(),
         )
         .context("decoding Pump.fun TradeEvent base64")?;
-        if bytes.len() < 89 || bytes[..8] != PUMP_FUN_TRADE_EVENT_DISCRIMINATOR {
+        if bytes.len() < 97 || bytes[..8] != PUMP_FUN_TRADE_EVENT_DISCRIMINATOR {
             continue;
         }
-        let is_buy = match bytes[48] {
+        let is_buy = match bytes[56] {
             0 => false,
             1 => true,
             value => return Err(anyhow!("invalid Pump.fun TradeEvent is_buy flag: {value}")),
@@ -1759,13 +1759,11 @@ pub fn decode_pump_fun_trade_logs(
                 bytes[40..48].try_into().expect("eight-byte SOL amount"),
             ),
             token_amount_raw: u64::from_le_bytes(
-                bytes[48 + 1 + 32..48 + 1 + 32 + 8]
-                    .try_into()
-                    .expect("eight-byte timestamp"),
+                bytes[48..56].try_into().expect("eight-byte token amount"),
             ),
             is_buy,
-            trader_address: bs58::encode(&bytes[49..81]).into_string(),
-            timestamp: i64::from_le_bytes(bytes[81..89].try_into().expect("eight-byte timestamp")),
+            trader_address: bs58::encode(&bytes[57..89]).into_string(),
+            timestamp: i64::from_le_bytes(bytes[89..97].try_into().expect("eight-byte timestamp")),
         });
     }
     Ok(decoded)
@@ -2657,7 +2655,7 @@ mod pump_fun_trade_event_tests {
         bytes.extend_from_slice(&trader);
         bytes.extend_from_slice(&1_700_000_000_i64.to_le_bytes());
         bytes.extend_from_slice(&[0u8; 24]); // appended IDL fields
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
         let logs = vec![
             "Program PumpProgram invoke [1]".to_owned(),
             format!("Program data: {encoded}"),
