@@ -49,6 +49,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("reconnect_recovery_status")
             | Some("pumpswap_activity")
             | Some("pumpswap_trade_activity")
+            | Some("pump_fun_trade_activity")
             | Some("pumpswap_volume_update")
             | Some("command_rejected")
     )
