@@ -1,0 +1,329 @@
+use serde::{Deserialize, Serialize};
+
+/// Main Trading Bot entry policy. Values are supplied from the persisted engine settings;
+/// this module contains no provider calls, wallet signing, or transaction submission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingBotConfig {
+    pub minimum_safety_score: f64,
+    pub minimum_liquidity_usd: f64,
+    pub maximum_entry_price_usd: f64,
+    pub position_size_sol: f64,
+    pub maximum_slippage_pct: f64,
+    pub minimum_5m_buy_volume_usd: f64,
+    pub maximum_top10_concentration_pct: f64,
+    pub maximum_open_positions: usize,
+    pub minimum_distinct_buyers_high_score: usize,
+    pub minimum_distinct_buyers_other: usize,
+    pub high_creator_score_threshold: f64,
+    pub low_score_observation_seconds: u64,
+    pub blacklist_known_rug_creators: bool,
+    pub whitelist_only_mode: bool,
+}
+
+impl Default for TradingBotConfig {
+    fn default() -> Self {
+        Self {
+            minimum_safety_score: 80.0,
+            minimum_liquidity_usd: 3_000.0,
+            maximum_entry_price_usd: 0.0,
+            position_size_sol: 0.01,
+            maximum_slippage_pct: 10.0,
+            minimum_5m_buy_volume_usd: 1_000.0,
+            maximum_top10_concentration_pct: 20.0,
+            maximum_open_positions: 3,
+            minimum_distinct_buyers_high_score: 2,
+            minimum_distinct_buyers_other: 3,
+            high_creator_score_threshold: 80.0,
+            low_score_observation_seconds: 30,
+            blacklist_known_rug_creators: true,
+            whitelist_only_mode: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatorReputation {
+    pub score: Option<f64>,
+    pub known_rug_creator: Option<bool>,
+    pub preferred_owner: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityAssessment {
+    pub mint_authority_disabled: bool,
+    pub freeze_authority_disabled: bool,
+    pub rugcheck_available: bool,
+    pub rugcheck_acceptable: bool,
+    pub safety_score: Option<f64>,
+    pub top10_concentration_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveMarketActivity {
+    pub price_usd: Option<f64>,
+    pub liquidity_usd: Option<f64>,
+    pub buy_volume_5m_usd: f64,
+    pub distinct_buyers_5m: usize,
+    pub buy_count_5m: u64,
+    pub sell_count_5m: u64,
+    pub estimated_slippage_pct: Option<f64>,
+    pub seconds_since_launch: u64,
+    /// Set only from confirmed, decoded on-chain trade events; never from price ticks.
+    pub confirmed_trade_events: u64,
+    pub buy_pressure_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradingBotDecision {
+    Reject,
+    Wait,
+    EvaluatePaperEntry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingBotEvaluation {
+    pub decision: TradingBotDecision,
+    pub entry_speed: String,
+    pub creator_score: Option<f64>,
+    pub minimum_distinct_buyers: usize,
+    pub reasons: Vec<String>,
+}
+
+/// Evaluate one token against security, market, portfolio and creator-history gates.
+/// A strong creator score only changes the evidence/waiting threshold; it never bypasses
+/// verification, liquidity, concentration, slippage, volume or portfolio limits.
+pub fn evaluate_entry(
+    config: &TradingBotConfig,
+    creator: &CreatorReputation,
+    security: &SecurityAssessment,
+    market: &LiveMarketActivity,
+    open_positions: usize,
+) -> TradingBotEvaluation {
+    let high_score = creator
+        .score
+        .is_some_and(|score| score.is_finite() && score >= config.high_creator_score_threshold);
+    let minimum_buyers = if high_score {
+        config.minimum_distinct_buyers_high_score
+    } else {
+        config.minimum_distinct_buyers_other
+    };
+    let entry_speed = if high_score { "fast" } else { "confirmation" };
+    let mut reasons = Vec::new();
+    let mut rejected = false;
+    let mut waiting = false;
+
+    let mut reject = |reason: &str| {
+        rejected = true;
+        reasons.push(reason.to_owned());
+    };
+    let mut wait = |reason: &str| {
+        waiting = true;
+        reasons.push(reason.to_owned());
+    };
+
+    if !security.mint_authority_disabled || !security.freeze_authority_disabled {
+        reject("Mint and freeze authorities must both be disabled.");
+    }
+    if !security.rugcheck_available {
+        reject("RugCheck is unavailable; token cannot be paper-entry eligible.");
+    } else if !security.rugcheck_acceptable {
+        reject("RugCheck did not return an acceptable risk assessment.");
+    }
+    match security.safety_score {
+        Some(score) if score.is_finite() && score >= config.minimum_safety_score => {}
+        Some(_) => reject("Safety score is below the configured minimum."),
+        None => reject("Safety score is unavailable."),
+    }
+    if config.blacklist_known_rug_creators {
+        match creator.known_rug_creator {
+            Some(true) => reject("Creator is on the known-rug blacklist."),
+            Some(false) => {}
+            None => reject("Creator rug-history status is unknown while blacklist protection is enabled."),
+        }
+    }
+    if config.whitelist_only_mode && !creator.preferred_owner {
+        reject("Creator is not on the preferred-owner list; token remains monitor-only.");
+    }
+    if open_positions >= config.maximum_open_positions {
+        reject("Maximum number of open paper positions has been reached.");
+    }
+
+    match security.top10_concentration_pct {
+        Some(value) if value.is_finite() && value <= config.maximum_top10_concentration_pct => {}
+        Some(_) => reject("Top-10 holder concentration exceeds the configured maximum."),
+        None => reject("Top-10 holder concentration is unavailable."),
+    }
+    match market.liquidity_usd {
+        Some(value) if value.is_finite() && value >= config.minimum_liquidity_usd => {}
+        Some(_) => wait("Waiting for minimum liquidity."),
+        None => wait("Waiting for a verified liquidity value."),
+    }
+    match market.price_usd {
+        Some(value)
+            if value.is_finite()
+                && value > 0.0
+                && (config.maximum_entry_price_usd <= 0.0
+                    || value <= config.maximum_entry_price_usd) => {}
+        Some(_) => reject("Entry price exceeds the configured maximum or is invalid."),
+        None => wait("Waiting for a valid live market price."),
+    }
+    match market.estimated_slippage_pct {
+        Some(value) if value.is_finite() && value <= config.maximum_slippage_pct => {}
+        Some(_) => reject("Estimated entry slippage exceeds the configured maximum."),
+        None => wait("Waiting for an entry-slippage estimate."),
+    }
+    if market.buy_volume_5m_usd < config.minimum_5m_buy_volume_usd {
+        wait("Five-minute confirmed buy volume is below the configured minimum.");
+    }
+    if market.distinct_buyers_5m < minimum_buyers {
+        wait("Not enough distinct buying wallets have participated yet.");
+    }
+    if market.confirmed_trade_events == 0 || market.buy_count_5m == 0 {
+        wait("Waiting for confirmed on-chain buy activity; price movement alone is not a trade signal.");
+    }
+    if !high_score && market.seconds_since_launch < config.low_score_observation_seconds {
+        wait("Low-scoring or unknown creator: waiting for the additional market-confirmation period.");
+    }
+
+    let decision = if rejected {
+        TradingBotDecision::Reject
+    } else if waiting {
+        TradingBotDecision::Wait
+    } else {
+        reasons.push("All configured entry gates passed; paper-entry execution may evaluate this signal.".into());
+        TradingBotDecision::EvaluatePaperEntry
+    };
+
+    TradingBotEvaluation {
+        decision,
+        entry_speed: entry_speed.into(),
+        creator_score: creator.score,
+        minimum_distinct_buyers: minimum_buyers,
+        reasons,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn security() -> SecurityAssessment {
+        SecurityAssessment {
+            mint_authority_disabled: true,
+            freeze_authority_disabled: true,
+            rugcheck_available: true,
+            rugcheck_acceptable: true,
+            safety_score: Some(92.0),
+            top10_concentration_pct: Some(12.0),
+        }
+    }
+
+    fn market() -> LiveMarketActivity {
+        LiveMarketActivity {
+            price_usd: Some(0.0001),
+            liquidity_usd: Some(10_000.0),
+            buy_volume_5m_usd: 2_000.0,
+            distinct_buyers_5m: 3,
+            buy_count_5m: 8,
+            sell_count_5m: 1,
+            estimated_slippage_pct: Some(2.0),
+            seconds_since_launch: 60,
+            confirmed_trade_events: 9,
+            buy_pressure_pct: Some(80.0),
+        }
+    }
+
+    fn creator(score: Option<f64>) -> CreatorReputation {
+        CreatorReputation {
+            score,
+            known_rug_creator: Some(false),
+            preferred_owner: true,
+        }
+    }
+
+    #[test]
+    fn high_creator_score_uses_fast_two_wallet_threshold() {
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &market(),
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
+        assert_eq!(result.entry_speed, "fast");
+        assert_eq!(result.minimum_distinct_buyers, 2);
+    }
+
+    #[test]
+    fn unknown_creator_waits_for_three_wallets_and_confirmation_time() {
+        let mut live = market();
+        live.distinct_buyers_5m = 2;
+        live.seconds_since_launch = 10;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(None),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert_eq!(result.minimum_distinct_buyers, 3);
+    }
+
+    #[test]
+    fn creator_score_never_bypasses_security() {
+        let mut assessment = security();
+        assessment.rugcheck_acceptable = false;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(99.0)),
+            &assessment,
+            &market(),
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Reject);
+    }
+
+    #[test]
+    fn price_ticks_without_confirmed_trades_never_trigger_entry() {
+        let mut live = market();
+        live.confirmed_trade_events = 0;
+        live.buy_count_5m = 0;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(95.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+    }
+
+    #[test]
+    fn unavailable_rugcheck_blocks_entry_but_not_market_monitoring() {
+        let mut assessment = security();
+        assessment.rugcheck_available = false;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(95.0)),
+            &assessment,
+            &market(),
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Reject);
+    }
+
+    #[test]
+    fn open_position_limit_is_enforced() {
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(95.0)),
+            &security(),
+            &market(),
+            3,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Reject);
+    }
+}
