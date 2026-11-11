@@ -140,12 +140,30 @@ pub fn attach_position_risk_policy(
         return false;
     };
     object.insert("risk_policy".into(), value);
-    object.insert("stop_loss_price_sol".into(), serde_json::json!(policy.stop_loss_price_sol));
-    object.insert("take_profit_price_sol".into(), serde_json::json!(policy.take_profit_price_sol));
-    object.insert("stop_loss_price_usd".into(), serde_json::json!(policy.stop_loss_price_usd));
-    object.insert("take_profit_price_usd".into(), serde_json::json!(policy.take_profit_price_usd));
-    object.insert("stop_loss_pct".into(), serde_json::json!(policy.stop_loss_pct));
-    object.insert("take_profit_pct".into(), serde_json::json!(policy.take_profit_pct));
+    object.insert(
+        "stop_loss_price_sol".into(),
+        serde_json::json!(policy.stop_loss_price_sol),
+    );
+    object.insert(
+        "take_profit_price_sol".into(),
+        serde_json::json!(policy.take_profit_price_sol),
+    );
+    object.insert(
+        "stop_loss_price_usd".into(),
+        serde_json::json!(policy.stop_loss_price_usd),
+    );
+    object.insert(
+        "take_profit_price_usd".into(),
+        serde_json::json!(policy.take_profit_price_usd),
+    );
+    object.insert(
+        "stop_loss_pct".into(),
+        serde_json::json!(policy.stop_loss_pct),
+    );
+    object.insert(
+        "take_profit_pct".into(),
+        serde_json::json!(policy.take_profit_pct),
+    );
     true
 }
 
@@ -283,7 +301,9 @@ pub fn evaluate_entry(
         match creator.known_rug_creator {
             Some(true) => reject("Creator is on the known-rug blacklist."),
             Some(false) => {}
-            None => reject("Creator rug-history status is unknown while blacklist protection is enabled."),
+            None => reject(
+                "Creator rug-history status is unknown while blacklist protection is enabled.",
+            ),
         }
     }
     if config.whitelist_only_mode && !creator.preferred_owner {
@@ -335,7 +355,10 @@ pub fn evaluate_entry(
     } else if waiting {
         TradingBotDecision::Wait
     } else {
-        reasons.push("All configured entry gates passed; paper-entry execution may evaluate this signal.".into());
+        reasons.push(
+            "All configured entry gates passed; paper-entry execution may evaluate this signal."
+                .into(),
+        );
         TradingBotDecision::EvaluatePaperEntry
     };
 
@@ -390,7 +413,12 @@ mod tests {
     fn position_policy_is_stored_on_the_position_record() {
         let config = TradingBotConfig::default();
         let mut position = serde_json::json!({"mint_address":"mint-a","status":"open"});
-        assert!(attach_position_risk_policy(&mut position, &config, 1.0, 150.0));
+        assert!(attach_position_risk_policy(
+            &mut position,
+            &config,
+            1.0,
+            150.0
+        ));
         assert_eq!(position["stop_loss_price_sol"], 0.85);
         assert_eq!(position["take_profit_price_sol"], 2.0);
         assert_eq!(position["risk_policy"]["stop_loss_pct"], 15.0);
