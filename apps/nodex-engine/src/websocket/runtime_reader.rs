@@ -69,3 +69,43 @@ pub(super) fn spawn(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn market_events_require_an_exact_mint_and_open_position() {
+        let positions = vec![json!({
+            "mint_address":"MintOpen",
+            "status":"OPEN"
+        })];
+        let open_event = json!({
+            "type":"market_price_update",
+            "data":{"mint_address":"MintOpen","price_sol":0.01}
+        });
+        let closed_event = json!({
+            "type":"market_price_update",
+            "data":{"mint_address":"MintClosed","price_sol":0.01}
+        });
+        let missing_mint_event = json!({
+            "type":"market_price_update",
+            "data":{"price_sol":0.01}
+        });
+
+        assert_eq!(event_mint(&open_event), Some("MintOpen"));
+        assert!(has_open_position(&positions, "MintOpen"));
+        assert!(!has_open_position(&positions, "MintClosed"));
+        assert_eq!(event_mint(&missing_mint_event), None);
+    }
+
+    #[test]
+    fn closed_positions_do_not_receive_market_ticks() {
+        let positions = vec![json!({
+            "mint":"MintClosed",
+            "status":"CLOSED_PROFIT"
+        })];
+        assert!(!has_open_position(&positions, "MintClosed"));
+    }
+}
