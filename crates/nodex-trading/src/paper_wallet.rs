@@ -237,6 +237,30 @@ mod tests {
     }
 
     #[test]
+    fn full_token_account_close_refunds_rent_only_once() {
+        let mut wallet = PaperWallet::default();
+        wallet.reserve_buy_for_token("mint-1", &costs()).unwrap();
+        let before = wallet.available_balance_lamports;
+        let first = wallet.close_token_account_and_recover_rent("mint-1").unwrap();
+        assert_eq!(first.as_ref().unwrap().amount_lamports, 2_039_280);
+        assert_eq!(wallet.available_balance_lamports, before + 2_039_280);
+        assert_eq!(wallet.locked_rent_lamports, 0);
+        let after_first_close = wallet.available_balance_lamports;
+        assert!(wallet.close_token_account_and_recover_rent("mint-1").unwrap().is_none());
+        assert_eq!(wallet.available_balance_lamports, after_first_close);
+    }
+
+    #[test]
+    fn token_account_rent_cannot_be_tracked_twice() {
+        let mut wallet = PaperWallet::default();
+        wallet.reserve_buy_for_token("mint-1", &costs()).unwrap();
+        assert_eq!(
+            wallet.reserve_buy_for_token("mint-1", &costs()),
+            Err(PaperWalletError::RentAccountAlreadyTracked)
+        );
+    }
+
+    #[test]
     fn rent_refund_returns_to_available_balance() {
         let mut wallet = PaperWallet::default();
         wallet.reserve_buy(&costs()).unwrap();
