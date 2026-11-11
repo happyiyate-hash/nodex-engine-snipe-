@@ -215,7 +215,10 @@ mod tests {
         assert_eq!(snapshot["security"]["checks"][0]["name"], "mint_authority");
         assert_eq!(snapshot["activity"]["status"], "scanning");
         assert_eq!(snapshot["activity"]["stage"], "holder_distribution");
-        assert_eq!(snapshot["activity"]["sub_event"], "Checking holder distribution");
+        assert_eq!(
+            snapshot["activity"]["sub_event"],
+            "Checking holder distribution"
+        );
         assert_eq!(snapshot["activity"]["progress"], 82);
         assert!(snapshot["market"]["holders"].is_null());
         assert_eq!(snapshot["position"]["token_balance"], 10.0);
