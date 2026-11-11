@@ -948,13 +948,31 @@ fn start_token_state_projector(
                 continue;
             };
             if kind == "pump_fun_trade_activity" {
-                let signature = data.get("signature").and_then(serde_json::Value::as_str).unwrap_or_default();
-                let trader = data.get("trader_address").and_then(serde_json::Value::as_str).unwrap_or_default();
-                let side = data.get("side").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let signature = data
+                    .get("signature")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let trader = data
+                    .get("trader_address")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let side = data
+                    .get("side")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
                 let amount = json_u64(data.get("sol_amount_lamports")).unwrap_or(0);
                 let timestamp_ms = timestamp_ms_from_value(data.get("timestamp"))
                     .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                record_confirmed_trade(&mut trade_observations, &mut seen_trade_keys, mint, signature, trader, side, amount, timestamp_ms);
+                record_confirmed_trade(
+                    &mut trade_observations,
+                    &mut seen_trade_keys,
+                    mint,
+                    signature,
+                    trader,
+                    side,
+                    amount,
+                    timestamp_ms,
+                );
                 continue;
             }
             if kind == "token_rejected_cleanup" {
