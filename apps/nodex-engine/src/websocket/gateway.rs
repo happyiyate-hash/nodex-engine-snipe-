@@ -38,7 +38,6 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("paper_buy_failed")
             | Some("paper_sell_executed")
             | Some("paper_sell_failed")
-            | Some("position_updated")
             | Some("paper_entry_evaluation")
             | Some("paper_exit_triggered")
             | Some("strategy_rejected_token")
