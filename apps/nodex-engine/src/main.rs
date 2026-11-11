@@ -1237,7 +1237,9 @@ fn start_token_state_projector(
                 | "paper_entry_evaluation"
                 | "paper_buy_executed"
                 | "paper_buy_failed"
-                | "paper_sell_executed" => json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))}),
+                | "paper_sell_executed" => {
+                    json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))})
+                }
                 _ => continue,
             };
             if let Some(activity) = activity_patch {
