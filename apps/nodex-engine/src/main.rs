@@ -1301,9 +1301,6 @@ fn start_token_state_projector(
                         | "token_scan_failed"
                         | "token_monitoring_started"
                         | "token_monitoring_update"
-                        | "market_subscription_requested"
-                        | "market_subscription_waiting"
-                        | "market_subscription_active"
                         | "paper_entry_evaluation"
                         | "paper_buy_started"
                         | "paper_buy_executed"
@@ -1333,15 +1330,15 @@ fn start_token_state_projector(
                 | "token_scan_failed"
                 | "token_monitoring_started"
                 | "token_monitoring_update"
-                | "market_subscription_requested"
-                | "market_subscription_waiting"
-                | "market_subscription_active"
                 | "paper_entry_evaluation"
                 | "paper_buy_started"
                 | "paper_buy_executed"
                 | "paper_buy_failed"
                 | "paper_sell_executed" => {
                     json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))})
+                }
+                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_active" => {
+                    json!({"market_subscription": data})
                 }
                 _ => continue,
             };
@@ -2966,6 +2963,7 @@ fn start_launch_processor(
                             let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
                                 "mint_address":scan_mint,"decision":decision,"status":terminal_status,
                                 "progress":100,"message":"Security scan finished.",
+                                "diagnostic_only":report.diagnostic_only,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
                             // Record a durable terminal/intermediate scan state independently of
