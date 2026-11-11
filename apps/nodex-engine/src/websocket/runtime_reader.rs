@@ -89,7 +89,7 @@ pub(super) fn spawn(
                     if !super::is_frontend_event(&event) { continue; }
                     let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
                     let Some(prepared_event) = enforce_exact_mint(event) else {
-                        tracing::warn!(event_type, "Dropped token-scoped event without exact mint address");
+                        tracing::warn!(event_type = %event_type, "Dropped token-scoped event without exact mint address");
                         continue;
                     };
                     event = prepared_event;
