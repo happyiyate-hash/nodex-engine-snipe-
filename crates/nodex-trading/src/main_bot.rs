@@ -288,18 +288,18 @@ pub fn evaluate_entry(
         reject!("Mint and freeze authorities must both be disabled.");
     }
     if !security.rugcheck_available {
-        reject("RugCheck is unavailable; token cannot be paper-entry eligible.");
+        reject!("RugCheck is unavailable; token cannot be paper-entry eligible.");
     } else if !security.rugcheck_acceptable {
-        reject("RugCheck did not return an acceptable risk assessment.");
+        reject!("RugCheck did not return an acceptable risk assessment.");
     }
     match security.safety_score {
         Some(score) if score.is_finite() && score >= config.minimum_safety_score => {}
-        Some(_) => reject("Safety score is below the configured minimum."),
-        None => reject("Safety score is unavailable."),
+        Some(_) => reject!("Safety score is below the configured minimum."),
+        None => reject!("Safety score is unavailable."),
     }
     if config.blacklist_known_rug_creators {
         match creator.known_rug_creator {
-            Some(true) => reject("Creator is on the known-rug blacklist."),
+            Some(true) => reject!("Creator is on the known-rug blacklist."),
             Some(false) => {}
             None => reject(
                 "Creator rug-history status is unknown while blacklist protection is enabled.",
@@ -307,21 +307,21 @@ pub fn evaluate_entry(
         }
     }
     if config.whitelist_only_mode && !creator.preferred_owner {
-        reject("Creator is not on the preferred-owner list; token remains monitor-only.");
+        reject!("Creator is not on the preferred-owner list; token remains monitor-only.");
     }
     if open_positions >= config.maximum_open_positions {
-        reject("Maximum number of open paper positions has been reached.");
+        reject!("Maximum number of open paper positions has been reached.");
     }
 
     match security.top10_concentration_pct {
         Some(value) if value.is_finite() && value <= config.maximum_top10_concentration_pct => {}
-        Some(_) => reject("Top-10 holder concentration exceeds the configured maximum."),
-        None => reject("Top-10 holder concentration is unavailable."),
+        Some(_) => reject!("Top-10 holder concentration exceeds the configured maximum."),
+        None => reject!("Top-10 holder concentration is unavailable."),
     }
     match market.liquidity_usd {
         Some(value) if value.is_finite() && value >= config.minimum_liquidity_usd => {}
         Some(_) => wait!("Waiting for minimum liquidity."),
-        None => wait("Waiting for a verified liquidity value."),
+        None => wait!("Waiting for a verified liquidity value."),
     }
     match market.price_usd {
         Some(value)
@@ -329,25 +329,25 @@ pub fn evaluate_entry(
                 && value > 0.0
                 && (config.maximum_entry_price_usd <= 0.0
                     || value <= config.maximum_entry_price_usd) => {}
-        Some(_) => reject("Entry price exceeds the configured maximum or is invalid."),
-        None => wait("Waiting for a valid live market price."),
+        Some(_) => reject!("Entry price exceeds the configured maximum or is invalid."),
+        None => wait!("Waiting for a valid live market price."),
     }
     match market.estimated_slippage_pct {
         Some(value) if value.is_finite() && value <= config.maximum_slippage_pct => {}
-        Some(_) => reject("Estimated entry slippage exceeds the configured maximum."),
-        None => wait("Waiting for an entry-slippage estimate."),
+        Some(_) => reject!("Estimated entry slippage exceeds the configured maximum."),
+        None => wait!("Waiting for an entry-slippage estimate."),
     }
     if market.buy_volume_5m_usd < config.minimum_5m_buy_volume_usd {
-        wait("Five-minute confirmed buy volume is below the configured minimum.");
+        wait!("Five-minute confirmed buy volume is below the configured minimum.");
     }
     if market.distinct_buyers_5m < minimum_buyers {
-        wait("Not enough distinct buying wallets have participated yet.");
+        wait!("Not enough distinct buying wallets have participated yet.");
     }
     if market.confirmed_trade_events == 0 || market.buy_count_5m == 0 {
-        wait("Waiting for confirmed on-chain buy activity; price movement alone is not a trade signal.");
+        wait!("Waiting for confirmed on-chain buy activity; price movement alone is not a trade signal.");
     }
     if !high_score && market.seconds_since_launch < config.low_score_observation_seconds {
-        wait("Low-scoring or unknown creator: waiting for the additional market-confirmation period.");
+        wait!("Low-scoring or unknown creator: waiting for the additional market-confirmation period.");
     }
 
     let decision = if rejected {
