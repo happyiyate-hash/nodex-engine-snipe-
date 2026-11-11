@@ -1158,7 +1158,10 @@ fn start_token_state_projector(
                         let empty_observations = VecDeque::new();
                         let observations =
                             trade_observations.get(mint).unwrap_or(&empty_observations);
-                        let venue = data.get("venue").and_then(serde_json::Value::as_str).unwrap_or_default();
+                        let venue = data
+                            .get("venue")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
                         let quote_is_sol = match venue {
                             "pump_fun_bonding_curve" => true,
                             "pump_swap" => data
