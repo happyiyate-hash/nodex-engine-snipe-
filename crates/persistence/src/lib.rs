@@ -1110,10 +1110,12 @@ mod paper_buy_transaction_tests {
 
         assert_eq!(restored_wallet.available_balance_lamports, 90_000_000);
         assert_eq!(restored_wallet.invested_balance_lamports, 10_000_000);
-        assert_eq!(restored_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64, 0.01);
+        assert_eq!(
+            restored_wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64,
+            0.01
+        );
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0]["mint_address"], "mint-a");
         assert_eq!(ledger_count, 1);
     }
 }
-
