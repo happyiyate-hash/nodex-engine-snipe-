@@ -1254,17 +1254,20 @@ fn start_token_state_projector(
                 "paper_entry_evaluation" => Some(json!({
                     "status": "evaluating",
                     "label": "Evaluating entry",
-                    "stage": "strategy_checks"
+                    "stage": "strategy_checks",
+                    "sub_event": data.get("message").cloned().or_else(|| data.get("reason").cloned()).unwrap_or(json!("Evaluating entry criteria against strategy settings"))
                 })),
                 "paper_buy_started" => Some(json!({
                     "status": "executing_buy",
                     "label": "Executing buy order",
-                    "stage": data.get("stage").cloned().unwrap_or(json!("paper_order_start"))
+                    "stage": data.get("stage").cloned().unwrap_or(json!("paper_order_start")),
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Preparing simulated purchase order"))
                 })),
                 "paper_buy_executed" => Some(json!({
                     "status": "bought_paper",
                     "label": "Paper buy executed",
-                    "stage": "position_open"
+                    "stage": "position_open",
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Simulated position opened"))
                 })),
                 "paper_buy_failed" => Some(json!({
                     "status": "buy_failed",
@@ -1303,7 +1306,8 @@ fn start_token_state_projector(
                 "paper_sell_executed" => Some(json!({
                     "status": "closed",
                     "label": "Position closed",
-                    "stage": "position_closed"
+                    "stage": "position_closed",
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Paper position closed"))
                 })),
                 _ => None,
             };
