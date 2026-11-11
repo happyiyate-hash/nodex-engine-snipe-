@@ -625,18 +625,28 @@ impl SolanaRpc {
         // gate. It is optional enrichment and must not hold a launch in diagnostics.
         on_progress("rugcheck", 70, "Checking RugCheck risk report");
         report.rugcheck = self.get_rugcheck_summary(mint).await;
-        let blocking_rugcheck_risks = report.rugcheck.risks.iter().filter(|risk| {
-            let level = risk
-                .get("level")
-                .or_else(|| risk.get("severity"))
-                .or_else(|| risk.get("riskLevel"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            matches!(level.as_str(), "danger" | "critical" | "high" | "severe" | "blocker")
-        }).count();
-        let authorities_clear = report.mint_authority.is_none() && report.freeze_authority.is_none();
-        let rugcheck_positive = report.rugcheck.status == "available" && blocking_rugcheck_risks == 0;
+        let blocking_rugcheck_risks = report
+            .rugcheck
+            .risks
+            .iter()
+            .filter(|risk| {
+                let level = risk
+                    .get("level")
+                    .or_else(|| risk.get("severity"))
+                    .or_else(|| risk.get("riskLevel"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                matches!(
+                    level.as_str(),
+                    "danger" | "critical" | "high" | "severe" | "blocker"
+                )
+            })
+            .count();
+        let authorities_clear =
+            report.mint_authority.is_none() && report.freeze_authority.is_none();
+        let rugcheck_positive =
+            report.rugcheck.status == "available" && blocking_rugcheck_risks == 0;
         if report.rugcheck.status == "available" {
             report.checks.push(SecurityCheck {
                 name: "rugcheck_summary".into(),
