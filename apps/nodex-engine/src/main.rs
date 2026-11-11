@@ -1224,7 +1224,15 @@ fn start_token_state_projector(
                     "label": "Scan failed",
                     "progress": 0,
                     "stage": data.get("stage").cloned().unwrap_or(json!("security_failed")),
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Security scan failed"))
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Security scan failed")),
+                    "error": {
+                        "severity": "error",
+                        "stage": data.get("stage").cloned().unwrap_or(json!("security_failed")),
+                        "provider": data.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                        "message": data.get("message").cloned().unwrap_or(json!("Security scan failed")),
+                        "raw_response": data.get("error_details").cloned().unwrap_or(serde_json::Value::Null),
+                        "occurred_at": data.get("received_at").cloned().unwrap_or(json!(chrono::Utc::now().to_rfc3339()))
+                    }
                 })),
                 "token_monitoring_started" | "token_monitoring_update" => Some(json!({
                     "status": "monitoring",
@@ -1261,7 +1269,36 @@ fn start_token_state_projector(
                 "paper_buy_failed" => Some(json!({
                     "status": "buy_failed",
                     "label": "Buy failed",
-                    "stage": "entry_failed"
+                    "stage": data.get("stage").cloned().unwrap_or(json!("entry_failed")),
+                    "sub_event": data.get("reason").cloned().or_else(|| data.get("message").cloned()).unwrap_or(json!("Paper buy failed")),
+                    "error": {
+                        "severity": "error",
+                        "stage": data.get("stage").cloned().unwrap_or(json!("entry_failed")),
+                        "provider": data.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                        "message": data.get("message").cloned().or_else(|| data.get("reason").cloned()).unwrap_or(json!("Paper buy failed")),
+                        "raw_response": data.get("error_details").cloned().unwrap_or(serde_json::Value::Null),
+                        "occurred_at": data.get("received_at").cloned().unwrap_or(json!(chrono::Utc::now().to_rfc3339()))
+                    }
+                })),
+                "paper_sell_failed" => Some(json!({
+                    "status": "sell_failed",
+                    "label": "Sell failed",
+                    "stage": data.get("stage").cloned().unwrap_or(json!("exit_failed")),
+                    "sub_event": data.get("reason").cloned().or_else(|| data.get("message").cloned()).unwrap_or(json!("Paper sell failed")),
+                    "error": {
+                        "severity": "error",
+                        "stage": data.get("stage").cloned().unwrap_or(json!("exit_failed")),
+                        "provider": data.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                        "message": data.get("message").cloned().or_else(|| data.get("reason").cloned()).unwrap_or(json!("Paper sell failed")),
+                        "raw_response": data.get("error_details").cloned().unwrap_or(serde_json::Value::Null),
+                        "occurred_at": data.get("received_at").cloned().unwrap_or(json!(chrono::Utc::now().to_rfc3339()))
+                    }
+                })),
+                "strategy_rejected_token" => Some(json!({
+                    "status": "strategy_rejected",
+                    "label": "Strategy rejected",
+                    "stage": data.get("stage").cloned().unwrap_or(json!("strategy_checks")),
+                    "sub_event": data.get("reason").cloned().or_else(|| data.get("message").cloned()).unwrap_or(json!("Token did not meet strategy criteria"))
                 })),
                 "paper_sell_executed" => Some(json!({
                     "status": "closed",
@@ -1294,7 +1331,7 @@ fn start_token_state_projector(
                     "executing_buy" => 5,
                     "monitoring_stopped" => 3,
                     "rejected" | "unverified" | "failed" | "bought_paper" | "buy_failed"
-                    | "closed" => 6,
+                    | "sell_failed" | "strategy_rejected" | "closed" => 6,
                     _ => 0,
                 };
                 let current_status = current_activity
@@ -1335,6 +1372,8 @@ fn start_token_state_projector(
                         | "paper_buy_executed"
                         | "paper_buy_failed"
                         | "paper_sell_executed"
+                        | "paper_sell_failed"
+                        | "strategy_rejected_token"
                 )
             {
                 continue;
@@ -1364,7 +1403,9 @@ fn start_token_state_projector(
                 | "paper_buy_started"
                 | "paper_buy_executed"
                 | "paper_buy_failed"
-                | "paper_sell_executed" => {
+                | "paper_sell_executed"
+                | "paper_sell_failed"
+                | "strategy_rejected_token" => {
                     json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))})
                 }
                 "market_subscription_requested"
