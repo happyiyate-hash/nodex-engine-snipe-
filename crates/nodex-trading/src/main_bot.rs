@@ -592,7 +592,10 @@ mod tests {
             0,
         );
         assert_eq!(eligible.decision, TradingBotDecision::EvaluatePaperEntry);
-        assert!(eligible.reasons.iter().any(|reason| reason.contains("Top-10 holder concentration")));
+        assert!(eligible
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Top-10 holder concentration")));
     }
 
     #[test]
