@@ -56,10 +56,16 @@ pub(super) fn spawn(
                     if !super::is_frontend_event(&event) {
                         continue;
                     }
-                    let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+                    let event_type = event
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     if POSITION_SCOPED_MARKET_EVENTS.contains(&event_type) {
                         let Some(mint) = event_mint(&event) else {
-                            tracing::warn!(event_type, "Dropped token market event without an exact mint address");
+                            tracing::warn!(
+                                event_type,
+                                "Dropped token market event without an exact mint address"
+                            );
                             continue;
                         };
                         let positions = portfolio_positions.read().await;
