@@ -711,6 +711,50 @@ pub async fn clear_non_paper_token_history(
     unreachable!("token cleanup retry loop always returns")
 }
 
+/// Atomically remove inactive token history while preserving every mint that has
+/// any paper position. Paper positions, wallet balances, ledger and audit history
+/// are never touched by this cleanup.
+pub async fn delete_inactive_token_history(
+    pool: &SqlitePool,
+    candidate_mints: &[String],
+) -> Result<Vec<String>> {
+    if candidate_mints.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut transaction = pool.begin().await?;
+    let mut deleted = Vec::new();
+    for mint in candidate_mints {
+        let has_position: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ?",
+        )
+        .bind(mint)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if has_position > 0 {
+            continue;
+        }
+        let state_rows = sqlx::query("DELETE FROM token_states WHERE mint_address = ?")
+            .bind(mint)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        let launch_rows = sqlx::query("DELETE FROM token_launches WHERE mint_address = ?")
+            .bind(mint)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        sqlx::query("DELETE FROM chart_candles WHERE mint_address = ?")
+            .bind(mint)
+            .execute(&mut *transaction)
+            .await?;
+        if state_rows + launch_rows > 0 {
+            deleted.push(mint.clone());
+        }
+    }
+    transaction.commit().await?;
+    Ok(deleted)
+}
+
 /// Upsert one OHLCV candle by token, timeframe and its event-time bucket.
 pub async fn save_chart_candle(
     pool: &SqlitePool,
