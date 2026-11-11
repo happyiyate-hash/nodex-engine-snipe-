@@ -627,13 +627,24 @@ impl SolanaRpc {
         if !diagnostic_mode {
             if let Some(supply_raw) = report.supply_raw.as_deref() {
                 on_progress("holder_distribution", 82, "Sampling the largest token holders");
-                match self.sample_holder_distribution(mint, supply_raw).await {
-                    Ok(distribution) => report.holder_distribution = Some(distribution),
-                    Err(error) => report.checks.push(SecurityCheck {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.sample_holder_distribution(mint, supply_raw),
+                )
+                .await
+                {
+                    Ok(Ok(distribution)) => report.holder_distribution = Some(distribution),
+                    Ok(Err(error)) => report.checks.push(SecurityCheck {
                         name: "holder_distribution".into(),
                         status: "unverified".into(),
                         severity: "warning".into(),
                         detail: format!("Top-holder sampling was unavailable; paper strategy will require stronger market confirmation: {error}"),
+                    }),
+                    Err(_) => report.checks.push(SecurityCheck {
+                        name: "holder_distribution".into(),
+                        status: "unverified".into(),
+                        severity: "warning".into(),
+                        detail: "Top-holder sampling exceeded its 5-second optional-enrichment budget; paper strategy will require stronger market confirmation.".into(),
                     }),
                 }
             }
