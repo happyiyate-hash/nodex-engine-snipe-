@@ -122,6 +122,33 @@ pub fn capture_position_risk(
     })
 }
 
+/// Stamp an opening position with an immutable risk-policy snapshot. Call this
+/// once after the paper fill price and quantity are known, before persistence.
+pub fn attach_position_risk_policy(
+    position: &mut serde_json::Value,
+    config: &TradingBotConfig,
+    entry_price_sol: f64,
+    entry_price_usd: f64,
+) -> bool {
+    let Some(policy) = capture_position_risk(config, entry_price_sol, entry_price_usd) else {
+        return false;
+    };
+    let Ok(value) = serde_json::to_value(&policy) else {
+        return false;
+    };
+    let Some(object) = position.as_object_mut() else {
+        return false;
+    };
+    object.insert("risk_policy".into(), value);
+    object.insert("stop_loss_price_sol".into(), serde_json::json!(policy.stop_loss_price_sol));
+    object.insert("take_profit_price_sol".into(), serde_json::json!(policy.take_profit_price_sol));
+    object.insert("stop_loss_price_usd".into(), serde_json::json!(policy.stop_loss_price_usd));
+    object.insert("take_profit_price_usd".into(), serde_json::json!(policy.take_profit_price_usd));
+    object.insert("stop_loss_pct".into(), serde_json::json!(policy.stop_loss_pct));
+    object.insert("take_profit_pct".into(), serde_json::json!(policy.take_profit_pct));
+    true
+}
+
 /// Update one position's high-water mark and return only its own exit trigger.
 pub fn evaluate_position_exit(
     policy: &mut PositionRiskPolicy,
@@ -357,6 +384,17 @@ mod tests {
             known_rug_creator: Some(false),
             preferred_owner: true,
         }
+    }
+
+    #[test]
+    fn position_policy_is_stored_on_the_position_record() {
+        let config = TradingBotConfig::default();
+        let mut position = serde_json::json!({"mint_address":"mint-a","status":"open"});
+        assert!(attach_position_risk_policy(&mut position, &config, 1.0, 150.0));
+        assert_eq!(position["stop_loss_price_sol"], 0.85);
+        assert_eq!(position["take_profit_price_sol"], 2.0);
+        assert_eq!(position["risk_policy"]["stop_loss_pct"], 15.0);
+        assert_eq!(position["risk_policy"]["take_profit_pct"], 100.0);
     }
 
     #[test]
