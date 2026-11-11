@@ -3644,6 +3644,7 @@ async fn main() -> anyhow::Result<()> {
                                 | Some("paper_buy_failed")
                                 | Some("paper_sell_executed")
                                 | Some("paper_sell_failed")
+                                | Some("paper_exit_triggered")
                                 | Some("swap_started")
                                 | Some("swap_updated")
                                 | Some("swap_completed")
