@@ -342,7 +342,10 @@ pub fn evaluate_entry(
 
     // Avoid buying the top of a fast candle. A modest negative 1m move while the
     // 5m trend remains positive is treated as a pullback, not a reason to chase.
-    if market.price_change_1m_pct.is_some_and(|change| change.is_finite() && change > 12.0) {
+    if market
+        .price_change_1m_pct
+        .is_some_and(|change| change.is_finite() && change > 12.0)
+    {
         wait!("One-minute price expansion is too sharp; waiting for a pullback.");
     }
     if market
