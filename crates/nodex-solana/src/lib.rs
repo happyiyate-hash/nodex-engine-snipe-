@@ -1681,8 +1681,7 @@ pub struct PumpFunTradeEvent {
     pub timestamp: i64,
 }
 
-const PUMP_FUN_TRADE_EVENT_DISCRIMINATOR: [u8; 8] =
-    [189, 219, 127, 211, 78, 230, 97, 238];
+const PUMP_FUN_TRADE_EVENT_DISCRIMINATOR: [u8; 8] = [189, 219, 127, 211, 78, 230, 97, 238];
 
 /// Decode Pump.fun TradeEvent logs only while the configured Pump.fun program
 /// is the active invocation. The first 89 Borsh bytes are stable in the official
@@ -1740,11 +1739,9 @@ pub fn decode_pump_fun_trade_logs(
         let Some(encoded) = line.strip_prefix("Program data: ") else {
             continue;
         };
-        let bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            encoded.trim(),
-        )
-        .context("decoding Pump.fun TradeEvent base64")?;
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded.trim())
+                .context("decoding Pump.fun TradeEvent base64")?;
         if bytes.len() < 97 || bytes[..8] != PUMP_FUN_TRADE_EVENT_DISCRIMINATOR {
             continue;
         }
