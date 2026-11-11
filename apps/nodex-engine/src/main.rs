@@ -106,8 +106,10 @@ impl Default for TradingSettings {
         Self {
             min_liquidity_usd: 3_000.0,
             max_entry_price_usd: 0.0,
-            max_investment_per_token_sol: 0.01,
-            max_investment_per_token_usd: 0.0,
+            // Position sizing is configured in USD. SOL is derived from the
+            // latest quote immediately before a paper order is constructed.
+            max_investment_per_token_sol: 0.0,
+            max_investment_per_token_usd: 15.0,
             max_simultaneous_positions: 3,
             min_safety_score: 80,
             max_slippage_pct: 10.0,
@@ -214,8 +216,8 @@ impl TradingSettings {
         if self.min_safety_score > 100 {
             return Err("min_safety_score must be between 0 and 100.".into());
         }
-        if self.max_investment_per_token_sol <= 0.0 && self.max_investment_per_token_usd <= 0.0 {
-            return Err("Set a positive per-token paper position size in SOL or USD.".into());
+        if self.max_investment_per_token_usd <= 0.0 {
+            return Err("max_investment_per_token_usd must be greater than zero.".into());
         }
         if self.max_simultaneous_positions == 0 || self.max_simultaneous_positions > 1_000 {
             return Err("max_simultaneous_positions must be between 1 and 1000.".into());
@@ -230,13 +232,14 @@ fn main_bot_config_from_settings(
     settings: &TradingSettings,
     sol_price_usd: f64,
 ) -> TradingBotConfig {
-    let position_size_usd = settings.max_investment_per_token_usd.max(0.0);
-    let position_size_sol =
-        if position_size_usd > 0.0 && sol_price_usd.is_finite() && sol_price_usd > 0.0 {
-            position_size_usd / sol_price_usd
-        } else {
-            settings.max_investment_per_token_sol
-        };
+    let position_size_usd = settings.max_investment_per_token_usd;
+    // Never fall back to a stale SOL-denominated setting. If the live quote is
+    // unavailable, expose a zero SOL order amount so an order cannot be built.
+    let position_size_sol = if sol_price_usd.is_finite() && sol_price_usd > 0.0 {
+        position_size_usd / sol_price_usd
+    } else {
+        0.0
+    };
 
     TradingBotConfig {
         minimum_safety_score: f64::from(settings.min_safety_score),
@@ -475,17 +478,54 @@ fn start_token_state_projector(
                                     .unwrap_or(0.0);
                                 let current_value = quantity * price_sol;
                                 let pnl = current_value - cost_basis;
+                                let price_snapshot = sol_price.read().await.clone();
+                                let sol_usd = price_snapshot.price_usd;
+                                let entry_sol_usd = position
+                                    .get("entry_sol_price_usd")
+                                    .or_else(|| position.get("sol_usd_at_entry"))
+                                    .and_then(serde_json::Value::as_f64)
+                                    .filter(|value| value.is_finite() && *value > 0.0)
+                                    .unwrap_or(sol_usd);
+                                let invested_usd = position
+                                    .get("initial_investment_usd")
+                                    .or_else(|| position.get("cost_basis_usd"))
+                                    .and_then(serde_json::Value::as_f64)
+                                    .filter(|value| value.is_finite() && *value >= 0.0)
+                                    .unwrap_or(cost_basis * entry_sol_usd);
+                                let current_price_usd = price_sol * sol_usd;
+                                let current_value_usd = current_value * sol_usd;
+                                let pnl_usd = current_value_usd - invested_usd;
+                                let pnl_pct = if invested_usd > 0.0 {
+                                    pnl_usd / invested_usd * 100.0
+                                } else {
+                                    0.0
+                                };
                                 if let Some(object) = position.as_object_mut() {
                                     object.insert("current_price_sol".into(), json!(price_sol));
                                     object.insert("current_value_sol".into(), json!(current_value));
                                     object.insert("unrealized_pnl_sol".into(), json!(pnl));
+                                    object.insert("current_price_usd".into(), json!(current_price_usd));
+                                    object.insert("entry_price_usd".into(), json!(
+                                        position.get("entry_price_usd")
+                                            .and_then(serde_json::Value::as_f64)
+                                            .filter(|value| value.is_finite() && *value > 0.0)
+                                            .unwrap_or_else(|| {
+                                                position.get("entry_price_sol")
+                                                    .and_then(serde_json::Value::as_f64)
+                                                    .unwrap_or(price_sol) * entry_sol_usd
+                                            })
+                                    ));
+                                    object.insert("initial_investment_usd".into(), json!(invested_usd));
+                                    object.insert("current_position_value_usd".into(), json!(current_value_usd));
+                                    object.insert("pnl_usd".into(), json!(pnl_usd));
+                                    object.insert("unrealized_pnl_usd".into(), json!(pnl_usd));
+                                    object.insert("pnl_pct".into(), json!(pnl_pct));
+                                    object.insert("unrealized_pnl_pct".into(), json!(pnl_pct));
+                                    object.insert("sol_price_usd_at_mark".into(), json!(sol_usd));
+                                    object.insert("sol_price_source_at_mark".into(), json!(price_snapshot.source));
                                     object.insert(
-                                        "unrealized_pnl_pct".into(),
-                                        json!(if cost_basis > 0.0 {
-                                            pnl / cost_basis * 100.0
-                                        } else {
-                                            0.0
-                                        }),
+                                        "unrealized_pnl_sol".into(),
+                                        json!(pnl),
                                     );
                                     object.insert(
                                         "marked_at".into(),
@@ -553,7 +593,6 @@ fn start_token_state_projector(
                                 );
                             }
                             let wallet_snapshot = wallet.read().await.clone();
-                            let price_snapshot = sol_price.read().await.clone();
                             let portfolio = calculate_portfolio_snapshot(
                                 &wallet_snapshot,
                                 &price_snapshot,
@@ -2354,7 +2393,6 @@ async fn patch_runtime_config(
     const ALLOWED: &[&str] = &[
         "min_liquidity_usd",
         "max_entry_price_usd",
-        "max_investment_per_token_sol",
         "max_investment_per_token_usd",
         "max_simultaneous_positions",
         "min_safety_score",
@@ -3709,10 +3747,45 @@ async fn main() -> anyhow::Result<()> {
     let mut trading_settings = match stored_trading_config {
         Some(raw) => serde_json::from_str::<TradingSettings>(&raw)
             .ok()
-            .filter(|settings| settings.validate().is_ok())
+            .filter(|settings| {
+                settings.max_investment_per_token_usd.is_finite()
+                    && settings.max_investment_per_token_usd >= 0.0
+            })
             .unwrap_or_default(),
         None => TradingSettings::default(),
     };
+    // Migrate the old fixed-SOL position size exactly once into a USD budget.
+    // This preserves the operator's prior budget at the migration-time SOL quote.
+    let usd_position_size_migrated: Option<String> = sqlx::query_scalar(
+        "SELECT config_json FROM nodex_runtime_config WHERE config_key = 'usd_position_size_v1'",
+    )
+    .fetch_optional(&db)
+    .await?;
+    if usd_position_size_migrated.is_none() {
+        if trading_settings.max_investment_per_token_usd <= 0.0
+            && trading_settings.max_investment_per_token_sol > 0.0
+        {
+            trading_settings.max_investment_per_token_usd =
+                trading_settings.max_investment_per_token_sol * initial_sol_price.price_usd;
+        }
+        trading_settings.max_investment_per_token_sol = 0.0;
+        trading_settings.validate().map_err(anyhow::Error::msg)?;
+        let migrated = serde_json::to_string(&trading_settings)?;
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at",
+        )
+        .bind(migrated)
+        .bind(&updated_at)
+        .execute(&db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('usd_position_size_v1', 'enabled', ?)",
+        )
+        .bind(updated_at)
+        .execute(&db)
+        .await?;
+    }
     // One-time migration from the old diagnostic-only / require-every-checks
     // defaults. The operator explicitly chose the faster authority + RugCheck
     // launch gate; retain future manual changes after this migration marker.
