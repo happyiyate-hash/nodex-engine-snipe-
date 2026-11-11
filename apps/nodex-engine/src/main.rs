@@ -4406,7 +4406,20 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         }
                         Ok(ClientCommand::SubscribeToken { mint }) => {
                             let mint = mint.trim().to_owned();
-                            if mint.is_empty() || mint.len() > 64 {
+                            let has_open_position = state.portfolio_positions.read().await.iter().any(|position| {
+                                let position_mint = position.get("mint_address")
+                                    .or_else(|| position.get("mint"))
+                                    .and_then(serde_json::Value::as_str);
+                                let status = position.get("status").and_then(serde_json::Value::as_str).unwrap_or("open");
+                                position_mint == Some(mint.as_str()) && status.eq_ignore_ascii_case("open")
+                            });
+                            if !has_open_position {
+                                Some(json!({"type":"command_rejected","data":{
+                                    "command":"subscribe_token",
+                                    "mint_address":mint,
+                                    "reason":"Token detail subscriptions are available only while a paper position is open."
+                                }}))
+                            } else if mint.is_empty() || mint.len() > 64 {
                                 Some(json!({"type":"command_rejected","data":{"command":"subscribe_token","mint":mint,"reason":"A valid token mint address is required."}}))
                             } else {
                                 match build_approved_token_detail_snapshot(&state, &mint).await {
