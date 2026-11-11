@@ -1713,7 +1713,6 @@ fn start_launch_processor(
                 let approved_registry = token_registry.clone();
                 let approved_database = database.clone();
                 let inflight_mints_for_scan = inflight_mints.clone();
-                let authority_monitor_slots_for_scan = authority_monitor_slots.clone();
                 let trading_settings_for_scan = trading_settings.clone();
                 tokio::spawn(async move {
                     let scan_settings = trading_settings_for_scan.read().await.clone();
