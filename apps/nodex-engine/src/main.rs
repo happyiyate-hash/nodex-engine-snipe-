@@ -22,7 +22,7 @@ use nodex_solana::{
     StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::{
-    main_bot::{capture_position_risk, TradingBotConfig},
+    main_bot::TradingBotConfig,
     paper_wallet::{PaperWallet, LAMPORTS_PER_SOL},
 };
 use serde::{Deserialize, Serialize};
@@ -3970,6 +3970,56 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%address, mode = "paper", "NodeX engine API listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod main_bot_config_tests {
+    use super::*;
+
+    #[test]
+    fn main_bot_config_uses_persisted_trading_settings() {
+        let settings = TradingSettings {
+            min_liquidity_usd: 3_000.0,
+            max_entry_price_usd: 0.0005,
+            max_investment_per_token_sol: 0.01,
+            max_investment_per_token_usd: 5.0,
+            max_simultaneous_positions: 3,
+            min_safety_score: 80,
+            max_slippage_pct: 10.0,
+            stop_loss_pct: 15.0,
+            take_profit_pct: 100.0,
+            min_5m_buy_volume_usd: 1_000.0,
+            max_top10_holder_concentration_pct: 20.0,
+            auto_buy_enabled: true,
+            trailing_stop_enabled: false,
+            trailing_stop_callback_pct: 10.0,
+            blacklist_creators_with_prior_rugs: true,
+            paper_starting_balance: 10.0,
+            paper_starting_balance_currency: "USD".into(),
+            diagnostic_mode: false,
+            block_unverified_trades: false,
+            execution_enabled: false,
+            whitelist_only_mode: false,
+            preferred_owners: Vec::new(),
+        };
+        let config = main_bot_config_from_settings(&settings, 200.0);
+        assert_eq!(config.minimum_liquidity_usd, 3_000.0);
+        assert_eq!(config.maximum_entry_price_usd, 0.0005);
+        assert_eq!(config.position_size_usd, 5.0);
+        assert_eq!(config.position_size_sol, 0.025);
+        assert_eq!(config.stop_loss_pct, 15.0);
+        assert_eq!(config.take_profit_pct, 100.0);
+        assert_eq!(config.maximum_open_positions, 3);
+        assert_eq!(config.maximum_top10_concentration_pct, 20.0);
+    }
+
+    #[test]
+    fn sol_position_size_is_used_when_usd_size_is_not_configured() {
+        let settings = TradingSettings::default();
+        let config = main_bot_config_from_settings(&settings, 200.0);
+        assert_eq!(config.position_size_sol, settings.max_investment_per_token_sol);
+        assert_eq!(config.position_size_usd, 0.0);
+    }
 }
 
 #[cfg(test)]
