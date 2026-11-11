@@ -324,6 +324,99 @@ struct Health {
 
 /// Build transient scan-progress fields without allowing late progress events
 /// to downgrade a terminal approval or rejection in the canonical token state.
+fn core_verification_gate_passed(security: &serde_json::Value) -> bool {
+    let decision = security
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !decision.eq_ignore_ascii_case("APPROVED")
+        || security
+            .get("diagnostic_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    ["mint_authority", "freeze_authority", "rugcheck_summary"]
+        .iter()
+        .all(|required| {
+            security
+                .get("checks")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|checks| {
+                    checks.iter().any(|check| {
+                        check.get("name").and_then(serde_json::Value::as_str) == Some(*required)
+                            && check
+                                .get("status")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|status| {
+                                    status.eq_ignore_ascii_case("passed")
+                                        || status.eq_ignore_ascii_case("verified")
+                                })
+                    })
+                })
+        })
+}
+
+fn start_inactive_token_cleanup(
+    database: sqlx::SqlitePool,
+    registry: TokenRegistry,
+    stream_status: Arc<RwLock<StreamStatus>>,
+    events: broadcast::Sender<serde_json::Value>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Never infer inactivity while the upstream feed is unhealthy.
+            if !stream_status.read().await.connected {
+                continue;
+            }
+            let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+            let inactive_mints = registry
+                .snapshot()
+                .into_iter()
+                .filter_map(|snapshot| {
+                    let last_activity = snapshot
+                        .data
+                        .get("last_activity_at")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&chrono::Utc))
+                        .unwrap_or(snapshot.updated_at);
+                    (last_activity < cutoff).then_some(snapshot.mint_address)
+                })
+                .collect::<Vec<_>>();
+            if inactive_mints.is_empty() {
+                continue;
+            }
+            match nodex_persistence::delete_inactive_token_history(&database, &inactive_mints).await {
+                Ok(deleted_mints) if !deleted_mints.is_empty() => {
+                    for mint in &deleted_mints {
+                        registry.remove(mint);
+                    }
+                    tracing::info!(
+                        deleted_tokens = deleted_mints.len(),
+                        "Removed tokens inactive for one hour; tokens with paper positions were preserved"
+                    );
+                    let _ = events.send(json!({
+                        "type":"tokens_removed_inactive",
+                        "data":{
+                            "mint_addresses":deleted_mints,
+                            "inactive_for_seconds":3600,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }
+                    }));
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error, "Inactive token cleanup failed"),
+            }
+        }
+    });
+}
+
 fn scan_progress_security_patch(
     current_security: Option<&serde_json::Value>,
     data: &serde_json::Value,
@@ -1051,6 +1144,15 @@ fn start_token_state_projector(
                     amount,
                     timestamp_ms,
                 );
+                if let Ok(snapshot) = registry.upsert_patch(
+                    &mint,
+                    json!({"last_activity_at": chrono::Utc::now().to_rfc3339()}),
+                ) {
+                    if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                        tracing::warn!(%error, mint_address = %mint, "Could not persist confirmed trade activity timestamp");
+                    }
+                    let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                }
                 continue;
             }
             let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str) else {
@@ -1082,6 +1184,15 @@ fn start_token_state_projector(
                     amount,
                     timestamp_ms,
                 );
+                if let Ok(snapshot) = registry.upsert_patch(
+                    mint,
+                    json!({"last_activity_at": chrono::Utc::now().to_rfc3339()}),
+                ) {
+                    if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                        tracing::warn!(%error, mint_address = mint, "Could not persist confirmed trade activity timestamp");
+                    }
+                    let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
+                }
                 continue;
             }
             if kind == "token_rejected_cleanup" {
@@ -1192,18 +1303,14 @@ fn start_token_state_projector(
                     let verification_gate_passed = data
                         .get("verification_gate_passed")
                         .and_then(serde_json::Value::as_bool)
-                        .unwrap_or_else(|| {
-                            data.get("all_checks_verified")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(false)
-                        });
+                        .unwrap_or(false);
                     if decision == "APPROVED" && !diagnostic_only && verification_gate_passed {
                         Some(json!({
-                            "status": "verified",
-                            "label": "Verified",
+                            "status": "monitoring",
+                            "label": "Monitoring",
                             "progress": 100,
-                            "stage": "security_complete",
-                            "sub_event": "Core launch verification passed. Supplementary checks remain visible in the security report."
+                            "stage": "market_watch",
+                            "sub_event": "The three mandatory verification checks passed. Live market monitoring has started."
                         }))
                     } else if decision == "REJECTED" {
                         Some(json!({
@@ -1249,12 +1356,7 @@ fn start_token_state_projector(
                             && security
                                 .get("verification_gate_passed")
                                 .and_then(serde_json::Value::as_bool)
-                                .unwrap_or_else(|| {
-                                    security
-                                        .get("all_checks_verified")
-                                        .and_then(serde_json::Value::as_bool)
-                                        .unwrap_or(false)
-                                })
+                                .unwrap_or_else(|| core_verification_gate_passed(security))
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
@@ -1300,12 +1402,7 @@ fn start_token_state_projector(
                             && security
                                 .get("verification_gate_passed")
                                 .and_then(serde_json::Value::as_bool)
-                                .unwrap_or_else(|| {
-                                    security
-                                        .get("all_checks_verified")
-                                        .and_then(serde_json::Value::as_bool)
-                                        .unwrap_or(false)
-                                })
+                                .unwrap_or_else(|| core_verification_gate_passed(security))
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
@@ -1459,7 +1556,10 @@ fn start_token_state_projector(
                             .unwrap_or(serde_json::Value::Null)
                     }
                 }),
-                "market_price_update" => json!({"market": data}),
+                "market_price_update" => json!({
+                    "market": data,
+                    "last_activity_at": chrono::Utc::now().to_rfc3339()
+                }),
                 "pumpswap_volume_update" => json!({
                     "statistics": {"pumpswap_volume": data}
                 }),
@@ -2905,24 +3005,10 @@ fn start_launch_processor(
                                     .checks
                                     .iter()
                                     .all(|check| check.status.eq_ignore_ascii_case("verified"));
-                            let verification_gate_passed = !report.diagnostic_only
-                                && report.decision.eq_ignore_ascii_case("APPROVED")
-                                && ["mint_authority", "freeze_authority", "rugcheck_summary"]
-                                    .iter()
-                                    .all(|required| {
-                                        report.checks.iter().any(|check| {
-                                            check.name == *required
-                                                && (check.status.eq_ignore_ascii_case("passed")
-                                                    || check
-                                                        .status
-                                                        .eq_ignore_ascii_case("verified"))
-                                        })
-                                    })
-                                && !report.checks.iter().any(|check| {
-                                    check.name == "token_2022_extensions"
-                                        && check.severity.eq_ignore_ascii_case("critical")
-                                        && check.status.eq_ignore_ascii_case("unverified")
-                                });
+                            let report_value =
+                                serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+                            let verification_gate_passed =
+                                core_verification_gate_passed(&report_value);
                             let execution_gate = json!({
                                 "execution_enabled": current_policy.execution_enabled,
                                 "block_unverified_trades": current_policy.block_unverified_trades,
@@ -2948,6 +3034,9 @@ fn start_launch_processor(
                             report_payload["all_checks_verified"] = json!(all_checks_verified);
                             report_payload["verification_gate_passed"] =
                                 json!(verification_gate_passed);
+                            report_payload["verification_status"] = json!(
+                                if verification_gate_passed { "VERIFIED" } else { "UNVERIFIED" }
+                            );
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -2956,7 +3045,15 @@ fn start_launch_processor(
                             };
                             // Persist the terminal lifecycle status alongside the verdict.
                             // A report can carry a stale intermediate "scanning" field.
-                            report_payload["status"] = json!(terminal_status);
+                            report_payload["status"] = json!(
+                                if verification_gate_passed {
+                                    "verified"
+                                } else if decision.eq_ignore_ascii_case("REJECTED") {
+                                    "rejected"
+                                } else {
+                                    "unverified"
+                                }
+                            );
                             match decision.as_str() {
                                 "APPROVED" => {
                                     let launch_saved = match nodex_persistence::save_launch(
@@ -4473,11 +4570,29 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
     let token_snapshots: Vec<serde_json::Value> = token_snapshots
         .into_iter()
         .map(|snapshot| {
-            // Flatten TokenState.data into the same shape returned by the token
-            // detail endpoint: identity, security, market and statistics beside
-            // mint_address. The browser mapper consumes this canonical shape.
+            // Flatten every tracked token into the profile bootstrap response.
+            // Verification is independent of market and strategy activity.
             let mut value = snapshot.data;
             if let Some(fields) = value.as_object_mut() {
+                let security = fields.get("security").cloned().unwrap_or_else(|| json!({}));
+                let verified = security
+                    .get("verification_gate_passed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or_else(|| core_verification_gate_passed(&security));
+                let rejected = security
+                    .get("decision")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|decision| decision.eq_ignore_ascii_case("REJECTED"));
+                let status = if verified { "VERIFIED" } else if rejected { "REJECTED" } else { "UNVERIFIED" };
+                fields.insert("verification_status".into(), json!(status));
+                fields.insert("verification_label".into(), json!(
+                    match status {
+                        "VERIFIED" => "Verified",
+                        "REJECTED" => "Rejected",
+                        _ => "Unverified"
+                    }
+                ));
+                fields.insert("is_verified".into(), json!(verified));
                 fields.insert("mint_address".into(), json!(snapshot.mint_address));
                 fields.insert("version".into(), json!(snapshot.version));
                 fields.insert("updated_at".into(), json!(snapshot.updated_at));
@@ -5413,6 +5528,12 @@ async fn main() -> anyhow::Result<()> {
         profile_state.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
+    start_inactive_token_cleanup(
+        db.clone(),
+        token_registry.clone(),
+        stream_status.clone(),
+        events.clone(),
+    );
     let rpc = (!config.solana_http_urls.is_empty()).then(|| {
         SolanaRpc::new_with_urls(config.solana_http_urls.clone())
             .with_activity_events(events.clone())
@@ -5606,6 +5727,53 @@ mod scan_progress_state_tests {
         );
         assert_eq!(patch["security"]["status"], "scanning");
         assert_eq!(patch["security"]["progress"], 42);
+    }
+
+    #[test]
+    fn supplementary_failures_do_not_block_core_verification() {
+        let report = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"verified"},
+                {"name":"rugcheck_summary","status":"passed"},
+                {"name":"token_2022_extensions","status":"unverified","severity":"critical"},
+                {"name":"holder_distribution","status":"unverified"}
+            ]
+        });
+        assert!(core_verification_gate_passed(&report));
+    }
+
+    #[test]
+    fn missing_mandatory_core_check_cannot_be_verified() {
+        let report = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"holder_distribution","status":"verified"}
+            ]
+        });
+        assert!(!core_verification_gate_passed(&report));
+    }
+
+    #[test]
+    fn diagnostic_or_rejected_scan_cannot_be_verified() {
+        let mut report = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":true,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"rugcheck_summary","status":"passed"}
+            ]
+        });
+        assert!(!core_verification_gate_passed(&report));
+        report["diagnostic_only"] = json!(false);
+        report["decision"] = json!("REJECTED");
+        assert!(!core_verification_gate_passed(&report));
     }
 }
 
