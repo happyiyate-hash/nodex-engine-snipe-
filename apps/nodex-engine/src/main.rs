@@ -554,7 +554,7 @@ async fn evaluate_and_execute_paper_entry(
         && rugcheck_score.is_some_and(|score| score.is_finite() && (0.0..=20.0).contains(&score));
     let holder_distribution = security.and_then(|value| value.get("holder_distribution"));
     let top10_concentration_pct = holder_distribution
-        .filter(|value| value.get("sample_is_partial").and_then(serde_json::Value::as_bool) != Some(true))
+        .filter(|value| value.get("sample_is_partial").and_then(serde_json::Value::as_bool) == Some(false))
         .and_then(|value| value.get("top_10_observed_owner_share_percent"))
         .and_then(serde_json::Value::as_f64);
     let safety_score = rugcheck_score
@@ -578,7 +578,7 @@ async fn evaluate_and_execute_paper_entry(
             token_snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.data.get("identity"))
-                .and_then(|identity| identity.get("creator_wallet"))
+                .and_then(|identity| identity.get("creator_wallet").or_else(|| identity.get("creator_address")))
                 .and_then(serde_json::Value::as_str)
         })
         .or_else(|| {
