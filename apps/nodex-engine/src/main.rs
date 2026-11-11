@@ -2094,7 +2094,9 @@ async fn resolve_discovery_metadata(
                                     result.errors.push(token_diagnostic(mint,"off_chain_metadata","metadata_uri",format!("Metadata provider returned HTTP {status}."),json!({"http_status":status.as_u16(),"response":raw})));
                                 }else{match serde_json::from_slice::<serde_json::Value>(&bytes){
                                     Ok(value)=>{
-                                        result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);
+                                        if result.logo_url.is_none() {
+                                            result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);
+                                        }
                                         if result.name.is_none(){result.name=value.get("name").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
                                         if result.symbol.is_none(){result.symbol=value.get("symbol").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
                                     }
