@@ -35,6 +35,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("portfolio_summary_updated")
             | Some("paper_buy_executed")
             | Some("paper_buy_failed")
+            | Some("paper_exit_triggered")
             | Some("strategy_rejected_token")
             | Some("diagnostic")
             | Some("provider_status")
