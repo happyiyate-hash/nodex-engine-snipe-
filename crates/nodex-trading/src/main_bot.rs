@@ -8,6 +8,11 @@ pub struct TradingBotConfig {
     pub minimum_liquidity_usd: f64,
     pub maximum_entry_price_usd: f64,
     pub position_size_sol: f64,
+    pub position_size_usd: f64,
+    pub stop_loss_pct: f64,
+    pub take_profit_pct: f64,
+    pub trailing_stop_enabled: bool,
+    pub trailing_stop_callback_pct: f64,
     pub maximum_slippage_pct: f64,
     pub minimum_5m_buy_volume_usd: f64,
     pub maximum_top10_concentration_pct: f64,
@@ -27,6 +32,11 @@ impl Default for TradingBotConfig {
             minimum_liquidity_usd: 3_000.0,
             maximum_entry_price_usd: 0.0,
             position_size_sol: 0.01,
+            position_size_usd: 0.0,
+            stop_loss_pct: 15.0,
+            take_profit_pct: 100.0,
+            trailing_stop_enabled: false,
+            trailing_stop_callback_pct: 10.0,
             maximum_slippage_pct: 10.0,
             minimum_5m_buy_volume_usd: 1_000.0,
             maximum_top10_concentration_pct: 20.0,
@@ -39,6 +49,109 @@ impl Default for TradingBotConfig {
             whitelist_only_mode: false,
         }
     }
+}
+
+/// Immutable risk settings copied onto a position at the moment it opens.
+/// Later dashboard setting changes affect new positions, not existing positions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PositionRiskPolicy {
+    pub entry_price_sol: f64,
+    pub entry_price_usd: f64,
+    pub stop_loss_pct: f64,
+    pub take_profit_pct: f64,
+    pub stop_loss_price_sol: f64,
+    pub take_profit_price_sol: f64,
+    pub stop_loss_price_usd: f64,
+    pub take_profit_price_usd: f64,
+    pub trailing_stop_enabled: bool,
+    pub trailing_stop_callback_pct: f64,
+    pub highest_price_sol: f64,
+    pub captured_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PositionExitReason {
+    StopLoss,
+    TakeProfit,
+    TrailingStop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PositionExitTrigger {
+    pub reason: PositionExitReason,
+    pub trigger_price_sol: f64,
+    pub entry_price_sol: f64,
+    pub pnl_pct: f64,
+}
+
+/// Freeze the configured exit thresholds at entry. All prices are derived from
+/// that position's own fill price, so separate tokens/lots never share triggers.
+pub fn capture_position_risk(
+    config: &TradingBotConfig,
+    entry_price_sol: f64,
+    entry_price_usd: f64,
+) -> Option<PositionRiskPolicy> {
+    if !entry_price_sol.is_finite()
+        || entry_price_sol <= 0.0
+        || !entry_price_usd.is_finite()
+        || entry_price_usd <= 0.0
+        || !config.stop_loss_pct.is_finite()
+        || !(0.0..=100.0).contains(&config.stop_loss_pct)
+        || !config.take_profit_pct.is_finite()
+        || !(0.0..=1_000.0).contains(&config.take_profit_pct)
+        || !config.trailing_stop_callback_pct.is_finite()
+        || !(0.0..=100.0).contains(&config.trailing_stop_callback_pct)
+    {
+        return None;
+    }
+
+    Some(PositionRiskPolicy {
+        entry_price_sol,
+        entry_price_usd,
+        stop_loss_pct: config.stop_loss_pct,
+        take_profit_pct: config.take_profit_pct,
+        stop_loss_price_sol: entry_price_sol * (1.0 - config.stop_loss_pct / 100.0),
+        take_profit_price_sol: entry_price_sol * (1.0 + config.take_profit_pct / 100.0),
+        stop_loss_price_usd: entry_price_usd * (1.0 - config.stop_loss_pct / 100.0),
+        take_profit_price_usd: entry_price_usd * (1.0 + config.take_profit_pct / 100.0),
+        trailing_stop_enabled: config.trailing_stop_enabled,
+        trailing_stop_callback_pct: config.trailing_stop_callback_pct,
+        highest_price_sol: entry_price_sol,
+        captured_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Update one position's high-water mark and return only its own exit trigger.
+pub fn evaluate_position_exit(
+    policy: &mut PositionRiskPolicy,
+    current_price_sol: f64,
+) -> Option<PositionExitTrigger> {
+    if !current_price_sol.is_finite() || current_price_sol <= 0.0 {
+        return None;
+    }
+    policy.highest_price_sol = policy.highest_price_sol.max(current_price_sol);
+    let pnl_pct = (current_price_sol / policy.entry_price_sol - 1.0) * 100.0;
+    let trigger = if current_price_sol <= policy.stop_loss_price_sol {
+        Some(PositionExitReason::StopLoss)
+    } else if current_price_sol >= policy.take_profit_price_sol {
+        Some(PositionExitReason::TakeProfit)
+    } else if policy.trailing_stop_enabled
+        && policy.highest_price_sol > policy.entry_price_sol
+        && current_price_sol
+            <= policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0)
+    {
+        Some(PositionExitReason::TrailingStop)
+    } else {
+        None
+    }?;
+
+    Some(PositionExitTrigger {
+        reason: trigger,
+        trigger_price_sol: current_price_sol,
+        entry_price_sol: policy.entry_price_sol,
+        pnl_pct,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +357,39 @@ mod tests {
             known_rug_creator: Some(false),
             preferred_owner: true,
         }
+    }
+
+    #[test]
+    fn position_exit_levels_are_frozen_from_the_individual_entry_price() {
+        let config = TradingBotConfig::default();
+        let first = capture_position_risk(&config, 2.0, 300.0).unwrap();
+        let second = capture_position_risk(&config, 0.5, 75.0).unwrap();
+        assert_eq!(first.stop_loss_price_sol, 1.7);
+        assert_eq!(first.take_profit_price_sol, 4.0);
+        assert_eq!(second.stop_loss_price_sol, 0.425);
+        assert_eq!(second.take_profit_price_sol, 1.0);
+    }
+
+    #[test]
+    fn one_position_exit_trigger_does_not_change_another_position_policy() {
+        let config = TradingBotConfig::default();
+        let mut first = capture_position_risk(&config, 1.0, 150.0).unwrap();
+        let mut second = capture_position_risk(&config, 0.25, 37.5).unwrap();
+        let trigger = evaluate_position_exit(&mut first, 2.0).unwrap();
+        assert_eq!(trigger.reason, PositionExitReason::TakeProfit);
+        assert!(evaluate_position_exit(&mut second, 0.30).is_none());
+        assert_eq!(second.take_profit_price_sol, 0.5);
+    }
+
+    #[test]
+    fn trailing_stop_uses_each_positions_own_high_water_mark() {
+        let mut config = TradingBotConfig::default();
+        config.trailing_stop_enabled = true;
+        config.trailing_stop_callback_pct = 10.0;
+        let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        assert!(evaluate_position_exit(&mut policy, 1.5).is_none());
+        let trigger = evaluate_position_exit(&mut policy, 1.34).unwrap();
+        assert_eq!(trigger.reason, PositionExitReason::TrailingStop);
     }
 
     #[test]
