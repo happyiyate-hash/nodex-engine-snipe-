@@ -1230,7 +1230,9 @@ fn start_token_state_projector(
                 })),
                 // A market-data subscription is not strategy monitoring.
                 // Keep it out of the token lifecycle status.
-                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_active" => None,
+                "market_subscription_requested"
+                | "market_subscription_waiting"
+                | "market_subscription_active" => None,
                 "paper_entry_evaluation" => Some(json!({
                     "status": "evaluating",
                     "label": "Evaluating entry",
@@ -1260,7 +1262,10 @@ fn start_token_state_projector(
             };
             let mut activity_patch = activity_patch;
             if let Some(activity) = activity_patch.as_mut() {
-                if let Some(error) = current_activity.as_ref().and_then(|value| value.get("error")) {
+                if let Some(error) = current_activity
+                    .as_ref()
+                    .and_then(|value| value.get("error"))
+                {
                     if activity.get("error").is_none() {
                         activity["error"] = error.clone();
                     }
@@ -1349,7 +1354,9 @@ fn start_token_state_projector(
                 | "paper_sell_executed" => {
                     json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))})
                 }
-                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_active" => {
+                "market_subscription_requested"
+                | "market_subscription_waiting"
+                | "market_subscription_active" => {
                     json!({"market_subscription": data})
                 }
                 _ => continue,
@@ -3169,7 +3176,8 @@ fn start_launch_processor(
                                     .is_some_and(|security| {
                                         security.get("decision").and_then(serde_json::Value::as_str)
                                             == Some("APPROVED")
-                                            && !security.get("diagnostic_only")
+                                            && !security
+                                                .get("diagnostic_only")
                                                 .and_then(serde_json::Value::as_bool)
                                                 .unwrap_or(true)
                                     });
