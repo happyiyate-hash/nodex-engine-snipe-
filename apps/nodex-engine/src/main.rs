@@ -629,6 +629,8 @@ async fn evaluate_and_execute_paper_entry(
         buy_count_5m: buy_count,
         sell_count_5m,
         estimated_slippage_pct,
+        price_change_1m_pct: market_data.get("price_change_1m_pct").and_then(serde_json::Value::as_f64),
+        price_change_5m_pct: market_data.get("price_change_5m_pct").and_then(serde_json::Value::as_f64),
         seconds_since_launch,
         confirmed_trade_events: recent_trades.len() as u64,
         buy_pressure_pct: (total_volume_5m_usd > 0.0)
