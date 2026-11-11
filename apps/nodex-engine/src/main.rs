@@ -1234,12 +1234,24 @@ fn start_token_state_projector(
                         "occurred_at": data.get("received_at").cloned().unwrap_or(json!(chrono::Utc::now().to_rfc3339()))
                     }
                 })),
-                "token_monitoring_started" | "token_monitoring_update" => Some(json!({
-                    "status": "monitoring",
-                    "label": "Monitoring",
-                    "stage": data.get("stage").cloned().unwrap_or(json!("market_watch")),
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Monitoring token conditions"))
-                })),
+                "token_monitoring_started" | "token_monitoring_update" => {
+                    let security_is_verified = current_security.as_ref().is_some_and(|security| {
+                        security.get("decision").and_then(serde_json::Value::as_str)
+                            == Some("APPROVED")
+                            && !security.get("diagnostic_only")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(true)
+                            && security.get("all_checks_verified")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false)
+                    });
+                    security_is_verified.then(|| json!({
+                        "status": "monitoring",
+                        "label": "Monitoring",
+                        "stage": data.get("stage").cloned().unwrap_or(json!("market_watch")),
+                        "sub_event": data.get("message").cloned().unwrap_or(json!("Monitoring token conditions"))
+                    }))
+                },
                 "token_monitoring_completed" => Some(json!({
                     "status": "monitoring_stopped",
                     "label": "Monitoring stopped",
