@@ -383,6 +383,7 @@ fn timestamp_ms_from_value(value: Option<&serde_json::Value>) -> Option<i64> {
         .map(|timestamp| timestamp.timestamp_millis())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_confirmed_trade(
     observations: &mut HashMap<String, VecDeque<ConfirmedTradeObservation>>,
     seen_keys: &mut HashSet<String>,
