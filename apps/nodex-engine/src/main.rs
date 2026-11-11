@@ -1330,8 +1330,8 @@ fn start_launch_processor(
                     let _ = events.send(json!({
                         "type":"creator_watchlist_status",
                         "data":{
-                            "mint_address":launch.mint_address,
-                            "creator_address":launch.creator_address,
+                            "mint_address":launch.mint_address.clone(),
+                            "creator_address":launch.creator_address.clone(),
                             "status":"monitor_only",
                             "preferred_owner":false,
                             "reason":"Creator is not in the preferred-owner list; discovery and market monitoring continue, but strict whitelist mode blocks paper entry."
