@@ -21,7 +21,10 @@ use nodex_solana::{
     run_logs_stream, start_market_monitor, MarketMonitor, PumpSwapActivityEvent, SolanaRpc,
     StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
-use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
+use nodex_trading::{
+    main_bot::{capture_position_risk, TradingBotConfig},
+    paper_wallet::{PaperWallet, LAMPORTS_PER_SOL},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sol_price::SolPriceSnapshot;
@@ -216,6 +219,45 @@ impl TradingSettings {
             return Err("max_simultaneous_positions must be between 1 and 1000.".into());
         }
         Ok(())
+    }
+}
+
+/// Adapt the persisted Trading Configuration table to the Main Trading Bot's
+/// strongly typed runtime policy. The current SOL/USD quote resolves USD-sized orders.
+fn main_bot_config_from_settings(
+    settings: &TradingSettings,
+    sol_price_usd: f64,
+) -> TradingBotConfig {
+    let position_size_usd = settings.max_investment_per_token_usd.max(0.0);
+    let position_size_sol = if position_size_usd > 0.0
+        && sol_price_usd.is_finite()
+        && sol_price_usd > 0.0
+    {
+        position_size_usd / sol_price_usd
+    } else {
+        settings.max_investment_per_token_sol
+    };
+
+    TradingBotConfig {
+        minimum_safety_score: f64::from(settings.min_safety_score),
+        minimum_liquidity_usd: settings.min_liquidity_usd,
+        maximum_entry_price_usd: settings.max_entry_price_usd,
+        position_size_sol,
+        position_size_usd,
+        stop_loss_pct: settings.stop_loss_pct,
+        take_profit_pct: settings.take_profit_pct,
+        trailing_stop_enabled: settings.trailing_stop_enabled,
+        trailing_stop_callback_pct: settings.trailing_stop_callback_pct,
+        maximum_slippage_pct: settings.max_slippage_pct,
+        minimum_5m_buy_volume_usd: settings.min_5m_buy_volume_usd,
+        maximum_top10_concentration_pct: settings.max_top10_holder_concentration_pct,
+        maximum_open_positions: settings.max_simultaneous_positions as usize,
+        minimum_distinct_buyers_high_score: 2,
+        minimum_distinct_buyers_other: 3,
+        high_creator_score_threshold: 80.0,
+        low_score_observation_seconds: 30,
+        blacklist_known_rug_creators: settings.blacklist_creators_with_prior_rugs,
+        whitelist_only_mode: settings.whitelist_only_mode,
     }
 }
 
@@ -2166,8 +2208,11 @@ fn verify_operator_key(state: &AppState, headers: &HeaderMap) -> Result<(), (Sta
 
 async fn get_trading_config(State(state): State<AppState>) -> Json<serde_json::Value> {
     let settings = state.trading_settings.read().await.clone();
+    let sol_price_usd = state.sol_price.read().await.price_usd;
+    let bot_config = main_bot_config_from_settings(&settings, sol_price_usd);
     Json(json!({
         "config": settings,
+        "main_bot_config": bot_config,
         "mode": "paper",
         "available_modes": { "paper": true, "real": false },
         "real_trading_available": false,
@@ -2209,7 +2254,9 @@ async fn update_trading_config(
         .database_changes
         .send(json!({"type":"trading_config_updated","data":settings}))
         .await;
-    Ok(Json(json!({"status":"ok","config":settings})))
+    let sol_price_usd = state.sol_price.read().await.price_usd;
+    let bot_config = main_bot_config_from_settings(&settings, sol_price_usd);
+    Ok(Json(json!({"status":"ok","config":settings,"main_bot_config":bot_config})))
 }
 
 async fn patch_runtime_config(
