@@ -359,6 +359,7 @@ fn start_inactive_token_cleanup(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
     stream_status: Arc<RwLock<StreamStatus>>,
+    market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     events: broadcast::Sender<serde_json::Value>,
 ) {
     tokio::spawn(async move {
@@ -393,6 +394,13 @@ fn start_inactive_token_cleanup(
                 Ok(deleted_mints) if !deleted_mints.is_empty() => {
                     for mint in &deleted_mints {
                         let _ = registry.remove(mint);
+                    }
+                    if let Some(monitor) = market_monitor.read().await.clone() {
+                        for mint in &deleted_mints {
+                            if let Err(error) = monitor.unsubscribe_mint(mint).await {
+                                tracing::warn!(%error, mint_address = %mint, "Could not unsubscribe inactive token market feed");
+                            }
+                        }
                     }
                     tracing::info!(
                         deleted_tokens = deleted_mints.len(),
@@ -5562,12 +5570,6 @@ async fn main() -> anyhow::Result<()> {
         profile_state.clone(),
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
-    start_inactive_token_cleanup(
-        db.clone(),
-        token_registry.clone(),
-        stream_status.clone(),
-        events.clone(),
-    );
     let rpc = (!config.solana_http_urls.is_empty()).then(|| {
         SolanaRpc::new_with_urls(config.solana_http_urls.clone())
             .with_activity_events(events.clone())
@@ -5582,6 +5584,13 @@ async fn main() -> anyhow::Result<()> {
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
+    start_inactive_token_cleanup(
+        db.clone(),
+        token_registry.clone(),
+        stream_status.clone(),
+        market_monitor.clone(),
+        events.clone(),
+    );
     let (runtime_enabled, runtime_receiver) = watch::channel(false);
 
     // Decode actual Pump.fun buys/sells from the same confirmed logs stream.
