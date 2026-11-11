@@ -1999,7 +1999,8 @@ async fn resolve_discovery_metadata(
                 result.metadata_uri = take_string(content.get("json_uri"));
             }
             if result.logo_url.is_none() {
-                result.logo_url = take_string(content.pointer("/links/image"));
+                result.logo_url = take_string(content.pointer("/links/image"))
+                    .and_then(|candidate| normalize_image_url(&candidate));
             }
             if result.logo_url.is_none() {
                 result.logo_url = content
@@ -2012,7 +2013,8 @@ async fn resolve_discovery_metadata(
                                 .is_some_and(|mime| mime.starts_with("image/"))
                         })
                     })
-                    .and_then(|file| take_string(file.get("uri")));
+                    .and_then(|file| take_string(file.get("uri")))
+                    .and_then(|candidate| normalize_image_url(&candidate));
             }
         }
         Err(error) => result.errors.push(token_diagnostic(
@@ -2095,7 +2097,7 @@ async fn resolve_discovery_metadata(
                                 }else{match serde_json::from_slice::<serde_json::Value>(&bytes){
                                     Ok(value)=>{
                                         if result.logo_url.is_none() {
-                                            result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);
+                                            result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).and_then(|candidate| normalize_image_url(candidate));
                                         }
                                         if result.name.is_none(){result.name=value.get("name").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
                                         if result.symbol.is_none(){result.symbol=value.get("symbol").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
@@ -2210,7 +2212,8 @@ async fn resolve_discovery_metadata(
                                     if result.symbol.is_none() { result.symbol = take(token.get("symbol")); }
                                     if result.logo_url.is_none() {
                                         result.logo_url = take(pair.pointer("/info/imageUrl"))
-                                            .or_else(|| take(pair.pointer("/info/header")));
+                                            .or_else(|| take(pair.pointer("/info/header")))
+                                            .and_then(|candidate| normalize_image_url(&candidate));
                                     }
                                 } else {
                                     result.errors.push(token_diagnostic(
