@@ -1246,11 +1246,26 @@ fn start_token_state_projector(
                     "stage": data.get("stage").cloned().unwrap_or(json!("monitoring_complete")),
                     "sub_event": data.get("message").cloned().unwrap_or(json!("Token is no longer being monitored"))
                 })),
-                // A market-data subscription is not strategy monitoring.
-                // Keep it out of the token lifecycle status.
-                "market_subscription_requested"
-                | "market_subscription_waiting"
-                | "market_subscription_active" => None,
+                "market_subscription_active" => {
+                    let security_is_verified = current_security.as_ref().is_some_and(|security| {
+                        security.get("decision").and_then(serde_json::Value::as_str)
+                            == Some("APPROVED")
+                            && !security.get("diagnostic_only")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(true)
+                            && security.get("all_checks_verified")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false)
+                    });
+                    security_is_verified.then(|| json!({
+                        "status": "monitoring",
+                        "label": "Monitoring",
+                        "stage": "market_feed_active",
+                        "sub_event": data.get("message").cloned().unwrap_or(json!("Verified token market feed is active"))
+                    }))
+                }
+                // Requested/waiting subscriptions are transport setup, not active monitoring.
+                "market_subscription_requested" | "market_subscription_waiting" => None,
                 "paper_entry_evaluation" => Some(json!({
                     "status": "evaluating",
                     "label": "Evaluating entry",
@@ -3229,35 +3244,8 @@ fn start_launch_processor(
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}),
                                 );
-                                // Market-feed subscriptions are created for discovery, but
-                                // only a successfully verified token enters strategy monitoring.
-                                let verified_for_monitoring = approved_registry
-                                    .get(&scan_mint)
-                                    .and_then(|snapshot| snapshot.data.get("security").cloned())
-                                    .is_some_and(|security| {
-                                        security.get("decision").and_then(serde_json::Value::as_str)
-                                            == Some("APPROVED")
-                                            && !security
-                                                .get("diagnostic_only")
-                                                .and_then(serde_json::Value::as_bool)
-                                                .unwrap_or(true)
-                                            && security
-                                                .get("all_checks_verified")
-                                                .and_then(serde_json::Value::as_bool)
-                                                .unwrap_or(false)
-                                    });
-                                if verified_for_monitoring {
-                                    let _ = scan_events.send(json!({
-                                        "type":"token_monitoring_started",
-                                        "data":{
-                                            "mint_address":scan_mint,
-                                            "status":"monitoring",
-                                            "stage":"market_watch",
-                                            "message":"Monitoring verified token market conditions",
-                                            "received_at":chrono::Utc::now().to_rfc3339()
-                                        }
-                                    }));
-                                }
+                                // Active monitoring is confirmed later by the backend's
+                                // market_subscription_active event, not by this request acknowledgement.
                             }
                             Err(error) => {
                                 let _ = scan_events.send(json!({"type":"diagnostic","data":{
