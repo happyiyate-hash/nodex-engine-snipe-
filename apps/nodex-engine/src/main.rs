@@ -783,6 +783,16 @@ async fn evaluate_and_execute_paper_entry(
         rent_reserve_lamports: 0,
     };
 
+    let _ = events.send(json!({
+        "type": "paper_buy_started",
+        "data": {
+            "mint_address": mint,
+            "paper_only": true,
+            "execution_mode": "simulated",
+            "stage": "reserving_paper_balance"
+        }
+    }));
+
     let mut wallet_guard = wallet.write().await;
     let mut positions_guard = portfolio_positions.write().await;
     if positions_guard.iter().any(|position| {
