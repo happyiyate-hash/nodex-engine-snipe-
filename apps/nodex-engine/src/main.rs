@@ -22,7 +22,7 @@ use nodex_solana::{
     StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::{
-    main_bot::{evaluate_position_exit, PositionRiskPolicy, TradingBotConfig},
+    main_bot::{capture_position_risk, evaluate_position_exit, PositionRiskPolicy, TradingBotConfig},
     paper_wallet::{PaperWallet, LAMPORTS_PER_SOL},
 };
 use serde::{Deserialize, Serialize};
@@ -3077,12 +3077,28 @@ async fn update_position_risk(
     if updated.get("exit_requested").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err((StatusCode::CONFLICT, "An exit has already been triggered for this position. Its risk policy cannot be changed.".into()));
     }
-    let risk_value = updated.get("risk_policy").cloned().ok_or((
-        StatusCode::CONFLICT,
-        "This position has no saved risk policy and cannot be edited safely.".to_string(),
-    ))?;
-    let mut policy: PositionRiskPolicy = serde_json::from_value(risk_value)
-        .map_err(|error| (StatusCode::CONFLICT, format!("Saved position risk policy is invalid: {error}")))?;
+    let risk_value = updated.get("risk_policy").cloned();
+    let mut policy: PositionRiskPolicy = if let Some(value) = risk_value {
+        serde_json::from_value(value)
+            .map_err(|error| (StatusCode::CONFLICT, format!("Saved position risk policy is invalid: {error}")))?
+    } else {
+        // Older open positions may predate per-position policies. Bootstrap one
+        // from their original fill and current trailing-stop configuration.
+        let entry_sol = updated.get("entry_price_sol").and_then(serde_json::Value::as_f64)
+            .or_else(|| updated.get("average_entry_price_sol").and_then(serde_json::Value::as_f64))
+            .unwrap_or(0.0);
+        let sol_usd = state.sol_price.read().await.price_usd;
+        let entry_usd = updated.get("entry_price_usd").and_then(serde_json::Value::as_f64)
+            .filter(|value| *value > 0.0).unwrap_or(entry_sol * sol_usd);
+        let settings = state.trading_settings.read().await.clone();
+        let mut config = main_bot_config_from_settings(&settings, sol_usd);
+        config.stop_loss_pct = update.stop_loss_pct;
+        config.take_profit_pct = update.take_profit_pct;
+        capture_position_risk(&config, entry_sol, entry_usd).ok_or((
+            StatusCode::CONFLICT,
+            "This position is missing a valid original entry price; its risk policy cannot be reconstructed.".to_string(),
+        ))?
+    };
     policy.stop_loss_pct = update.stop_loss_pct;
     policy.take_profit_pct = update.take_profit_pct;
     policy.stop_loss_price_sol = policy.entry_price_sol * (1.0 - update.stop_loss_pct / 100.0);
