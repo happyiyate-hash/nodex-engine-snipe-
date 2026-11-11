@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -108,6 +109,58 @@ fn attach_exact_mint(event: &mut Value, mint: &str) {
     }
 }
 
+fn remember_verified_pool(event: &Value, pool_to_mint: &mut HashMap<String, String>) {
+    if event.get("type").and_then(Value::as_str) != Some("market_pool_verified") {
+        return;
+    }
+    let Some(data) = event.get("data") else {
+        return;
+    };
+    let (Some(pool), Some(mint)) = (
+        data.get("pool_address").and_then(Value::as_str),
+        data.get("mint_address").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    if !pool.trim().is_empty() && !mint.trim().is_empty() {
+        pool_to_mint.insert(pool.to_owned(), mint.to_owned());
+    }
+}
+
+fn attach_verified_pool_mint(
+    event: &mut Value,
+    pool_to_mint: &HashMap<String, String>,
+) -> bool {
+    if event.get("type").and_then(Value::as_str) != Some("pumpswap_trade_activity")
+        || event_mint(event).is_some()
+    {
+        return true;
+    }
+    let Some(pool) = event
+        .get("data")
+        .and_then(|data| data.get("pool_address"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Some(mint) = pool_to_mint.get(pool) else {
+        // The global PumpSwap log stream includes unrelated pools. Only forward
+        // trades for pools that this engine has already verified and mapped.
+        return false;
+    };
+    attach_exact_mint(event, mint);
+    event_mint(event).as_deref() == Some(mint.as_str())
+}
+
+fn remove_verified_pools_for_mint(event: &Value, pool_to_mint: &mut HashMap<String, String>) {
+    if event.get("type").and_then(Value::as_str) != Some("token_removed") {
+        return;
+    }
+    if let Some(mint) = event_mint(event) {
+        pool_to_mint.retain(|_, mapped_mint| mapped_mint != &mint);
+    }
+}
+
 fn has_open_position(positions: &[Value], mint: &str) -> bool {
     positions.iter().any(|position| {
         let position_mint = position
@@ -141,9 +194,14 @@ pub(super) fn spawn(
     portfolio_positions: Arc<RwLock<Vec<Value>>>,
 ) {
     tokio::spawn(async move {
+        let mut pool_to_mint = HashMap::<String, String>::new();
         loop {
             match runtime_events.recv().await {
-                Ok(event) => {
+                Ok(mut event) => {
+                    // Learn pool identity from verified market state before the
+                    // frontend allowlist filters out this internal event.
+                    remember_verified_pool(&event, &mut pool_to_mint);
+                    remove_verified_pools_for_mint(&event, &mut pool_to_mint);
                     if !super::is_frontend_event(&event) {
                         continue;
                     }
@@ -152,6 +210,9 @@ pub(super) fn spawn(
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned();
+                    if !attach_verified_pool_mint(&mut event, &pool_to_mint) {
+                        continue;
+                    }
                     let Some(event) = enforce_exact_mint(event) else {
                         tracing::warn!(
                             event_type = %event_type,
@@ -200,6 +261,55 @@ mod tests {
             "data": {"progress": 45}
         });
         assert_eq!(event_mint(&missing), None);
+    }
+
+    #[test]
+    fn verified_pumpswap_pool_attaches_its_exact_mint_to_trade_events() {
+        let mut pool_to_mint = HashMap::new();
+        remember_verified_pool(
+            &json!({
+                "type": "market_pool_verified",
+                "data": {
+                    "pool_address": "PoolExact",
+                    "mint_address": "MintExact"
+                }
+            }),
+            &mut pool_to_mint,
+        );
+
+        let mut trade = json!({
+            "type": "pumpswap_trade_activity",
+            "data": { "pool_address": "PoolExact", "signature": "TradeSignature" }
+        });
+        assert!(attach_verified_pool_mint(&mut trade, &pool_to_mint));
+        assert_eq!(trade["data"]["mint_address"], "MintExact");
+        assert!(enforce_exact_mint(trade).is_some());
+    }
+
+    #[test]
+    fn unverified_pumpswap_pool_trade_is_not_forwarded_without_a_mint() {
+        let mut trade = json!({
+            "type": "pumpswap_trade_activity",
+            "data": { "pool_address": "UnknownPool" }
+        });
+        assert!(!attach_verified_pool_mint(&mut trade, &HashMap::new()));
+    }
+
+    #[test]
+    fn removing_a_token_clears_its_verified_pool_mapping() {
+        let mut pool_to_mint = HashMap::from([
+            ("PoolOne".to_owned(), "MintOne".to_owned()),
+            ("PoolTwo".to_owned(), "MintTwo".to_owned()),
+        ]);
+        remove_verified_pools_for_mint(
+            &json!({
+                "type": "token_removed",
+                "data": { "mint_address": "MintOne" }
+            }),
+            &mut pool_to_mint,
+        );
+        assert_eq!(pool_to_mint.len(), 1);
+        assert_eq!(pool_to_mint.get("PoolTwo").map(String::as_str), Some("MintTwo"));
     }
 
     #[test]
