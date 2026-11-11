@@ -1107,7 +1107,9 @@ fn start_token_state_projector(
                         last_activity_persisted.remove(mint);
                         let stale_pools = pool_to_mint
                             .iter()
-                            .filter_map(|(pool, mapped_mint)| (mapped_mint == mint).then_some(pool.clone()))
+                            .filter_map(|(pool, mapped_mint)| {
+                                (mapped_mint.as_str() == mint).then_some(pool.clone())
+                            })
                             .collect::<Vec<_>>();
                         for pool in stale_pools {
                             pool_to_mint.remove(&pool);
