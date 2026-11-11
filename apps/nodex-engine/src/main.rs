@@ -369,7 +369,9 @@ fn start_inactive_token_cleanup(
         loop {
             interval.tick().await;
             // Never infer inactivity while the upstream feed is unhealthy.
-            if !stream_status.read().await.connected {
+            if !stream_status.read().await.connected
+                || market_monitor.read().await.is_none()
+            {
                 continue;
             }
             let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
