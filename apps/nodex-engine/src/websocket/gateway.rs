@@ -4,6 +4,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
     matches!(
         value.get("type").and_then(Value::as_str),
         Some("engine_activity")
+            | Some("tokens_removed_inactive")
             | Some("connection_status")
             | Some("engine_state")
             | Some("trading_config_updated")
