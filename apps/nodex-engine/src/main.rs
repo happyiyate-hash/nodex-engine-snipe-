@@ -4406,13 +4406,23 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         }
                         Ok(ClientCommand::SubscribeToken { mint }) => {
                             let mint = mint.trim().to_owned();
-                            let has_open_position = state.portfolio_positions.read().await.iter().any(|position| {
-                                let position_mint = position.get("mint_address")
-                                    .or_else(|| position.get("mint"))
-                                    .and_then(serde_json::Value::as_str);
-                                let status = position.get("status").and_then(serde_json::Value::as_str).unwrap_or("open");
-                                position_mint == Some(mint.as_str()) && status.eq_ignore_ascii_case("open")
-                            });
+                            let has_open_position = state
+                                .portfolio_positions
+                                .read()
+                                .await
+                                .iter()
+                                .any(|position| {
+                                    let position_mint = position
+                                        .get("mint_address")
+                                        .or_else(|| position.get("mint"))
+                                        .and_then(serde_json::Value::as_str);
+                                    let status = position
+                                        .get("status")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("open");
+                                    position_mint == Some(mint.as_str())
+                                        && status.eq_ignore_ascii_case("open")
+                                });
                             if !has_open_position {
                                 Some(json!({"type":"command_rejected","data":{
                                     "command":"subscribe_token",
