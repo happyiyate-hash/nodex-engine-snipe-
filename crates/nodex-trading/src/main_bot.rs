@@ -303,8 +303,8 @@ pub fn evaluate_entry(
         match creator.known_rug_creator {
             Some(true) => reject!("Creator is on the known-rug blacklist."),
             Some(false) => {}
-            None => reject!(
-                "Creator rug-history status is unknown while blacklist protection is enabled."
+            None => reasons.push(
+                "Creator rug history is inconclusive; using the slower confirmation path.".into(),
             ),
         }
     }
@@ -552,6 +552,42 @@ mod tests {
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
         assert_eq!(result.minimum_distinct_buyers, 3);
+    }
+
+    #[test]
+    fn unknown_rug_history_can_pass_only_after_full_market_confirmation() {
+        let unknown_creator = CreatorReputation {
+            score: None,
+            known_rug_creator: None,
+            preferred_owner: false,
+        };
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &unknown_creator,
+            &security(),
+            &market(),
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
+        assert_eq!(result.entry_speed, "confirmation");
+        assert!(result.reasons.iter().any(|reason| reason.contains("inconclusive")));
+    }
+
+    #[test]
+    fn explicitly_known_rug_creator_is_still_rejected() {
+        let known_rug_creator = CreatorReputation {
+            score: Some(95.0),
+            known_rug_creator: Some(true),
+            preferred_owner: true,
+        };
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &known_rug_creator,
+            &security(),
+            &market(),
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Reject);
     }
 
     #[test]
