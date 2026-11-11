@@ -449,9 +449,11 @@ mod tests {
 
     #[test]
     fn trailing_stop_uses_each_positions_own_high_water_mark() {
-        let mut config = TradingBotConfig::default();
-        config.trailing_stop_enabled = true;
-        config.trailing_stop_callback_pct = 10.0;
+        let config = TradingBotConfig {
+            trailing_stop_enabled: true,
+            trailing_stop_callback_pct: 10.0,
+            ..TradingBotConfig::default()
+        };
         let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
         assert!(evaluate_position_exit(&mut policy, 1.5).is_none());
         let trigger = evaluate_position_exit(&mut policy, 1.34).unwrap();
