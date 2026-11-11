@@ -18,8 +18,13 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         // WAL lets readers continue while a writer commits. SQLite still
         // serializes writers, so the busy timeout remains important.
         .journal_mode(SqliteJournalMode::Wal);
+    // SQLite permits many readers but only one writer. A single in-process
+    // connection serializes engine reads/writes and prevents our own ingestion,
+    // snapshots, and maintenance tasks from racing for SQLite's writer lock.
+    // WAL still allows external readers, and busy_timeout handles external writers.
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30))
         .connect_with(options)
         .await?;
     creator_intelligence::initialize(&pool).await?;
@@ -604,49 +609,79 @@ pub async fn clear_non_paper_token_history(
 
     for attempt in 0..MAX_ATTEMPTS {
         let result = async {
-            let mut transaction = pool.begin().await?;
-            let deleted_mints = sqlx::query_scalar::<_, String>(
-                r#"SELECT mint_address FROM token_states
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM portfolio_positions p
-                       WHERE p.mint_address = token_states.mint_address
-                   )
-                   UNION
-                   SELECT mint_address FROM token_launches
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM portfolio_positions p
-                       WHERE p.mint_address = token_launches.mint_address
-                   )"#,
-            )
-            .fetch_all(&mut *transaction)
-            .await?;
+            // Acquire the writer reservation before reading the keep/delete set.
+            // This avoids a deferred read transaction failing when it later tries
+            // to upgrade to a write transaction (SQLITE_BUSY_SNAPSHOT).
+            let mut connection = pool.acquire().await?;
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *connection)
+                .await?;
 
-            let states = sqlx::query(
-                "DELETE FROM token_states WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = token_states.mint_address)",
-            )
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            let candles = sqlx::query(
-                "DELETE FROM chart_candles WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = chart_candles.mint_address)",
-            )
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            let launches = sqlx::query(
-                "DELETE FROM token_launches WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = token_launches.mint_address)",
-            )
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            // Raw upstream notifications are transient history, not paper-trading
-            // accounting, so they can be cleared regardless of token position.
-            let events = sqlx::query("DELETE FROM solana_raw_events")
-                .execute(&mut *transaction)
+            let transaction_result = async {
+                let deleted_mints = sqlx::query_scalar::<_, String>(
+                    r#"SELECT mint_address FROM token_states
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM portfolio_positions p
+                           WHERE p.mint_address = token_states.mint_address
+                       )
+                       UNION
+                       SELECT mint_address FROM token_launches
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM portfolio_positions p
+                           WHERE p.mint_address = token_launches.mint_address
+                       )"#,
+                )
+                .fetch_all(&mut *connection)
+                .await?;
+
+                let states = sqlx::query(
+                    "DELETE FROM token_states WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = token_states.mint_address)",
+                )
+                .execute(&mut *connection)
                 .await?
                 .rows_affected();
-            transaction.commit().await?;
-            Ok::<_, anyhow::Error>((states, launches, candles, events, deleted_mints))
+                let candles = sqlx::query(
+                    "DELETE FROM chart_candles WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = chart_candles.mint_address)",
+                )
+                .execute(&mut *connection)
+                .await?
+                .rows_affected();
+                let launches = sqlx::query(
+                    "DELETE FROM token_launches WHERE NOT EXISTS (SELECT 1 FROM portfolio_positions p WHERE p.mint_address = token_launches.mint_address)",
+                )
+                .execute(&mut *connection)
+                .await?
+                .rows_affected();
+                // Raw upstream notifications are transient history, not paper-trading
+                // accounting, so they can be cleared regardless of token position.
+                let events = sqlx::query("DELETE FROM solana_raw_events")
+                    .execute(&mut *connection)
+                    .await?
+                    .rows_affected();
+
+                Ok::<_, anyhow::Error>((states, launches, candles, events, deleted_mints))
+            }
+            .await;
+
+            match transaction_result {
+                Ok(counts) => {
+                    sqlx::query("COMMIT").execute(&mut *connection).await?;
+                    Ok(counts)
+                }
+                Err(error) => {
+                    // Never return a connection with a partially executed cleanup
+                    // transaction to the pool.
+                    let rollback = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    if let Err(rollback_error) = rollback {
+                        tracing::error!(
+                            %rollback_error,
+                            "SQLite cleanup rollback failed; discarding the connection"
+                        );
+                        connection.close().await?;
+                    }
+                    Err(error)
+                }
+            }
         }
         .await;
 
@@ -659,13 +694,13 @@ pub async fn clear_non_paper_token_history(
                         .to_ascii_lowercase()
                         .contains("database is locked") =>
             {
-                let delay_ms = 250_u64 * (1_u64 << attempt);
+                let delay_ms = 500_u64 * (1_u64 << attempt);
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_attempts = MAX_ATTEMPTS,
                     delay_ms,
                     %error,
-                    "SQLite token cleanup encountered a transient lock; retrying"
+                    "SQLite token cleanup could not acquire the writer lock; retrying"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
