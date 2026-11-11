@@ -61,6 +61,7 @@ struct AppState {
     runtime_enabled: watch::Sender<bool>,
     market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
     solana_ws_urls: Vec<String>,
+    pump_fun_program_id: String,
     ws_tickets: Arc<Mutex<HashMap<String, Instant>>>,
     token_registry: TokenRegistry,
     profile: Arc<RwLock<serde_json::Value>>,
@@ -3796,12 +3797,40 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 }
 
 async fn ensure_market_monitor(state: &AppState) {
-    let mut monitor = state.market_monitor.write().await;
-    if monitor.is_none() && !state.solana_ws_urls.is_empty() {
-        *monitor = Some(start_market_monitor(
-            state.solana_ws_urls.clone(),
-            state.events.clone(),
-        ));
+    // Create the monitor once, then restore the newest persisted launch subscriptions.
+    // The monitor itself retains its desired set across WebSocket reconnects; this
+    // rehydration closes the process-restart gap as well.
+    let monitor = {
+        let mut guard = state.market_monitor.write().await;
+        if guard.is_none() && !state.solana_ws_urls.is_empty() {
+            *guard = Some(start_market_monitor(
+                state.solana_ws_urls.clone(),
+                state.events.clone(),
+            ));
+        }
+        guard.clone()
+    };
+    let Some(monitor) = monitor else {
+        return;
+    };
+    match nodex_persistence::list_recent_launches(&state.database, 500).await {
+        Ok(launches) => {
+            let mut restored = 0usize;
+            for launch in launches {
+                let Some(mint) = launch.get("mint_address").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                match monitor
+                    .subscribe_pump_fun_bonding_curve(mint, &state.pump_fun_program_id)
+                    .await
+                {
+                    Ok(_) => restored += 1,
+                    Err(error) => tracing::warn!(%error, mint_address = mint, "Could not restore persisted market subscription"),
+                }
+            }
+            tracing::info!(restored, "Restored persisted Pump.fun market subscriptions");
+        }
+        Err(error) => tracing::warn!(%error, "Could not load launches for market subscription recovery"),
     }
 }
 
@@ -4361,6 +4390,7 @@ async fn main() -> anyhow::Result<()> {
         runtime_enabled,
         market_monitor,
         solana_ws_urls: config.solana_ws_urls.clone(),
+        pump_fun_program_id: config.pump_fun_program_id.clone(),
         ws_tickets: Arc::new(Mutex::new(HashMap::new())),
         token_registry,
         profile: profile_state,
