@@ -148,9 +148,10 @@ pub fn build_token_detail_snapshot(
         "version": state.map(|item| item.version).unwrap_or(0),
         "updated_at": state.map(|item| item.updated_at.to_rfc3339()),
         "diagnostics": data.and_then(|value| value.get("diagnostics")).cloned().unwrap_or_else(|| json!([])),
-        // Return the canonical persisted scanner report with the detail snapshot.
+        // Return the canonical persisted scanner report and lifecycle activity with the detail snapshot.
         // Missing evidence remains absent/null; the UI must not infer a pass.
         "security": data.and_then(|value| value.get("security")).cloned().unwrap_or(Value::Null),
+        "activity": data.and_then(|value| value.get("activity")).cloned().unwrap_or(Value::Null),
         "identity": {
             "name": identity.get("name").cloned().unwrap_or(Value::Null),
             "symbol": identity.get("symbol").cloned().unwrap_or(Value::Null),
@@ -191,6 +192,15 @@ mod tests {
                 "decision":"UNVERIFIED",
                 "decision_reason":"Holder evidence is incomplete.",
                 "checks":[{"name":"mint_authority","status":"passed"}]
+            },
+            "activity": {
+                "status":"scanning",
+                "label":"Security scan",
+                "stage":"holder_distribution",
+                "sub_event":"Checking holder distribution",
+                "progress":82,
+                "error":null,
+                "updated_at":"2026-11-11T09:00:00Z"
             }
         });
         let positions = vec![json!({
@@ -203,6 +213,10 @@ mod tests {
         assert_eq!(snapshot["market"]["price_sol"], 0.25);
         assert_eq!(snapshot["security"]["decision"], "UNVERIFIED");
         assert_eq!(snapshot["security"]["checks"][0]["name"], "mint_authority");
+        assert_eq!(snapshot["activity"]["status"], "scanning");
+        assert_eq!(snapshot["activity"]["stage"], "holder_distribution");
+        assert_eq!(snapshot["activity"]["sub_event"], "Checking holder distribution");
+        assert_eq!(snapshot["activity"]["progress"], 82);
         assert!(snapshot["market"]["holders"].is_null());
         assert_eq!(snapshot["position"]["token_balance"], 10.0);
         assert_eq!(snapshot["position"]["unrealized_pnl_sol"], 1.5);
