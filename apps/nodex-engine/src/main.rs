@@ -102,17 +102,17 @@ struct TradingSettings {
 impl Default for TradingSettings {
     fn default() -> Self {
         Self {
-            min_liquidity_usd: 5_000.0,
+            min_liquidity_usd: 3_000.0,
             max_entry_price_usd: 0.0,
             max_investment_per_token_sol: 0.01,
             max_investment_per_token_usd: 0.0,
             max_simultaneous_positions: 3,
             min_safety_score: 80,
             max_slippage_pct: 10.0,
-            stop_loss_pct: 20.0,
-            take_profit_pct: 50.0,
+            stop_loss_pct: 15.0,
+            take_profit_pct: 100.0,
             min_5m_buy_volume_usd: 1_000.0,
-            max_top10_holder_concentration_pct: 35.0,
+            max_top10_holder_concentration_pct: 20.0,
             auto_buy_enabled: false,
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 10.0,
