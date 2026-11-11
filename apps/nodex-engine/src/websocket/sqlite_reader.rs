@@ -9,7 +9,9 @@ pub(super) fn spawn(
 ) {
     tokio::spawn(async move {
         while let Some(event) = database_changes.recv().await {
-            if !super::is_frontend_event(&event) { continue; }
+            if !super::is_frontend_event(&event) {
+                continue;
+            }
             let Some(event) = super::runtime_reader::enforce_exact_mint(event) else {
                 tracing::warn!("Dropped persisted token event without exact mint address");
                 continue;
