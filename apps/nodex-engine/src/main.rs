@@ -1096,6 +1096,25 @@ fn start_token_state_projector(
             let Some(data) = event.get("data").cloned() else {
                 continue;
             };
+            if kind == "tokens_removed_inactive" {
+                if let Some(mints) = data.get("mint_addresses").and_then(serde_json::Value::as_array) {
+                    for mint in mints.iter().filter_map(serde_json::Value::as_str) {
+                        trade_observations.remove(mint);
+                        last_evaluation_signatures.remove(mint);
+                        last_entry_attempts.remove(mint);
+                        last_activity_persisted.remove(mint);
+                        let stale_pools = pool_to_mint
+                            .iter()
+                            .filter_map(|(pool, mapped_mint)| (mapped_mint == mint).then_some(pool.clone()))
+                            .collect::<Vec<_>>();
+                        for pool in stale_pools {
+                            pool_to_mint.remove(&pool);
+                            pool_quote_is_sol.remove(&pool);
+                        }
+                    }
+                }
+                continue;
+            }
             if kind == "market_pool_verified" {
                 if let (Some(mint), Some(pool)) = (
                     data.get("mint_address").and_then(serde_json::Value::as_str),
