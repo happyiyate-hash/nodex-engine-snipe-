@@ -2422,6 +2422,8 @@ async fn patch_runtime_config(
         "min_liquidity_usd",
         "max_entry_price_usd",
         "max_investment_per_token_usd",
+        // Accept legacy clients during the USD position-sizing migration.
+        "max_investment_per_token_sol",
         "max_simultaneous_positions",
         "min_safety_score",
         "max_slippage_pct",
