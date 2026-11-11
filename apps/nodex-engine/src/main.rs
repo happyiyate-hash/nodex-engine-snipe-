@@ -1134,6 +1134,9 @@ fn start_token_state_projector(
             let current_security = registry
                 .get(mint)
                 .and_then(|snapshot| snapshot.data.get("security").cloned());
+            let current_activity = registry
+                .get(mint)
+                .and_then(|snapshot| snapshot.data.get("activity").cloned());
             let activity_patch = match kind {
                 "token_scan_started" => Some(json!({
                     "status": "scanning",
@@ -1226,6 +1229,39 @@ fn start_token_state_projector(
                 })),
                 _ => None,
             };
+            let activity_patch = activity_patch.filter(|incoming| {
+                let rank = |status: &str| match status {
+                    "scanning" => 1,
+                    "verified" => 2,
+                    "monitoring" => 3,
+                    "evaluating" => 4,
+                    "executing_buy" => 5,
+                    "rejected" | "unverified" | "failed" | "bought_paper" | "buy_failed" | "closed" => 6,
+                    _ => 0,
+                };
+                let current_status = current_activity
+                    .as_ref()
+                    .and_then(|activity| activity.get("status"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let incoming_status = incoming
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let current_rank = rank(current_status);
+                let incoming_rank = rank(incoming_status);
+                let current_progress = current_activity
+                    .as_ref()
+                    .and_then(|activity| activity.get("progress"))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                let incoming_progress = incoming
+                    .get("progress")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(current_progress);
+                incoming_rank > current_rank
+                    || incoming_rank == current_rank && incoming_progress >= current_progress
+            });
             let mut domain_patch = match kind {
                 "token_scan_started" | "token_scan_progress" => {
                     scan_progress_security_patch(current_security.as_ref(), &data)
