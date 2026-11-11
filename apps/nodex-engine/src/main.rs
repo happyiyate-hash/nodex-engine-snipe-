@@ -1300,7 +1300,12 @@ fn start_token_state_projector(
                             && security
                                 .get("verification_gate_passed")
                                 .and_then(serde_json::Value::as_bool)
-                                .unwrap_or_else(|| security.get("all_checks_verified").and_then(serde_json::Value::as_bool).unwrap_or(false))
+                                .unwrap_or_else(|| {
+                                    security
+                                        .get("all_checks_verified")
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(false)
+                                })
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
