@@ -1279,7 +1279,7 @@ fn start_token_state_projector(
                         "stage": "market_feed_removed",
                         "sub_event": data.get("message").cloned().unwrap_or(json!("Market feed subscription was removed"))
                     }))
-                },
+                }
                 "market_subscription_active" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         security.get("decision").and_then(serde_json::Value::as_str)
