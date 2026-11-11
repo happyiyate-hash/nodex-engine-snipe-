@@ -4771,6 +4771,8 @@ async fn main() -> anyhow::Result<()> {
                                 | Some("strategy_rejected_token")
                                 | Some("paper_buy_executed")
                                 | Some("paper_buy_failed")
+                                | Some("paper_entry_evaluation")
+                                | Some("market_subscription_waiting")
                                 | Some("paper_sell_executed")
                                 | Some("paper_sell_failed")
                                 | Some("paper_exit_triggered")
