@@ -495,6 +495,7 @@ fn start_token_state_projector(
                                 // A trigger is recorded once for this position only; it does
                                 // not change or close any other token's position.
                                 let risk_value = position.get("risk_policy").cloned();
+                                let mut exit_was_triggered = false;
                                 if let Some(value) = risk_value {
                                     if let Ok(mut policy) =
                                         serde_json::from_value::<PositionRiskPolicy>(value)
@@ -512,14 +513,17 @@ fn start_token_state_projector(
                                                     object.insert("exit_trigger_price_sol".into(), json!(trigger.trigger_price_sol));
                                                     object.insert("exit_trigger_pnl_pct".into(), json!(trigger.pnl_pct));
                                                     object.insert("exit_triggered_at".into(), json!(chrono::Utc::now().to_rfc3339()));
-                                                    let _ = events.send(json!({
-                                                        "type":"paper_exit_triggered",
-                                                        "data":position.clone()
-                                                    }));
+                                                    exit_was_triggered = true;
                                                 }
                                             }
                                         }
                                     }
+                                }
+                                if exit_was_triggered {
+                                    let _ = events.send(json!({
+                                        "type":"paper_exit_triggered",
+                                        "data":position.clone()
+                                    }));
                                 }
                                 let _ = events.send(
                                     json!({"type":"position_updated","data":position.clone()}),
