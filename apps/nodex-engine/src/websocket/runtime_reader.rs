@@ -53,6 +53,7 @@ const TOKEN_SCOPED_EVENTS: &[&str] = &[
     "market_subscription_requested",
     "market_subscription_active",
     "market_subscription_waiting",
+    "market_subscriptions_removed",
     "creator_history_started",
     "creator_history_update",
     "pumpswap_activity",
