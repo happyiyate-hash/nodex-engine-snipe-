@@ -41,6 +41,7 @@ const TOKEN_SCOPED_EVENTS: &[&str] = &[
     "chart_candle_closed",
     "market_account_update",
     "market_curve_completed",
+    "paper_buy_started",
     "paper_buy_executed",
     "paper_buy_failed",
     "paper_entry_evaluation",
