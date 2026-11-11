@@ -74,7 +74,10 @@ fn event_mint(event: &Value) -> Option<String> {
                 .or_else(|| position.get("mint"))
                 .and_then(Value::as_str)
         }),
+        event.get("mint_address").and_then(Value::as_str),
         event.get("token_mint").and_then(Value::as_str),
+        event.get("base_mint").and_then(Value::as_str),
+        event.get("mint").and_then(Value::as_str),
     ]
     .into_iter()
     .flatten()
