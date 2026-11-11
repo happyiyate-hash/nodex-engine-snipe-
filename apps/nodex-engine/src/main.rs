@@ -1260,6 +1260,19 @@ fn start_token_state_projector(
                     "stage": data.get("stage").cloned().unwrap_or(json!("monitoring_complete")),
                     "sub_event": data.get("message").cloned().unwrap_or(json!("Token is no longer being monitored"))
                 })),
+                "market_subscriptions_removed" => {
+                    let was_monitoring = current_activity
+                        .as_ref()
+                        .and_then(|activity| activity.get("status"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("monitoring");
+                    was_monitoring.then(|| json!({
+                        "status": "monitoring_stopped",
+                        "label": "Monitoring stopped",
+                        "stage": "market_feed_removed",
+                        "sub_event": data.get("message").cloned().unwrap_or(json!("Market feed subscription was removed"))
+                    }))
+                },
                 "market_subscription_active" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         security.get("decision").and_then(serde_json::Value::as_str)
@@ -1400,6 +1413,7 @@ fn start_token_state_projector(
                         | "token_monitoring_started"
                         | "token_monitoring_update"
                         | "token_monitoring_completed"
+                        | "market_subscriptions_removed"
                         | "paper_entry_evaluation"
                         | "paper_buy_started"
                         | "paper_buy_executed"
@@ -1432,6 +1446,7 @@ fn start_token_state_projector(
                 | "token_monitoring_started"
                 | "token_monitoring_update"
                 | "token_monitoring_completed"
+                | "market_subscriptions_removed"
                 | "paper_entry_evaluation"
                 | "paper_buy_started"
                 | "paper_buy_executed"
@@ -1443,7 +1458,8 @@ fn start_token_state_projector(
                 }
                 "market_subscription_requested"
                 | "market_subscription_waiting"
-                | "market_subscription_active" => {
+                | "market_subscription_active"
+                | "market_subscriptions_removed" => {
                     json!({"market_subscription": data})
                 }
                 _ => continue,
