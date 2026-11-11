@@ -325,15 +325,12 @@ struct Health {
 /// Build transient scan-progress fields without allowing late progress events
 /// to downgrade a terminal approval or rejection in the canonical token state.
 fn core_verification_gate_passed(security: &serde_json::Value) -> bool {
-    let decision = security
-        .get("decision")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if !decision.eq_ignore_ascii_case("APPROVED")
-        || security
-            .get("diagnostic_only")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true)
+    // Supplementary scan decisions never override the three core checks.
+    // Diagnostic-only scans are not evidence and therefore cannot verify a token.
+    if security
+        .get("diagnostic_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
     {
         return false;
     }
@@ -1304,7 +1301,7 @@ fn start_token_state_projector(
                         .get("verification_gate_passed")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
-                    if decision == "APPROVED" && !diagnostic_only && verification_gate_passed {
+                    if !diagnostic_only && verification_gate_passed {
                         Some(json!({
                             "status": "monitoring",
                             "label": "Monitoring",
@@ -3125,7 +3122,14 @@ fn start_launch_processor(
                                     // the approved-token market and paper-entry paths.
                                     let mut security_state = report_payload.clone();
                                     if let Some(object) = security_state.as_object_mut() {
-                                        object.insert("status".into(), json!("rejected"));
+                                        object.insert(
+                                            "status".into(),
+                                            json!(if verification_gate_passed { "verified" } else { "rejected" }),
+                                        );
+                                        object.insert(
+                                            "verification_status".into(),
+                                            json!(if verification_gate_passed { "VERIFIED" } else { "UNVERIFIED" }),
+                                        );
                                     }
                                     match approved_registry.upsert_patch(
                                         &scan_mint,
@@ -3262,13 +3266,10 @@ fn start_launch_processor(
                                         || value.contains("too many")
                                         || value.contains("max usage")
                                 });
-                            let cache_status = if decision == "REJECTED" {
-                                "rejected"
-                            } else if decision == "APPROVED"
-                                && !diagnostic_only
-                                && terminal_status == "completed"
-                            {
+                            let cache_status = if verification_gate_passed {
                                 "verified"
+                            } else if decision == "REJECTED" {
+                                "rejected"
                             } else {
                                 "completed_diagnostic"
                             };
@@ -5755,6 +5756,8 @@ mod scan_progress_state_tests {
                 {"name":"holder_distribution","status":"unverified"}
             ]
         });
+        assert!(core_verification_gate_passed(&report));
+        report["decision"] = json!("REJECTED");
         assert!(core_verification_gate_passed(&report));
     }
 
