@@ -2097,7 +2097,7 @@ async fn resolve_discovery_metadata(
                                 }else{match serde_json::from_slice::<serde_json::Value>(&bytes){
                                     Ok(value)=>{
                                         if result.logo_url.is_none() {
-                                            result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).and_then(|candidate| normalize_image_url(candidate));
+                                            result.logo_url=value.get("image").or_else(||value.get("image_url")).and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).and_then(normalize_image_url);
                                         }
                                         if result.name.is_none(){result.name=value.get("name").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
                                         if result.symbol.is_none(){result.symbol=value.get("symbol").and_then(serde_json::Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_owned);}
