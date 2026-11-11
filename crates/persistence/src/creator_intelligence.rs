@@ -165,9 +165,8 @@ pub async fn list(pool: &SqlitePool, limit: u32) -> Result<Vec<CreatorIntelligen
                 creator_address: row.try_get("creator_address")?,
                 display_label: row.try_get("display_label")?,
                 observations_count: row.try_get::<i64, _>("observations_count")?.max(0) as u64,
-                qualified_observations: row
-                    .try_get::<i64, _>("qualified_observations")?
-                    .max(0) as u64,
+                qualified_observations: row.try_get::<i64, _>("qualified_observations")?.max(0)
+                    as u64,
                 buy_count: row.try_get::<i64, _>("buy_count")?.max(0) as u64,
                 sell_count: row.try_get::<i64, _>("sell_count")?.max(0) as u64,
                 unique_buyers: row.try_get::<i64, _>("unique_buyers")?.max(0) as u64,
