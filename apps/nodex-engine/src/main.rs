@@ -454,6 +454,7 @@ fn start_token_state_projector(
                         {
                             // Mark open positions in memory. Never read/write SQLite for every tick.
                             let mut positions = portfolio_positions.write().await;
+                            let mut triggered_positions = Vec::new();
                             for position in positions.iter_mut().filter(|position| {
                                 position
                                     .get("mint_address")
@@ -520,6 +521,7 @@ fn start_token_state_projector(
                                     }
                                 }
                                 if exit_was_triggered {
+                                    triggered_positions.push(position.clone());
                                     let _ = events.send(json!({
                                         "type":"paper_exit_triggered",
                                         "data":position.clone()
@@ -537,6 +539,29 @@ fn start_token_state_projector(
                                 &positions,
                             );
                             drop(positions);
+                            for triggered in triggered_positions {
+                                let position_id = triggered
+                                    .get("position_id")
+                                    .and_then(serde_json::Value::as_str);
+                                let triggered_mint = triggered
+                                    .get("mint_address")
+                                    .and_then(serde_json::Value::as_str);
+                                if let (Some(position_id), Some(triggered_mint)) =
+                                    (position_id, triggered_mint)
+                                {
+                                    if let Err(error) = nodex_persistence::save_portfolio_position(
+                                        &database,
+                                        position_id,
+                                        triggered_mint,
+                                        "open",
+                                        &triggered,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(%error, position_id, "Could not persist independent paper exit trigger");
+                                    }
+                                }
+                            }
                             if let Err(error) =
                                 nodex_persistence::save_portfolio_snapshot(&database, &portfolio)
                                     .await
