@@ -2849,6 +2849,7 @@ fn start_launch_processor(
                             let mut report_payload =
                                 serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
                             report_payload["execution_gate"] = execution_gate;
+                            report_payload["all_checks_verified"] = json!(all_checks_verified);
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -3236,6 +3237,10 @@ fn start_launch_processor(
                                                 .get("diagnostic_only")
                                                 .and_then(serde_json::Value::as_bool)
                                                 .unwrap_or(true)
+                                            && security
+                                                .get("all_checks_verified")
+                                                .and_then(serde_json::Value::as_bool)
+                                                .unwrap_or(false)
                                     });
                                 if verified_for_monitoring {
                                     let _ = scan_events.send(json!({
