@@ -263,11 +263,17 @@ pub fn evaluate_entry(
     let high_score = creator
         .score
         .is_some_and(|score| score.is_finite() && score >= config.high_creator_score_threshold);
+    let top10_sample_missing = security.top10_concentration_pct.is_none();
     let minimum_buyers = if high_score {
         config.minimum_distinct_buyers_high_score
     } else {
         config.minimum_distinct_buyers_other
-    };
+    }
+    .max(if top10_sample_missing {
+        config.minimum_distinct_buyers_other.saturating_add(2)
+    } else {
+        0
+    });
     let entry_speed = if high_score { "fast" } else { "confirmation" };
     let mut reasons = Vec::new();
     let mut rejected = false;
@@ -317,8 +323,10 @@ pub fn evaluate_entry(
 
     match security.top10_concentration_pct {
         Some(value) if value.is_finite() && value <= config.maximum_top10_concentration_pct => {}
-        Some(_) => reject!("Top-10 holder concentration exceeds the configured maximum."),
-        None => reject!("Top-10 holder concentration is unavailable."),
+        Some(_) => reject!("Top-10 holder concentration exceeds the configured maximum, including the partial-sample safety buffer."),
+        None => reasons.push(
+            "Top-10 holder concentration could not be sampled; requiring two additional distinct buyers.".into(),
+        ),
     }
     match market.liquidity_usd {
         Some(value) if value.is_finite() && value >= config.minimum_liquidity_usd => {}
