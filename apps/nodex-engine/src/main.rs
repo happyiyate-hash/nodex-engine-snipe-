@@ -1189,7 +1189,11 @@ fn start_token_state_projector(
                         .get("diagnostic_only")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
-                    if decision == "APPROVED" && !diagnostic_only {
+                    let all_checks_verified = data
+                        .get("all_checks_verified")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if decision == "APPROVED" && !diagnostic_only && all_checks_verified {
                         Some(json!({
                             "status": "verified",
                             "label": "Verified",
@@ -1200,7 +1204,7 @@ fn start_token_state_projector(
                     } else if decision == "REJECTED" {
                         Some(json!({
                             "status": "rejected",
-                            "label": "Rejected",
+                            "label": "Risk detected",
                             "progress": 100,
                             "stage": "security_complete",
                             "sub_event": data.get("message").cloned().unwrap_or(json!("Security checks rejected this token"))
@@ -2993,6 +2997,7 @@ fn start_launch_processor(
                                 "progress":100,
                                 "message":report_payload.get("decision_reason").cloned().unwrap_or(json!("Security scan finished.")),
                                 "diagnostic_only":report.diagnostic_only,
+                                "all_checks_verified":all_checks_verified,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
                             // Record a durable terminal/intermediate scan state independently of
