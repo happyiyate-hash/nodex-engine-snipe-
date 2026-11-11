@@ -1238,10 +1238,12 @@ fn start_token_state_projector(
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         security.get("decision").and_then(serde_json::Value::as_str)
                             == Some("APPROVED")
-                            && !security.get("diagnostic_only")
+                            && !security
+                                .get("diagnostic_only")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
-                            && security.get("all_checks_verified")
+                            && security
+                                .get("all_checks_verified")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(false)
                     });
