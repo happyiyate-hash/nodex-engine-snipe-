@@ -127,10 +127,7 @@ fn remember_verified_pool(event: &Value, pool_to_mint: &mut HashMap<String, Stri
     }
 }
 
-fn attach_verified_pool_mint(
-    event: &mut Value,
-    pool_to_mint: &HashMap<String, String>,
-) -> bool {
+fn attach_verified_pool_mint(event: &mut Value, pool_to_mint: &HashMap<String, String>) -> bool {
     if event.get("type").and_then(Value::as_str) != Some("pumpswap_trade_activity")
         || event_mint(event).is_some()
     {
@@ -309,7 +306,10 @@ mod tests {
             &mut pool_to_mint,
         );
         assert_eq!(pool_to_mint.len(), 1);
-        assert_eq!(pool_to_mint.get("PoolTwo").map(String::as_str), Some("MintTwo"));
+        assert_eq!(
+            pool_to_mint.get("PoolTwo").map(String::as_str),
+            Some("MintTwo")
+        );
     }
 
     #[test]
