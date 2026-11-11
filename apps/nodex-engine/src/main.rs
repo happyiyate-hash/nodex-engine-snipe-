@@ -17,7 +17,8 @@ use futures_util::{SinkExt, StreamExt};
 use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
-    decode_pump_fun_create, decode_pump_swap_activity_logs, run_logs_stream, start_market_monitor,
+    decode_pump_fun_create, decode_pump_fun_trade_logs, decode_pump_swap_activity_logs,
+    run_logs_stream, start_market_monitor,
     MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus, PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::paper_wallet::{PaperWallet, LAMPORTS_PER_SOL};
@@ -975,6 +976,105 @@ async fn resolve_discovery_metadata(
         "unavailable"
     };
     Ok(result)
+}
+
+/// Decode actual Pump.fun TradeEvent records directly from confirmed WebSocket logs.
+/// This path does not infer trades from price ticks and does not fetch each transaction.
+fn start_pump_fun_trade_processor(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    events: broadcast::Sender<serde_json::Value>,
+    program_id: String,
+) {
+    tokio::spawn(async move {
+        let mut seen = HashSet::<String>::new();
+        loop {
+            let notification = match receiver.recv().await {
+                Ok(value) => value,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(
+                        dropped_notifications = count,
+                        "Pump.fun trade activity consumer lagged"
+                    );
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if notification
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                != Some("logsNotification")
+                || notification
+                    .get("nodex_program_id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(program_id.as_str())
+            {
+                continue;
+            }
+            let Some(value) = notification.pointer("/params/result/value") else {
+                continue;
+            };
+            if !value.get("err").is_some_and(serde_json::Value::is_null) {
+                continue;
+            }
+            let Some(signature) = value
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let logs = value
+                .get("logs")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if logs.is_empty() {
+                continue;
+            }
+            let decoded = match decode_pump_fun_trade_logs(&logs, &program_id) {
+                Ok(trades) => trades,
+                Err(error) => {
+                    tracing::warn!(%error, signature, "Pump.fun TradeEvent decoding failed");
+                    continue;
+                }
+            };
+            if decoded.is_empty() || !seen.insert(signature.clone()) {
+                continue;
+            }
+            if seen.len() > 20_000 {
+                seen.clear();
+                seen.insert(signature.clone());
+            }
+            let slot = notification
+                .pointer("/params/result/context/slot")
+                .and_then(serde_json::Value::as_u64);
+            for trade in decoded {
+                let _ = events.send(json!({
+                    "type":"pump_fun_trade_activity",
+                    "data":{
+                        "signature":signature,
+                        "slot":slot,
+                        "mint_address":trade.mint_address,
+                        "trader_address":trade.trader_address,
+                        "side":if trade.is_buy {"buy"} else {"sell"},
+                        "sol_amount_lamports":trade.sol_amount_lamports.to_string(),
+                        "token_amount_raw":trade.token_amount_raw.to_string(),
+                        "timestamp":trade.timestamp,
+                        "venue":"pump_fun_bonding_curve",
+                        "evidence":"confirmed_program_scoped_trade_event",
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
+                }));
+            }
+        }
+    });
 }
 
 /// Consume confirmed PumpSwap logs and emit only trade events decoded while
@@ -3430,6 +3530,7 @@ async fn main() -> anyhow::Result<()> {
                                 | Some("token_monitoring_started")
                                 | Some("token_monitoring_update")
                                 | Some("token_monitoring_completed")
+                                | Some("pump_fun_trade_activity")
                                 | Some("strategy_rejected_token")
                                 | Some("paper_buy_executed")
                                 | Some("paper_buy_failed")
@@ -3673,6 +3774,15 @@ async fn main() -> anyhow::Result<()> {
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
     let (runtime_enabled, runtime_receiver) = watch::channel(false);
+
+    // Decode actual Pump.fun buys/sells from the same confirmed logs stream.
+    if !config.solana_ws_urls.is_empty() {
+        start_pump_fun_trade_processor(
+            events.subscribe(),
+            events.clone(),
+            config.pump_fun_program_id.clone(),
+        );
+    }
 
     // Decode Pump.fun creation transactions from confirmed logs notifications.
     if let Some(launch_rpc) = rpc.clone() {
