@@ -127,7 +127,7 @@ pub async fn apply_observation(
     )
     .bind(label).bind(label)
     .bind(next_count as i64)
-    .bind(previous_qualified.saturating_add(u64::from(observation.qualified)) as i64)
+    .bind(previous_qualified.saturating_add(if observation.qualified { 1 } else { 0 }) as i64)
     .bind(observation.buy_count as i64)
     .bind(observation.sell_count as i64)
     .bind(observation.unique_buyers as i64)
