@@ -649,6 +649,19 @@ async fn connect_market_stream(
                 }
                 if desired.len() >= MAX_MARKET_SUBSCRIPTIONS {
                     let _ = events.send(json!({
+                        "type":"market_subscription_waiting",
+                        "data":{
+                            "mint_address":subscription.mint,
+                            "venue":subscription.venue,
+                            "status":"waiting_for_capacity",
+                            "required_additional_accounts":1,
+                            "remaining_capacity":MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len()),
+                            "desired_accounts":desired.len(),
+                            "account_capacity":MAX_MARKET_SUBSCRIPTIONS,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }
+                    }));
+                    let _ = events.send(json!({
                         "type":"diagnostic",
                         "data":{
                             "severity":"warning",
@@ -867,6 +880,16 @@ async fn connect_market_stream(
                                     pending.insert(request_id, child);
                                 }
                             } else {
+                                let _ = events.send(json!({"type":"market_subscription_waiting","data":{
+                                    "mint_address":subscription.mint,
+                                    "venue":"pump_swap",
+                                    "status":"waiting_for_capacity",
+                                    "required_additional_accounts":missing_count,
+                                    "remaining_capacity":remaining_capacity,
+                                    "desired_accounts":desired.len(),
+                                    "account_capacity":MAX_MARKET_SUBSCRIPTIONS,
+                                    "received_at":chrono::Utc::now().to_rfc3339()
+                                }}));
                                 let _ = events.send(json!({"type":"diagnostic","data":{
                                     "severity":"warning","component":"market_monitor",
                                     "message":"Not enough remaining account-subscription capacity for all missing PumpSwap mint and vault accounts; none were added.",
