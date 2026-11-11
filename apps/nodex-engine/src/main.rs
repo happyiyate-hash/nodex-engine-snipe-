@@ -1258,6 +1258,18 @@ fn start_token_state_projector(
                 })),
                 _ => None,
             };
+            let mut activity_patch = activity_patch;
+            if let Some(activity) = activity_patch.as_mut() {
+                if let Some(error) = current_activity.as_ref().and_then(|value| value.get("error")) {
+                    if activity.get("error").is_none() {
+                        activity["error"] = error.clone();
+                    }
+                }
+                activity["updated_at"] = data
+                    .get("received_at")
+                    .cloned()
+                    .unwrap_or(json!(chrono::Utc::now().to_rfc3339()));
+            }
             let activity_patch = activity_patch.filter(|incoming| {
                 let rank = |status: &str| match status {
                     "scanning" => 1,
@@ -3149,6 +3161,30 @@ fn start_launch_processor(
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}),
                                 );
+                                // Market-feed subscriptions are created for discovery, but
+                                // only a successfully verified token enters strategy monitoring.
+                                let verified_for_monitoring = approved_registry
+                                    .get(&scan_mint)
+                                    .and_then(|snapshot| snapshot.data.get("security").cloned())
+                                    .is_some_and(|security| {
+                                        security.get("decision").and_then(serde_json::Value::as_str)
+                                            == Some("APPROVED")
+                                            && !security.get("diagnostic_only")
+                                                .and_then(serde_json::Value::as_bool)
+                                                .unwrap_or(true)
+                                    });
+                                if verified_for_monitoring {
+                                    let _ = scan_events.send(json!({
+                                        "type":"token_monitoring_started",
+                                        "data":{
+                                            "mint_address":scan_mint,
+                                            "status":"monitoring",
+                                            "stage":"market_watch",
+                                            "message":"Monitoring verified token market conditions",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }
+                                    }));
+                                }
                             }
                             Err(error) => {
                                 let _ = scan_events.send(json!({"type":"diagnostic","data":{
