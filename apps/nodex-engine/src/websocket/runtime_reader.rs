@@ -63,21 +63,27 @@ const TOKEN_SCOPED_EVENTS: &[&str] = &[
 
 fn event_mint(event: &Value) -> Option<String> {
     let data = event.get("data").unwrap_or(event);
-    data.get("mint_address")
-        .or_else(|| data.get("token_mint"))
-        .or_else(|| data.get("base_mint"))
-        .or_else(|| data.get("mint"))
-        .or_else(|| {
-            data.get("position").and_then(|position| {
-                position
-                    .get("mint_address")
-                    .or_else(|| position.get("mint"))
-            })
-        })
-        .or_else(|| event.get("token_mint"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|mint| !mint.trim().is_empty())
+    let mut candidates = vec![
+        data.get("mint_address").and_then(Value::as_str),
+        data.get("token_mint").and_then(Value::as_str),
+        data.get("base_mint").and_then(Value::as_str),
+        data.get("mint").and_then(Value::as_str),
+        data.get("position").and_then(|position| {
+            position
+                .get("mint_address")
+                .or_else(|| position.get("mint"))
+                .and_then(Value::as_str)
+        }),
+        event.get("token_mint").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|mint| !mint.trim().is_empty());
+    let mint = candidates.next()?;
+    if candidates.any(|candidate| candidate != mint) {
+        return None;
+    }
+    Some(mint.to_owned())
 }
 
 fn attach_exact_mint(event: &mut Value, mint: &str) {
