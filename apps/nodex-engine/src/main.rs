@@ -1039,12 +1039,15 @@ fn start_token_state_projector(
                     if kind == "market_price_update" {
                         if let Some(observations) = trade_observations.get_mut(mint) {
                             let now_ms = chrono::Utc::now().timestamp_millis();
-                            while observations.front().is_some_and(|trade| now_ms.saturating_sub(trade.timestamp_ms) > 300_000) {
+                            while observations.front().is_some_and(|trade| {
+                                now_ms.saturating_sub(trade.timestamp_ms) > 300_000
+                            }) {
                                 observations.pop_front();
                             }
                         }
                         let empty_observations = VecDeque::new();
-                        let observations = trade_observations.get(mint).unwrap_or(&empty_observations);
+                        let observations =
+                            trade_observations.get(mint).unwrap_or(&empty_observations);
                         evaluate_and_execute_paper_entry(
                             mint,
                             &data,
@@ -1060,7 +1063,8 @@ fn start_token_state_projector(
                             &events,
                             &mut last_evaluation_signatures,
                             &mut last_entry_attempts,
-                        ).await;
+                        )
+                        .await;
                         let event_timestamp_ms = data
                             .get("timestamp_ms")
                             .or_else(|| data.get("block_time_ms"))
