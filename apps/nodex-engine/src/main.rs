@@ -759,7 +759,10 @@ async fn evaluate_and_execute_paper_entry(
             return;
         }
     };
-    let slippage_pct = market_assessment.estimated_slippage_pct.unwrap_or(0.0).max(0.0);
+    let slippage_pct = market_assessment
+        .estimated_slippage_pct
+        .unwrap_or(0.0)
+        .max(0.0);
     let fill_price_sol = price_sol * (1.0 + slippage_pct / 100.0);
     let fill_price_usd = fill_price_sol * sol_quote.price_usd;
     if !fill_price_sol.is_finite() || fill_price_sol <= 0.0 || !fill_price_usd.is_finite() {
@@ -825,13 +828,28 @@ async fn evaluate_and_execute_paper_entry(
         return;
     };
     if let Some(object) = position.as_object_mut() {
-        object.insert("risk_policy".into(), serde_json::to_value(&risk_policy).unwrap_or(serde_json::Value::Null));
+        object.insert(
+            "risk_policy".into(),
+            serde_json::to_value(&risk_policy).unwrap_or(serde_json::Value::Null),
+        );
         object.insert("stop_loss_pct".into(), json!(risk_policy.stop_loss_pct));
         object.insert("take_profit_pct".into(), json!(risk_policy.take_profit_pct));
-        object.insert("stop_loss_price_sol".into(), json!(risk_policy.stop_loss_price_sol));
-        object.insert("take_profit_price_sol".into(), json!(risk_policy.take_profit_price_sol));
-        object.insert("stop_loss_price_usd".into(), json!(risk_policy.stop_loss_price_usd));
-        object.insert("take_profit_price_usd".into(), json!(risk_policy.take_profit_price_usd));
+        object.insert(
+            "stop_loss_price_sol".into(),
+            json!(risk_policy.stop_loss_price_sol),
+        );
+        object.insert(
+            "take_profit_price_sol".into(),
+            json!(risk_policy.take_profit_price_sol),
+        );
+        object.insert(
+            "stop_loss_price_usd".into(),
+            json!(risk_policy.stop_loss_price_usd),
+        );
+        object.insert(
+            "take_profit_price_usd".into(),
+            json!(risk_policy.take_profit_price_usd),
+        );
     }
 
     let mut next_positions = positions_guard.clone();
