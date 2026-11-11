@@ -1228,6 +1228,12 @@ fn start_token_state_projector(
                     "stage": data.get("stage").cloned().unwrap_or(json!("market_watch")),
                     "sub_event": data.get("message").cloned().unwrap_or(json!("Monitoring token conditions"))
                 })),
+                "token_monitoring_completed" => Some(json!({
+                    "status": "monitoring_stopped",
+                    "label": "Monitoring stopped",
+                    "stage": data.get("stage").cloned().unwrap_or(json!("monitoring_complete")),
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Token is no longer being monitored"))
+                })),
                 // A market-data subscription is not strategy monitoring.
                 // Keep it out of the token lifecycle status.
                 "market_subscription_requested"
@@ -1283,7 +1289,7 @@ fn start_token_state_projector(
                     "evaluating" => 4,
                     "executing_buy" => 5,
                     "rejected" | "unverified" | "failed" | "bought_paper" | "buy_failed"
-                    | "closed" => 6,
+                    | "closed" | "monitoring_stopped" => 6,
                     _ => 0,
                 };
                 let current_status = current_activity
@@ -1318,6 +1324,7 @@ fn start_token_state_projector(
                         | "token_scan_failed"
                         | "token_monitoring_started"
                         | "token_monitoring_update"
+                        | "token_monitoring_completed"
                         | "paper_entry_evaluation"
                         | "paper_buy_started"
                         | "paper_buy_executed"
@@ -1347,6 +1354,7 @@ fn start_token_state_projector(
                 | "token_scan_failed"
                 | "token_monitoring_started"
                 | "token_monitoring_update"
+                | "token_monitoring_completed"
                 | "paper_entry_evaluation"
                 | "paper_buy_started"
                 | "paper_buy_executed"
@@ -2981,7 +2989,8 @@ fn start_launch_processor(
                             }
                             let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
                                 "mint_address":scan_mint,"decision":decision,"status":terminal_status,
-                                "progress":100,"message":"Security scan finished.",
+                                "progress":100,
+                                "message":report_payload.get("decision_reason").cloned().unwrap_or(json!("Security scan finished.")),
                                 "diagnostic_only":report.diagnostic_only,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
