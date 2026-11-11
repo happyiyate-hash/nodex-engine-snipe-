@@ -563,6 +563,39 @@ mod tests {
     }
 
     #[test]
+    fn missing_holder_sample_requires_two_additional_buyers() {
+        let mut security_report = security();
+        security_report.top10_concentration_pct = None;
+        let unknown_creator = CreatorReputation {
+            score: None,
+            known_rug_creator: None,
+            preferred_owner: false,
+        };
+        let mut live = market();
+        live.distinct_buyers_5m = 4;
+        let waiting = evaluate_entry(
+            &TradingBotConfig::default(),
+            &unknown_creator,
+            &security_report,
+            &live,
+            0,
+        );
+        assert_eq!(waiting.decision, TradingBotDecision::Wait);
+        assert_eq!(waiting.minimum_distinct_buyers, 5);
+
+        live.distinct_buyers_5m = 5;
+        let eligible = evaluate_entry(
+            &TradingBotConfig::default(),
+            &unknown_creator,
+            &security_report,
+            &live,
+            0,
+        );
+        assert_eq!(eligible.decision, TradingBotDecision::EvaluatePaperEntry);
+        assert!(eligible.reasons.iter().any(|reason| reason.contains("Top-10 holder concentration")));
+    }
+
+    #[test]
     fn unknown_rug_history_can_pass_only_after_full_market_confirmation() {
         let unknown_creator = CreatorReputation {
             score: None,
