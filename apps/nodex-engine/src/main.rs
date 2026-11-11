@@ -3550,16 +3550,38 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         }
                         let snapshot = state.token_registry.get(mint);
                         let identity = snapshot.as_ref().and_then(|item| item.data.get("identity"));
+                        let price_sol = data.get("price_sol").and_then(serde_json::Value::as_f64);
+                        let market_cap_sol = data.get("market_cap_sol").and_then(serde_json::Value::as_f64);
+                        let sol_quote = state.sol_price.read().await.clone();
+                        let usd_quote_valid = sol_quote.status == "live"
+                            && sol_quote.price_usd.is_finite()
+                            && sol_quote.price_usd > 0.0;
+                        let price_usd = price_sol
+                            .filter(|price| price.is_finite() && *price > 0.0)
+                            .filter(|_| usd_quote_valid)
+                            .map(|price| price * sol_quote.price_usd);
+                        let market_cap_usd = market_cap_sol
+                            .filter(|value| value.is_finite() && *value > 0.0)
+                            .filter(|_| usd_quote_valid)
+                            .map(|value| value * sol_quote.price_usd);
                         value = json!({
                             "type":"market_tick",
                             "data":{
                                 "mint_address":mint,
                                 "name":identity.and_then(|v| v.get("name")).cloned().unwrap_or(serde_json::Value::Null),
                                 "symbol":identity.and_then(|v| v.get("symbol")).cloned().unwrap_or(serde_json::Value::Null),
-                                "price_sol":data.get("price_sol").cloned().unwrap_or(serde_json::Value::Null),
+                                "venue":data.get("venue").cloned().unwrap_or(serde_json::Value::Null),
+                                "price_sol":price_sol,
+                                "price_usd":price_usd,
+                                "price_currency":if price_usd.is_some() {"USD"} else {"SOL"},
+                                "sol_price_usd":if usd_quote_valid {Some(sol_quote.price_usd)} else {None::<f64>},
+                                "sol_price_status":sol_quote.status,
                                 "price_change_1m_pct":data.get("price_change_1m_pct").cloned().unwrap_or(serde_json::Value::Null),
                                 "price_change_5m_pct":data.get("price_change_5m_pct").cloned().unwrap_or(serde_json::Value::Null),
-                                "market_cap_sol":data.get("market_cap_sol").cloned().unwrap_or(serde_json::Value::Null),
+                                "market_cap_sol":market_cap_sol,
+                                "market_cap_usd":market_cap_usd,
+                                "slot":data.get("slot").cloned().unwrap_or(serde_json::Value::Null),
+                                "timestamp_ms":data.get("timestamp_ms").cloned().unwrap_or(serde_json::Value::Null),
                                 "timestamp":data.get("received_at").cloned().unwrap_or(serde_json::Value::Null),
                                 "version":snapshot.as_ref().map(|item| item.version)
                             }
