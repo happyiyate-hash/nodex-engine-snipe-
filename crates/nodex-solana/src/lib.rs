@@ -621,55 +621,33 @@ impl SolanaRpc {
         };
         report.provider_responses.push(account_evidence);
         on_progress("authorities", 32, "Checking mint and freeze authorities");
-        on_progress("holder_distribution", 52, "Checking holder distribution");
-        match self
-            .get_holder_distribution(mint, report.supply_raw.as_deref().unwrap_or("0"))
-            .await
-        {
-            Ok(Some(distribution)) => {
-                report.holder_distribution = Some(distribution.clone());
-                if let Some(check) = report
-                    .checks
-                    .iter_mut()
-                    .find(|check| check.name == "holder_distribution")
-                {
-                    check.status = "partial".into();
-                    check.severity = "medium".into();
-                    check.detail = format!(
-                        "Sampled {} largest token accounts and resolved {} owners. The top 10 observed owners represent {:.2}% of supply. Pool vaults and linked wallets have not been classified or excluded.",
-                        distribution.sampled_token_accounts,
-                        distribution.resolved_accounts,
-                        distribution.top_10_observed_owner_share_percent
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                if let Some(check) = report
-                    .checks
-                    .iter_mut()
-                    .find(|check| check.name == "holder_distribution")
-                {
-                    check.detail = format!(
-                        "Holder distribution is UNVERIFIED because RPC analysis failed: {error}"
-                    );
-                }
-            }
-        }
-        on_progress("rugcheck", 88, "Reviewing external risk signals");
+        // Holder sampling is deliberately not part of the fast launch-verification
+        // gate. It is optional enrichment and must not hold a launch in diagnostics.
+        on_progress("rugcheck", 70, "Checking RugCheck risk report");
         report.rugcheck = self.get_rugcheck_summary(mint).await;
+        let blocking_rugcheck_risks = report.rugcheck.risks.iter().filter(|risk| {
+            let level = risk
+                .get("level")
+                .or_else(|| risk.get("severity"))
+                .or_else(|| risk.get("riskLevel"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            matches!(level.as_str(), "danger" | "critical" | "high" | "severe" | "blocker")
+        }).count();
+        let authorities_clear = report.mint_authority.is_none() && report.freeze_authority.is_none();
+        let rugcheck_positive = report.rugcheck.status == "available" && blocking_rugcheck_risks == 0;
         if report.rugcheck.status == "available" {
-            let detail = format!(
-                "RugCheck summary received: normalized score {:?}, liquidity locked {:?}%, {} reported risks. This provider score is advisory and does not independently approve a token.",
-                report.rugcheck.score_normalised,
-                report.rugcheck.lp_locked_pct,
-                report.rugcheck.risks.len()
-            );
             report.checks.push(SecurityCheck {
                 name: "rugcheck_summary".into(),
-                status: "info".into(),
-                severity: "info".into(),
-                detail,
+                status: if rugcheck_positive { "verified" } else { "warning" }.into(),
+                severity: if rugcheck_positive { "info" } else { "high" }.into(),
+                detail: format!(
+                    "RugCheck report received: normalized score {:?}, {} reported risks, {} high-severity risks. RugCheck is an external risk signal, not a guarantee against loss.",
+                    report.rugcheck.score_normalised,
+                    report.rugcheck.risks.len(),
+                    blocking_rugcheck_risks
+                ),
             });
         } else {
             report.checks.push(SecurityCheck {
@@ -677,9 +655,22 @@ impl SolanaRpc {
                 status: "unverified".into(),
                 severity: "warning".into(),
                 detail: report.rugcheck.error.clone().unwrap_or_else(|| {
-                    "RugCheck did not return a usable report. This is not evidence that the token is safe.".into()
+                    "RugCheck did not return a usable report. The token remains monitored but cannot pass the security gate.".into()
                 }),
             });
+        }
+        if authorities_clear && rugcheck_positive {
+            report.decision = "APPROVED".into();
+            report.decision_reason = "Mint and freeze authorities are disabled and RugCheck returned an available report with no high-severity risk flags. Optional provider enrichments do not block launch monitoring or the configured paper-entry rules.".into();
+        } else {
+            report.decision = "UNVERIFIED".into();
+            report.decision_reason = if !authorities_clear {
+                "Mint or freeze authority remains active. The token stays under market monitoring but is blocked from paper entry.".into()
+            } else if report.rugcheck.status != "available" {
+                "Mint and freeze authorities passed, but RugCheck is unavailable. The token stays under market monitoring; paper entry waits for a usable risk report.".into()
+            } else {
+                "RugCheck returned one or more high-severity risk flags. The token stays monitored but is blocked from paper entry.".into()
+            };
         }
         // Diagnostic-only mode is controlled by the persisted runtime config.
         if diagnostic_mode {
