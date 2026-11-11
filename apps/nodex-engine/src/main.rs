@@ -1344,9 +1344,7 @@ fn start_token_state_projector(
                 })),
                 "token_monitoring_started" | "token_monitoring_update" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        security.get("decision").and_then(serde_json::Value::as_str)
-                            == Some("APPROVED")
-                            && !security
+                        !security
                                 .get("diagnostic_only")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
@@ -1390,9 +1388,7 @@ fn start_token_state_projector(
                 }
                 "market_subscription_active" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        security.get("decision").and_then(serde_json::Value::as_str)
-                            == Some("APPROVED")
-                            && !security
+                        !security
                                 .get("diagnostic_only")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
