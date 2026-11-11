@@ -1059,7 +1059,9 @@ fn start_pumpswap_activity_processor(
                     continue;
                 }
             };
-            if !seen.insert(signature.clone()) { continue; }
+            if !seen.insert(signature.clone()) {
+                continue;
+            }
             if seen.len() > 20_000 {
                 seen.clear();
                 seen.insert(signature.clone());
