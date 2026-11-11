@@ -392,7 +392,7 @@ fn start_inactive_token_cleanup(
             match nodex_persistence::delete_inactive_token_history(&database, &inactive_mints).await {
                 Ok(deleted_mints) if !deleted_mints.is_empty() => {
                     for mint in &deleted_mints {
-                        registry.remove(mint);
+                        let _ = registry.remove(mint);
                     }
                     tracing::info!(
                         deleted_tokens = deleted_mints.len(),
@@ -1069,6 +1069,7 @@ fn start_token_state_projector(
         let mut seen_trade_keys = HashSet::<String>::new();
         let mut last_evaluation_signatures = HashMap::<String, String>::new();
         let mut last_entry_attempts = HashMap::<String, Instant>::new();
+        let mut last_activity_persisted = HashMap::<String, Instant>::new();
         loop {
             let event = match receiver.recv().await {
                 Ok(event) => event,
@@ -1145,8 +1146,16 @@ fn start_token_state_projector(
                     &mint,
                     json!({"last_activity_at": chrono::Utc::now().to_rfc3339()}),
                 ) {
-                    if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
-                        tracing::warn!(%error, mint_address = %mint, "Could not persist confirmed trade activity timestamp");
+                    let should_persist = last_activity_persisted
+                        .get(&mint)
+                        .map(|last| last.elapsed() >= Duration::from_secs(60))
+                        .unwrap_or(true);
+                    if should_persist {
+                        if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                            tracing::warn!(%error, mint_address = %mint, "Could not persist confirmed trade activity timestamp");
+                        } else {
+                            last_activity_persisted.insert(mint.clone(), Instant::now());
+                        }
                     }
                     let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
                 }
@@ -1185,8 +1194,16 @@ fn start_token_state_projector(
                     mint,
                     json!({"last_activity_at": chrono::Utc::now().to_rfc3339()}),
                 ) {
-                    if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
-                        tracing::warn!(%error, mint_address = mint, "Could not persist confirmed trade activity timestamp");
+                    let should_persist = last_activity_persisted
+                        .get(mint)
+                        .map(|last| last.elapsed() >= Duration::from_secs(60))
+                        .unwrap_or(true);
+                    if should_persist {
+                        if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                            tracing::warn!(%error, mint_address = mint, "Could not persist confirmed trade activity timestamp");
+                        } else {
+                            last_activity_persisted.insert(mint.to_owned(), Instant::now());
+                        }
                     }
                     let _ = events.send(json!({"type":"token_state_updated","data":snapshot}));
                 }
@@ -1585,6 +1602,20 @@ fn start_token_state_projector(
                         {
                             tracing::error!(%error, mint_address = mint, "Could not persist projected token state");
                             continue;
+                        }
+                    } else {
+                        let should_persist = last_activity_persisted
+                            .get(mint)
+                            .map(|last| last.elapsed() >= Duration::from_secs(60))
+                            .unwrap_or(true);
+                        if should_persist {
+                            if let Err(error) =
+                                nodex_persistence::save_token_state(&database, &snapshot).await
+                            {
+                                tracing::warn!(%error, mint_address = mint, "Could not persist market activity timestamp");
+                            } else {
+                                last_activity_persisted.insert(mint.to_owned(), Instant::now());
+                            }
                         }
                     }
                     if kind == "market_price_update" {
