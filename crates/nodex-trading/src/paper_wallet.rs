@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -39,6 +40,9 @@ pub struct PaperWallet {
     pub total_priority_fees_lamports: u64,
     pub total_swap_fees_lamports: u64,
     pub total_rent_refunded_lamports: u64,
+    /// Rent held for each simulated token account, keyed by mint. Older wallet snapshots default to empty.
+    #[serde(default)]
+    pub rent_by_token_account: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +62,8 @@ pub enum PaperWalletError {
     ArithmeticOverflow,
     #[error("rent refund exceeds locked rent")]
     InvalidRentRefund,
+    #[error("rent is already tracked for this token account")]
+    RentAccountAlreadyTracked,
 }
 
 impl Default for PaperWallet {
@@ -82,6 +88,7 @@ impl PaperWallet {
             total_priority_fees_lamports: 0,
             total_swap_fees_lamports: 0,
             total_rent_refunded_lamports: 0,
+            rent_by_token_account: HashMap::new(),
         }
     }
 
@@ -131,6 +138,37 @@ impl PaperWallet {
             available_after_lamports: available,
             reference: None,
         })
+    }
+
+    /// Reserve buy costs and associate the rent reserve with the token mint.
+    /// The mint key makes later full-close refunds idempotent per token account.
+    pub fn reserve_buy_for_token(
+        &mut self,
+        mint: &str,
+        costs: &BuyCostBreakdown,
+    ) -> Result<LedgerEntry, PaperWalletError> {
+        if self.rent_by_token_account.contains_key(mint) {
+            return Err(PaperWalletError::RentAccountAlreadyTracked);
+        }
+        let entry = self.reserve_buy(costs)?;
+        if costs.rent_reserve_lamports > 0 {
+            self.rent_by_token_account
+                .insert(mint.to_owned(), costs.rent_reserve_lamports);
+        }
+        Ok(LedgerEntry { reference: Some(mint.to_owned()), ..entry })
+    }
+
+    /// Simulate closing a token account after a fully settled zero-balance sale.
+    /// A repeated close is a no-op, preventing duplicate rent credits.
+    pub fn close_token_account_and_recover_rent(
+        &mut self,
+        mint: &str,
+    ) -> Result<Option<LedgerEntry>, PaperWalletError> {
+        let Some(amount) = self.rent_by_token_account.remove(mint) else {
+            return Ok(None);
+        };
+        let entry = self.refund_rent(amount)?;
+        Ok(Some(LedgerEntry { reference: Some(mint.to_owned()), ..entry }))
     }
 
     pub fn refund_rent(&mut self, amount_lamports: u64) -> Result<LedgerEntry, PaperWalletError> {
