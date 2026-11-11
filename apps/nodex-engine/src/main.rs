@@ -489,7 +489,7 @@ async fn evaluate_and_execute_paper_entry(
     let mut buy_volume_sol = 0.0;
     let mut total_volume_sol = 0.0;
     let mut buy_count = 0_u64;
-    let mut sell_count = 0_u64;
+    let mut sell_count_5m = 0_u64;
     for trade in &recent_trades {
         let amount_sol = trade.sol_amount_lamports as f64 / LAMPORTS_PER_SOL as f64;
         total_volume_sol += amount_sol;
@@ -498,7 +498,7 @@ async fn evaluate_and_execute_paper_entry(
             buy_count = buy_count.saturating_add(1);
             buyers.insert(trade.trader.as_str());
         } else {
-            sell_count = sell_count.saturating_add(1);
+            sell_count_5m = sell_count_5m.saturating_add(1);
         }
     }
 
