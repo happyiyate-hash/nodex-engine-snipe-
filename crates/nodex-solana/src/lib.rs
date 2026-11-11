@@ -626,7 +626,11 @@ impl SolanaRpc {
         report.rugcheck = self.get_rugcheck_summary(mint).await;
         if !diagnostic_mode {
             if let Some(supply_raw) = report.supply_raw.as_deref() {
-                on_progress("holder_distribution", 82, "Sampling the largest token holders");
+                on_progress(
+                    "holder_distribution",
+                    82,
+                    "Sampling the largest token holders",
+                );
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     self.sample_holder_distribution(mint, supply_raw),
