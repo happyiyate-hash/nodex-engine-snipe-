@@ -933,15 +933,38 @@ fn start_token_state_projector(
                 continue;
             }
             if kind == "pumpswap_trade_activity" {
-                let pool = data.get("pool_address").and_then(serde_json::Value::as_str).unwrap_or_default();
-                let Some(mint) = pool_to_mint.get(pool).cloned() else { continue; };
-                let signature = data.get("signature").and_then(serde_json::Value::as_str).unwrap_or_default();
-                let trader = data.get("trader_address").and_then(serde_json::Value::as_str).unwrap_or_default();
-                let side = data.get("event_type").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let pool = data
+                    .get("pool_address")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let Some(mint) = pool_to_mint.get(pool).cloned() else {
+                    continue;
+                };
+                let signature = data
+                    .get("signature")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let trader = data
+                    .get("trader_address")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let side = data
+                    .get("event_type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
                 let amount = json_u64(data.get("quote_amount_raw")).unwrap_or(0);
                 let timestamp_ms = timestamp_ms_from_value(data.get("timestamp"))
                     .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                record_confirmed_trade(&mut trade_observations, &mut seen_trade_keys, &mint, signature, trader, side, amount, timestamp_ms);
+                record_confirmed_trade(
+                    &mut trade_observations,
+                    &mut seen_trade_keys,
+                    &mint,
+                    signature,
+                    trader,
+                    side,
+                    amount,
+                    timestamp_ms,
+                );
                 continue;
             }
             let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str) else {
