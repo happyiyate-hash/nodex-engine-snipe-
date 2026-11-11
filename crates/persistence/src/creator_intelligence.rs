@@ -49,7 +49,9 @@ pub async fn initialize(pool: &SqlitePool) -> Result<()> {
             source TEXT NOT NULL DEFAULT 'learned',
             updated_at TEXT NOT NULL
         )"#,
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_creator_intelligence_score ON creator_intelligence(activity_score DESC, updated_at DESC)")
         .execute(pool).await?;
     Ok(())
@@ -100,7 +102,8 @@ pub async fn apply_observation(
         .bind(observation.sniper_concentration_pct)
         .bind(observation.activity_score)
         .bind(&observation.observed_at)
-        .execute(&mut *tx).await?;
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         return Ok(true);
     };
@@ -108,7 +111,8 @@ pub async fn apply_observation(
     let count = row.get::<i64, _>("observations_count").max(0) as u64;
     let next_count = count.saturating_add(1);
     let previous_score = row.get::<f64, _>("activity_score");
-    let next_score = ((previous_score * count as f64) + observation.activity_score) / next_count as f64;
+    let next_score =
+        ((previous_score * count as f64) + observation.activity_score) / next_count as f64;
     let previous_qualified = row.get::<i64, _>("qualified_observations").max(0) as u64;
     let label = observation.display_label.trim();
     sqlx::query(
@@ -125,19 +129,22 @@ pub async fn apply_observation(
             updated_at = ?
         WHERE creator_address = ?"#,
     )
-    .bind(label).bind(label)
+    .bind(label)
+    .bind(label)
     .bind(next_count as i64)
     .bind(previous_qualified.saturating_add(if observation.qualified { 1 } else { 0 }) as i64)
     .bind(observation.buy_count as i64)
     .bind(observation.sell_count as i64)
     .bind(observation.unique_buyers as i64)
     .bind(observation.independent_buyers as i64)
-    .bind(count as f64).bind(observation.sniper_concentration_pct)
+    .bind(count as f64)
+    .bind(observation.sniper_concentration_pct)
     .bind(next_count as f64)
     .bind(next_score)
     .bind(&observation.observed_at)
     .bind(address)
-    .execute(&mut *tx).await?;
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -150,19 +157,26 @@ pub async fn list(pool: &SqlitePool, limit: u32) -> Result<Vec<CreatorIntelligen
         FROM creator_intelligence ORDER BY activity_score DESC, updated_at DESC LIMIT ?"#,
     )
     .bind(limit.clamp(1, 500) as i64)
-    .fetch_all(pool).await?;
-    rows.into_iter().map(|row| Ok(CreatorIntelligence {
-        creator_address: row.try_get("creator_address")?,
-        display_label: row.try_get("display_label")?,
-        observations_count: row.try_get::<i64, _>("observations_count")?.max(0) as u64,
-        qualified_observations: row.try_get::<i64, _>("qualified_observations")?.max(0) as u64,
-        buy_count: row.try_get::<i64, _>("buy_count")?.max(0) as u64,
-        sell_count: row.try_get::<i64, _>("sell_count")?.max(0) as u64,
-        unique_buyers: row.try_get::<i64, _>("unique_buyers")?.max(0) as u64,
-        independent_buyers: row.try_get::<i64, _>("independent_buyers")?.max(0) as u64,
-        sniper_concentration_pct: row.try_get("sniper_concentration_pct")?,
-        activity_score: row.try_get("activity_score")?,
-        source: row.try_get("source")?,
-        updated_at: row.try_get("updated_at")?,
-    })).collect()
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(CreatorIntelligence {
+                creator_address: row.try_get("creator_address")?,
+                display_label: row.try_get("display_label")?,
+                observations_count: row.try_get::<i64, _>("observations_count")?.max(0) as u64,
+                qualified_observations: row
+                    .try_get::<i64, _>("qualified_observations")?
+                    .max(0) as u64,
+                buy_count: row.try_get::<i64, _>("buy_count")?.max(0) as u64,
+                sell_count: row.try_get::<i64, _>("sell_count")?.max(0) as u64,
+                unique_buyers: row.try_get::<i64, _>("unique_buyers")?.max(0) as u64,
+                independent_buyers: row.try_get::<i64, _>("independent_buyers")?.max(0) as u64,
+                sniper_concentration_pct: row.try_get("sniper_concentration_pct")?,
+                activity_score: row.try_get("activity_score")?,
+                source: row.try_get("source")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect()
 }
