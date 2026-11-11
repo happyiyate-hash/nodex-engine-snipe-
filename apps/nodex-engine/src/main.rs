@@ -3182,8 +3182,19 @@ async fn update_trading_config(
         .validate()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     if settings.execution_enabled {
-        return Err((StatusCode::CONFLICT,
-            "Execution is not available yet. Keep execution_enabled=false until the paper execution module is connected.".into()));
+        let control = state.control.read().await;
+        // The connected executor is deliberately paper-only. Enabling this
+        // switch is allowed only while the paper mode is active; real mode is
+        // rejected by the engine-control endpoint and has no signing adapter.
+        if control.mode != "paper"
+            || !control.available_modes.paper
+            || control.real_trading_available
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "Paper execution can only be enabled while paper mode is active. Live trading remains unavailable.".into(),
+            ));
+        }
     }
     let serialized = serde_json::to_string(&settings)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
