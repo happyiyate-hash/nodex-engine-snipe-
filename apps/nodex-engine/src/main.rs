@@ -1222,8 +1222,6 @@ fn start_launch_processor(
     let seen_signatures = Arc::new(Mutex::new(HashSet::<String>::new()));
     // Prevent concurrent discovery/metadata/scan pipelines for the same mint.
     let inflight_mints = Arc::new(Mutex::new(HashSet::<String>::new()));
-    // Bound concurrent background authority monitors independently from launch workers.
-    let authority_monitor_slots = Arc::new(tokio::sync::Semaphore::new(24));
     let (work_tx, work_rx) = tokio::sync::mpsc::channel::<(String, u64)>(LAUNCH_QUEUE_CAPACITY);
     let work_rx = Arc::new(Mutex::new(work_rx));
 
@@ -1238,7 +1236,6 @@ fn start_launch_processor(
         let market_monitor = market_monitor.clone();
         let token_registry = token_registry.clone();
         let inflight_mints = inflight_mints.clone();
-        let authority_monitor_slots = authority_monitor_slots.clone();
         let security_rpc = security_rpc.clone();
         let database = database.clone();
         tokio::spawn(async move {
