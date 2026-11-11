@@ -1108,7 +1108,34 @@ fn start_token_state_projector(
                 if diagnostics.len() > 50 {
                     diagnostics.drain(0..diagnostics.len() - 50);
                 }
-                match registry.upsert_patch(mint, json!({"diagnostics":diagnostics})) {
+                let mut diagnostic_patch = json!({"diagnostics":diagnostics});
+                let severity = data
+                    .get("severity")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("error")
+                    .to_ascii_lowercase();
+                if matches!(severity.as_str(), "error" | "critical" | "fatal") {
+                    let previous_activity = registry
+                        .get(mint)
+                        .and_then(|snapshot| snapshot.data.get("activity").cloned())
+                        .unwrap_or_else(|| json!({}));
+                    diagnostic_patch["activity"] = json!({
+                        "status": previous_activity.get("status").cloned().unwrap_or(json!("")),
+                        "label": previous_activity.get("label").cloned().unwrap_or(json!("")),
+                        "stage": previous_activity.get("stage").cloned().unwrap_or(data.get("stage").cloned().unwrap_or(json!("error"))),
+                        "sub_event": data.get("message").cloned().unwrap_or(json!("An error occurred")),
+                        "progress": previous_activity.get("progress").cloned().unwrap_or(serde_json::Value::Null),
+                        "error": {
+                            "severity": severity,
+                            "stage": data.get("stage").cloned().unwrap_or(serde_json::Value::Null),
+                            "provider": data.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                            "message": data.get("message").cloned().unwrap_or(json!("An error occurred")),
+                            "raw_response": data.get("raw_response").cloned().unwrap_or(serde_json::Value::Null),
+                            "occurred_at": data.get("occurred_at").cloned().unwrap_or(json!(chrono::Utc::now().to_rfc3339()))
+                        }
+                    });
+                }
+                match registry.upsert_patch(mint, diagnostic_patch) {
                     Ok(snapshot) => {
                         if let Err(error) =
                             nodex_persistence::save_token_state(&database, &snapshot).await
@@ -1142,66 +1169,68 @@ fn start_token_state_projector(
                     "status": "scanning",
                     "label": "Scanning",
                     "progress": 0,
-                    "stage": "initializing"
+                    "stage": "initializing",
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Preparing security scan"))
                 })),
                 "token_scan_progress" => Some(json!({
                     "status": "scanning",
                     "label": "Scanning",
                     "progress": data.get("progress").cloned().unwrap_or(json!(0)),
-                    "stage": data.get("stage").cloned().unwrap_or(json!("security_checks"))
+                    "stage": data.get("stage").cloned().unwrap_or(json!("security_checks")),
+                    "sub_event": data.get("message").cloned().or_else(|| data.get("stage").cloned()).unwrap_or(json!("Security checks in progress"))
                 })),
                 "token_scan_completed" => {
                     let decision = data
                         .get("decision")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    if decision.contains("approv") || decision.contains("qualif") {
+                        .to_ascii_uppercase();
+                    let diagnostic_only = data
+                        .get("diagnostic_only")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if decision == "APPROVED" && !diagnostic_only {
                         Some(json!({
                             "status": "verified",
                             "label": "Verified",
                             "progress": 100,
-                            "stage": "security_complete"
+                            "stage": "security_complete",
+                            "sub_event": "All required security checks completed"
                         }))
-                    } else if decision.contains("reject") {
+                    } else if decision == "REJECTED" {
                         Some(json!({
                             "status": "rejected",
                             "label": "Rejected",
                             "progress": 100,
-                            "stage": "security_complete"
+                            "stage": "security_complete",
+                            "sub_event": data.get("message").cloned().unwrap_or(json!("Security checks rejected this token"))
                         }))
-                    } else if decision.contains("unverified") || decision.contains("unknown") {
+                    } else {
                         Some(json!({
                             "status": "unverified",
                             "label": "Unverified",
                             "progress": 100,
-                            "stage": "security_complete"
+                            "stage": "security_complete",
+                            "sub_event": "The backend could not establish a verified result"
                         }))
-                    } else {
-                        None
                     }
                 }
                 "token_scan_failed" => Some(json!({
                     "status": "failed",
                     "label": "Scan failed",
-                    "progress": 100,
-                    "stage": "security_failed"
+                    "progress": 0,
+                    "stage": data.get("stage").cloned().unwrap_or(json!("security_failed")),
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Security scan failed"))
                 })),
                 "token_monitoring_started" | "token_monitoring_update" => Some(json!({
                     "status": "monitoring",
                     "label": "Monitoring",
-                    "stage": "market_watch"
+                    "stage": data.get("stage").cloned().unwrap_or(json!("market_watch")),
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Monitoring token conditions"))
                 })),
-                "market_subscription_requested" | "market_subscription_waiting" => Some(json!({
-                    "status": "monitoring",
-                    "label": "Monitoring",
-                    "stage": "waiting_for_market_feed"
-                })),
-                "market_subscription_active" => Some(json!({
-                    "status": "monitoring",
-                    "label": "Monitoring",
-                    "stage": "market_feed_active"
-                })),
+                // A market-data subscription is not strategy monitoring.
+                // Keep it out of the token lifecycle status.
+                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_active" => None,
                 "paper_entry_evaluation" => Some(json!({
                     "status": "evaluating",
                     "label": "Evaluating entry",
