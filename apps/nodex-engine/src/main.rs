@@ -1189,17 +1189,17 @@ fn start_token_state_projector(
                         .get("diagnostic_only")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
-                    let all_checks_verified = data
-                        .get("all_checks_verified")
+                    let verification_gate_passed = data
+                        .get("verification_gate_passed")
                         .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    if decision == "APPROVED" && !diagnostic_only && all_checks_verified {
+                        .unwrap_or_else(|| data.get("all_checks_verified").and_then(serde_json::Value::as_bool).unwrap_or(false));
+                    if decision == "APPROVED" && !diagnostic_only && verification_gate_passed {
                         Some(json!({
                             "status": "verified",
                             "label": "Verified",
                             "progress": 100,
                             "stage": "security_complete",
-                            "sub_event": "All required security checks completed"
+                            "sub_event": "Core launch verification passed. Supplementary checks remain visible in the security report."
                         }))
                     } else if decision == "REJECTED" {
                         Some(json!({
@@ -1215,7 +1215,7 @@ fn start_token_state_projector(
                             "label": "Unverified",
                             "progress": 100,
                             "stage": "security_complete",
-                            "sub_event": "The backend could not establish a verified result"
+                            "sub_event": data.get("message").cloned().unwrap_or(json!("The required launch verification evidence was incomplete."))
                         }))
                     }
                 }
@@ -1243,9 +1243,9 @@ fn start_token_state_projector(
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
                             && security
-                                .get("all_checks_verified")
+                                .get("verification_gate_passed")
                                 .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(false)
+                                .unwrap_or_else(|| security.get("all_checks_verified").and_then(serde_json::Value::as_bool).unwrap_or(false))
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
@@ -1289,9 +1289,9 @@ fn start_token_state_projector(
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
                             && security
-                                .get("all_checks_verified")
+                                .get("verification_gate_passed")
                                 .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(false)
+                                .unwrap_or_else(|| security.get("all_checks_verified").and_then(serde_json::Value::as_bool).unwrap_or(false))
                     });
                     security_is_verified.then(|| json!({
                         "status": "monitoring",
@@ -2883,11 +2883,30 @@ fn start_launch_processor(
                             }
                             // Read the latest persisted policy after all evidence is collected.
                             let current_policy = trading_settings_for_scan.read().await.clone();
+                            // "Verified" in the launch feed means the explicit core launch gate
+                            // passed. Keep all_checks_verified strict for policy/reporting: holder,
+                            // creator, liquidity and sellability enrichments are still incomplete.
                             let all_checks_verified = !report.checks.is_empty()
                                 && report
                                     .checks
                                     .iter()
                                     .all(|check| check.status.eq_ignore_ascii_case("verified"));
+                            let verification_gate_passed = !report.diagnostic_only
+                                && report.decision.eq_ignore_ascii_case("APPROVED")
+                                && ["mint_authority", "freeze_authority", "rugcheck_summary"]
+                                    .iter()
+                                    .all(|required| {
+                                        report.checks.iter().any(|check| {
+                                            check.name == *required
+                                                && (check.status.eq_ignore_ascii_case("passed")
+                                                    || check.status.eq_ignore_ascii_case("verified"))
+                                        })
+                                    })
+                                && !report.checks.iter().any(|check| {
+                                    check.name == "token_2022_extensions"
+                                        && check.severity.eq_ignore_ascii_case("critical")
+                                        && check.status.eq_ignore_ascii_case("unverified")
+                                });
                             let execution_gate = json!({
                                 "execution_enabled": current_policy.execution_enabled,
                                 "block_unverified_trades": current_policy.block_unverified_trades,
@@ -2911,6 +2930,7 @@ fn start_launch_processor(
                                 serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
                             report_payload["execution_gate"] = execution_gate;
                             report_payload["all_checks_verified"] = json!(all_checks_verified);
+                            report_payload["verification_gate_passed"] = json!(verification_gate_passed);
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -3101,6 +3121,7 @@ fn start_launch_processor(
                                 "message":report_payload.get("decision_reason").cloned().unwrap_or(json!("Security scan finished.")),
                                 "diagnostic_only":report.diagnostic_only,
                                 "all_checks_verified":all_checks_verified,
+                                "verification_gate_passed":verification_gate_passed,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
                             // Record a durable terminal/intermediate scan state independently of
