@@ -645,15 +645,21 @@ impl SolanaRpc {
             .count();
         let authorities_clear =
             report.mint_authority.is_none() && report.freeze_authority.is_none();
-        let rugcheck_positive =
-            report.rugcheck.status == "available" && blocking_rugcheck_risks == 0;
+        // RugCheck's normalized field is a risk score (lower is safer).
+        // A normalized risk score <= 20 corresponds to the Good / low-risk band.
+        let rugcheck_positive = report.rugcheck.status == "available"
+            && report
+                .rugcheck
+                .score_normalised
+                .is_some_and(|score| score <= 20)
+            && blocking_rugcheck_risks == 0;
         if report.rugcheck.status == "available" {
             report.checks.push(SecurityCheck {
                 name: "rugcheck_summary".into(),
                 status: if rugcheck_positive { "verified" } else { "warning" }.into(),
                 severity: if rugcheck_positive { "info" } else { "high" }.into(),
                 detail: format!(
-                    "RugCheck report received: normalized score {:?}, {} reported risks, {} high-severity risks. RugCheck is an external risk signal, not a guarantee against loss.",
+                    "RugCheck report received: normalized risk score {:?}, {} reported risks, {} high-severity risks. Lower normalized risk is better; the low-risk band is required for this launch verdict. RugCheck is not a guarantee against loss.",
                     report.rugcheck.score_normalised,
                     report.rugcheck.risks.len(),
                     blocking_rugcheck_risks
