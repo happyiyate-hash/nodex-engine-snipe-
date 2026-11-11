@@ -24,8 +24,8 @@ use nodex_solana::{
 use nodex_trading::{
     main_bot::{
         capture_position_risk, evaluate_entry, evaluate_position_exit, CreatorReputation,
-        LiveMarketActivity, PositionRiskPolicy, SecurityAssessment, TradingBotDecision,
-        TradingBotConfig,
+        LiveMarketActivity, PositionRiskPolicy, SecurityAssessment, TradingBotConfig,
+        TradingBotDecision,
     },
     paper_wallet::{BuyCostBreakdown, PaperWallet, LAMPORTS_PER_SOL},
 };
@@ -420,9 +420,10 @@ fn record_confirmed_trade(
         is_buy,
         sol_amount_lamports: amount_lamports,
     });
-    while trades.front().is_some_and(|trade| {
-        now_ms.saturating_sub(trade.timestamp_ms) > 300_000
-    }) || trades.len() > 500
+    while trades
+        .front()
+        .is_some_and(|trade| now_ms.saturating_sub(trade.timestamp_ms) > 300_000)
+        || trades.len() > 500
     {
         trades.pop_front();
     }
