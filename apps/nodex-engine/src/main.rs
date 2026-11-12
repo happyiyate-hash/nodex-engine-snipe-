@@ -6379,7 +6379,8 @@ mod scan_progress_state_tests {
             "data":{"mint_address":"test-mint"}
         });
         assert_eq!(
-            activity_log_from_event(&subscribed).expect("subscription event is retained")["operation"],
+            activity_log_from_event(&subscribed).expect("subscription event is retained")
+                ["operation"],
             "market_subscription_subscribed"
         );
     }
