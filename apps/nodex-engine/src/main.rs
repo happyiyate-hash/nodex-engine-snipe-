@@ -368,6 +368,12 @@ fn token_approved_for_market_monitoring(security: &serde_json::Value) -> bool {
         && core_verification_gate_passed(security)
 }
 
+/// Paper execution must independently enforce the same approval boundary as
+/// market subscription. A monitoring event is not authorization to enter.
+fn paper_entry_security_gate_passed(security: Option<&serde_json::Value>) -> bool {
+    security.is_some_and(token_approved_for_market_monitoring)
+}
+
 fn start_inactive_token_cleanup(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
@@ -817,6 +823,11 @@ async fn evaluate_and_execute_paper_entry(
         .and_then(|value| value.get("decision"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    if !paper_entry_security_gate_passed(security) {
+        gate_reasons.push(
+            "Paper entry is blocked until the token has an explicit APPROVED verdict and all core security checks pass.".to_owned(),
+        );
+    }
     let rugcheck = security.and_then(|value| value.get("rugcheck"));
     let rugcheck_score = rugcheck
         .and_then(|value| value.get("score_normalised"))
@@ -5321,6 +5332,42 @@ mod scan_progress_state_tests {
         assert!(core_verification_gate_passed(&report));
         report["decision"] = json!("REJECTED");
         assert!(core_verification_gate_passed(&report));
+    }
+
+    #[test]
+    fn paper_entry_requires_the_same_explicit_approval_and_core_verification() {
+        let approved = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"rugcheck_summary","status":"verified"}
+            ]
+        });
+        assert!(paper_entry_security_gate_passed(Some(&approved)));
+
+        let rejected = json!({
+            "decision":"REJECTED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"rugcheck_summary","status":"passed"}
+            ]
+        });
+        assert!(!paper_entry_security_gate_passed(Some(&rejected)));
+
+        let missing_core_check = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"}
+            ]
+        });
+        assert!(!paper_entry_security_gate_passed(Some(&missing_core_check)));
+        assert!(!paper_entry_security_gate_passed(None));
     }
 
     #[test]
