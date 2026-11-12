@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
 };
 use tokio::sync::{broadcast, Semaphore};
@@ -26,6 +26,22 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
 static RUGCHECK_KEY_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+type SharedRpcLimits = (Arc<Semaphore>, Arc<Semaphore>);
+static RPC_LIMITS: OnceLock<std::sync::Mutex<HashMap<String, SharedRpcLimits>>> = OnceLock::new();
+
+fn shared_rpc_limits(
+    provider_group: &str,
+    concurrency: usize,
+    queue_capacity: usize,
+) -> SharedRpcLimits {
+    let registry = RPC_LIMITS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut registry = registry.lock().expect("RPC scheduler registry lock poisoned");
+    registry.entry(provider_group.to_owned()).or_insert_with(|| (
+        Arc::new(Semaphore::new(concurrency)),
+        Arc::new(Semaphore::new(concurrency.saturating_add(queue_capacity))),
+    )).clone()
+}
 
 const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [0x18, 0x1e, 0xc8, 0x28, 0x05, 0x1c, 0x07, 0x77];
 const PUMP_CREATE_V2_DISCRIMINATOR: [u8; 8] = [0xd6, 0x90, 0x4c, 0xec, 0x5f, 0x8b, 0x31, 0xb4];
@@ -176,11 +192,13 @@ impl SolanaRpc {
             .ok().and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(request_limit.saturating_mul(4)).clamp(1, 500);
         let endpoint_health = (0..http_urls.len()).map(|_| Mutex::new(EndpointHealth::default())).collect();
+        // Both primary and security RPC clients share one provider-group limiter.
+        let (request_limit, queue_limit) = shared_rpc_limits(limit_env, request_limit, queue_capacity);
         Self {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
-            request_limit: Arc::new(Semaphore::new(request_limit)),
-            queue_limit: Arc::new(Semaphore::new(request_limit.saturating_add(queue_capacity))),
+            request_limit,
+            queue_limit,
             endpoint_health: Arc::new(endpoint_health),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
