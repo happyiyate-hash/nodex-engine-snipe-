@@ -4544,7 +4544,6 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     }
 }
 
-
 fn spawn_controlled_log_stream(
     ws_urls: Vec<String>,
     program_id: String,
