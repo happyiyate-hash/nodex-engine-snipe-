@@ -5961,21 +5961,19 @@ async fn main() -> anyhow::Result<()> {
                     _ = flush_interval.tick() => flush_now = true,
                 }
 
-                if batch.len() >= 100 || flush_now {
-                    if !batch.is_empty() {
-                        match nodex_persistence::save_engine_activity_logs(
-                            &activity_database,
-                            &batch,
-                        )
-                        .await
-                        {
-                            Ok(()) => batch.clear(),
-                            Err(error) => tracing::error!(
-                                %error,
-                                queued_events = batch.len(),
-                                "Could not persist batched engine activity logs"
-                            ),
-                        }
+                if (batch.len() >= 100 || flush_now) && !batch.is_empty() {
+                    match nodex_persistence::save_engine_activity_logs(
+                        &activity_database,
+                        &batch,
+                    )
+                    .await
+                    {
+                        Ok(()) => batch.clear(),
+                        Err(error) => tracing::error!(
+                            %error,
+                            queued_events = batch.len(),
+                            "Could not persist batched engine activity logs"
+                        ),
                     }
                 }
 
