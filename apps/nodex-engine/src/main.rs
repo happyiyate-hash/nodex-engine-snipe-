@@ -1444,11 +1444,11 @@ fn start_token_state_projector(
                         .unwrap_or(false);
                     if !diagnostic_only && verification_gate_passed {
                         Some(json!({
-                            "status": "monitoring",
-                            "label": "Monitoring",
+                            "status": "verified",
+                            "label": "Verified",
                             "progress": 100,
-                            "stage": "market_watch",
-                            "sub_event": "The three mandatory verification checks passed. Live market monitoring has started."
+                            "stage": "security_complete",
+                            "sub_event": "Security checks passed. Waiting for confirmation that the live market feed is subscribed."
                         }))
                     } else if decision == "REJECTED" {
                         Some(json!({
@@ -1524,21 +1524,8 @@ fn start_token_state_projector(
                         "sub_event": data.get("message").cloned().unwrap_or(json!("Market feed subscription was removed"))
                     }))
                 }
-                "market_subscription_active" => {
-                    let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        !security
-                            .get("diagnostic_only")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(true)
-                            && core_verification_gate_passed(security)
-                    });
-                    security_is_verified.then(|| json!({
-                        "status": "monitoring",
-                        "label": "Monitoring",
-                        "stage": "market_feed_active",
-                        "sub_event": data.get("message").cloned().unwrap_or(json!("Verified token market feed is active"))
-                    }))
-                }
+                // Market-feed state is stored independently from the security/strategy lifecycle.
+                "market_subscription_active" => None,
                 // Requested/waiting subscriptions are transport setup, not active monitoring.
                 "market_subscription_requested" | "market_subscription_waiting" => None,
                 "paper_entry_evaluation" => Some(paper_entry_activity_patch(&data)),
@@ -1703,6 +1690,7 @@ fn start_token_state_projector(
                 "market_subscription_requested"
                 | "market_subscription_waiting"
                 | "market_subscription_active"
+                | "market_subscription_failed"
                 | "market_subscriptions_removed" => {
                     json!({"market_subscription": data})
                 }
