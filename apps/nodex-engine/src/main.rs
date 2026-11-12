@@ -3751,7 +3751,7 @@ fn start_launch_processor(
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut scheduled = HashSet::<String>::new();
+            let mut scheduled = HashMap::<String, tokio::time::Instant>::new();
             loop {
                 interval.tick().await;
                 let now = chrono::Utc::now();
@@ -3767,9 +3767,13 @@ fn start_launch_processor(
                         scheduled.remove(&mint);
                         continue;
                     }
-                    if scheduled.contains(&mint) {
+                    if scheduled
+                        .get(&mint)
+                        .is_some_and(|queued_at| queued_at.elapsed() < Duration::from_secs(30))
+                    {
                         continue;
                     }
+                    scheduled.remove(&mint);
                     let retry_at = cache["retry_after"]
                         .as_str()
                         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
@@ -3787,7 +3791,7 @@ fn start_launch_processor(
                     let slot = state.data["discovery"]["slot"].as_u64().unwrap_or(0);
                     match retry_work_tx.try_send((signature, slot)) {
                         Ok(()) => {
-                            scheduled.insert(mint.clone());
+                            scheduled.insert(mint.clone(), tokio::time::Instant::now());
                             let _ = retry_events.send(
                                 json!({"type":"token_scan_retry_scheduled","data":{
                                     "mint_address":mint,
