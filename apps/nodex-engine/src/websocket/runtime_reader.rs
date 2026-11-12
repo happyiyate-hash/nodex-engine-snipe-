@@ -520,7 +520,11 @@ mod tests {
             }}),
             &mut active,
         );
-        assert!(should_forward_position_scoped_market_event(&[], &active, "MintMulti"));
+        assert!(should_forward_position_scoped_market_event(
+            &[],
+            &active,
+            "MintMulti"
+        ));
     }
 
     #[test]
