@@ -5149,7 +5149,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(launch_rpc) = rpc.clone() {
         scanner::start_launch_processor(
             event_broadcaster.subscribe(),
-            events.clone(),
+            event_broadcaster.clone(),
             launch_rpc,
             flux_rpc.clone(),
             db.clone(),
