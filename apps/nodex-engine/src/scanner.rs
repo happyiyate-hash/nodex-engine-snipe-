@@ -159,7 +159,15 @@ pub(super) fn start_launch_processor(
                         .as_str()
                         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
                     let now = chrono::Utc::now();
-                    let terminal = matches!(cache_status, "verified" | "rejected");
+                    let approval_expires_at = cache["approval_expires_at"]
+                        .as_str()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                    let verified_cache_fresh = cache_status == "verified"
+                        && approval_expires_at.is_some_and(|expires_at| expires_at > now);
+                    // Rejections remain terminal; approvals are reusable only while their
+                    // persisted freshness window is valid. Legacy approvals without an
+                    // expiry are deliberately rescanned rather than trusted indefinitely.
+                    let terminal = cache_status == "rejected" || verified_cache_fresh;
                     let cached = cache_status == "completed_diagnostic"
                         && retry_after.map(|time| time > now).unwrap_or(true);
                     let waiting = cache_status == "retry_wait"
@@ -747,6 +755,13 @@ pub(super) fn start_launch_processor(
                                             "attempts": scan_attempts + 1,
                                             "scan_attempt": scan_attempt,
                                             "scanned_at": scanned_at.to_rfc3339(),
+                                            "approval_expires_at": if cache_status == "verified" {
+                                                Some((scanned_at + chrono::Duration::seconds(
+                                                    crate::paper_trading::SECURITY_APPROVAL_TTL_SECONDS
+                                                )).to_rfc3339())
+                                            } else {
+                                                None
+                                            },
                                             "retry_after": retry_after,
                                             "provider_rate_limited": provider_limited
                                         }
