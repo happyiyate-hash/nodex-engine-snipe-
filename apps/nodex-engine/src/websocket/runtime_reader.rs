@@ -182,6 +182,25 @@ fn should_forward_position_scoped_market_event(
     has_open_position(positions, mint) || actively_subscribed_mints.contains(mint)
 }
 
+fn update_active_subscription_tracking(
+    event_type: &str,
+    mint: String,
+    actively_subscribed_mints: &mut HashSet<String>,
+) {
+    match event_type {
+        "market_subscription_subscribed" | "market_subscription_active" => {
+            actively_subscribed_mints.insert(mint);
+        }
+        "market_subscription_failed"
+        | "market_subscription_waiting"
+        | "market_subscriptions_removed"
+        | "token_removed" => {
+            actively_subscribed_mints.remove(&mint);
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn enforce_exact_mint(mut event: Value) -> Option<Value> {
     let event_type = event
         .get("type")
@@ -232,23 +251,13 @@ pub(super) fn spawn(
                         continue;
                     };
                     if let Some(mint) = event_mint(&event) {
-                        match event_type.as_str() {
-                            // The Solana JSON-RPC subscription response carries the
-                            // subscription ID and is emitted as "subscribed". This is the
-                            // actual provider acknowledgement; this monitor does not emit
-                            // a separate "active" event. Treat both names as active for
-                            // compatibility with providers that emit the explicit variant.
-                            "market_subscription_subscribed" | "market_subscription_active" => {
-                                actively_subscribed_mints.insert(mint);
-                            }
-                            "market_subscription_failed"
-                            | "market_subscription_waiting"
-                            | "market_subscriptions_removed"
-                            | "token_removed" => {
-                                actively_subscribed_mints.remove(&mint);
-                            }
-                            _ => {}
-                        }
+                        // The Solana JSON-RPC response includes a subscription ID and
+                        // is emitted as "subscribed"; no separate "active" event exists.
+                        update_active_subscription_tracking(
+                            &event_type,
+                            mint,
+                            &mut actively_subscribed_mints,
+                        );
                     }
                     if POSITION_SCOPED_MARKET_EVENTS.contains(&event_type.as_str()) {
                         let Some(mint) = event_mint(&event) else {
@@ -347,6 +356,29 @@ mod tests {
             pool_to_mint.get("PoolTwo").map(String::as_str),
             Some("MintTwo")
         );
+    }
+
+    #[test]
+    fn provider_subscription_acknowledgement_enables_market_ticks_without_a_position() {
+        let mut active = HashSet::new();
+        update_active_subscription_tracking(
+            "market_subscription_subscribed",
+            "MintVerified".to_owned(),
+            &mut active,
+        );
+        assert!(active.contains("MintVerified"));
+        assert!(should_forward_position_scoped_market_event(
+            &[],
+            &active,
+            "MintVerified"
+        ));
+
+        update_active_subscription_tracking(
+            "market_subscription_failed",
+            "MintVerified".to_owned(),
+            &mut active,
+        );
+        assert!(!active.contains("MintVerified"));
     }
 
     #[test]
