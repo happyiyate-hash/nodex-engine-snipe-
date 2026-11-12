@@ -1234,7 +1234,9 @@ fn start_token_state_projector(
                         .map(|last| last.elapsed() >= Duration::from_secs(60))
                         .unwrap_or(true);
                     if should_persist {
-                        if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                        if let Err(error) =
+                            nodex_persistence::save_token_state(&database, &snapshot).await
+                        {
                             tracing::warn!(%error, mint_address = mint, "Could not persist confirmed trade activity timestamp");
                         } else {
                             last_activity_persisted.insert(mint.to_owned(), Instant::now());
@@ -1438,9 +1440,9 @@ fn start_token_state_projector(
                 "market_subscription_active" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         !security
-                                .get("diagnostic_only")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(true)
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
                     security_is_verified.then(|| json!({
