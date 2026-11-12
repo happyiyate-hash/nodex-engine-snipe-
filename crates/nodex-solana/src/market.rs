@@ -706,6 +706,7 @@ async fn connect_market_stream(
                                             "mint_address":subscription.mint,
                                             "account_address":subscription.account,
                                             "venue":subscription.venue,
+                                            "status":"active",
                                             "subscription_id":subscription_id,
                                             "active_subscriptions":active.len(),
                                             "received_at":chrono::Utc::now().to_rfc3339()
@@ -713,14 +714,17 @@ async fn connect_market_stream(
                                     }));
                                 } else {
                                     let error = value.get("error").cloned().unwrap_or(Value::Null);
+                                    let reason = format!("Solana provider rejected the market account subscription: {error}");
                                     let _ = events.send(json!({
-                                        "type":"diagnostic",
+                                        "type":"market_subscription_failed",
                                         "data":{
-                                            "severity":"warning",
-                                            "component":"market_monitor_subscribe",
                                             "mint_address":subscription.mint,
                                             "account_address":subscription.account,
-                                            "error":error,
+                                            "venue":subscription.venue,
+                                            "status":"failed",
+                                            "reason":reason,
+                                            "message":reason,
+                                            "provider_error":error,
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }
                                     }));
