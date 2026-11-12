@@ -3760,7 +3760,7 @@ fn start_launch_processor(
                     let retry_at = cache["retry_after"].as_str()
                         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
                         .map(|value| value.with_timezone(&chrono::Utc));
-                    if !retry_at.is_some_and(|deadline| deadline <= now) { continue; }
+                    if retry_at.as_ref().map(|deadline| deadline <= &now) != Some(true) { continue; }
                     let signature = state.data["discovery"]["signature"].as_str().unwrap_or_default().to_string();
                     if signature.is_empty() { continue; }
                     let slot = state.data["discovery"]["slot"].as_u64().unwrap_or(0);
@@ -3770,7 +3770,7 @@ fn start_launch_processor(
                             let _ = retry_events.send(json!({"type":"token_scan_retry_scheduled","data":{
                                 "mint_address":mint,
                                 "scan_attempt":cache["attempts"].as_u64().unwrap_or(0) + 1,
-                                "retry_after":retry_at.map(|value| value.to_rfc3339()),
+                                "retry_after":retry_at.as_ref().map(|value| value.to_rfc3339()),
                                 "received_at":now.to_rfc3339()
                             }}));
                         }
