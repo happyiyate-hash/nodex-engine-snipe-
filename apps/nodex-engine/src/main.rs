@@ -1430,7 +1430,7 @@ fn start_token_state_projector(
                             "label": "Verified",
                             "progress": 100,
                             "stage": "security_complete",
-                            "sub_event": "Security checks passed. Waiting for confirmation that the live market feed is subscribed."
+                            "sub_event": "Getting market data"
                         }))
                     } else if decision == "REJECTED" {
                         Some(json!({
@@ -1438,7 +1438,7 @@ fn start_token_state_projector(
                             "label": "Risk detected",
                             "progress": 100,
                             "stage": "security_complete",
-                            "sub_event": data.get("message").cloned().unwrap_or(json!("Security checks rejected this token"))
+                            "sub_event": "Unverified"
                         }))
                     } else {
                         Some(json!({
@@ -1446,7 +1446,7 @@ fn start_token_state_projector(
                             "label": "Unverified",
                             "progress": 100,
                             "stage": "security_complete",
-                            "sub_event": data.get("message").cloned().unwrap_or(json!("The required launch verification evidence was incomplete."))
+                            "sub_event": "Unverified"
                         }))
                     }
                 }
@@ -1455,7 +1455,7 @@ fn start_token_state_projector(
                     "label": "Scan failed",
                     "progress": 0,
                     "stage": data.get("stage").cloned().unwrap_or(json!("security_failed")),
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Security scan failed")),
+                    "sub_event": "Security scan failed",
                     "error": {
                         "severity": "error",
                         "stage": data.get("stage").cloned().unwrap_or(json!("security_failed")),
