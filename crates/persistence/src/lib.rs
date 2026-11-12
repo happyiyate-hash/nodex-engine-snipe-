@@ -474,7 +474,7 @@ pub async fn save_token_state(pool: &SqlitePool, state: &TokenState) -> Result<(
 /// Restore persisted token snapshots during engine startup.
 pub async fn load_token_states(pool: &SqlitePool) -> Result<Vec<TokenState>> {
     let rows = sqlx::query_scalar::<_, String>(
-        "SELECT payload_json FROM token_states ORDER BY updated_at DESC LIMIT 500",
+        "SELECT payload_json FROM token_states ORDER BY updated_at DESC",
     )
     .fetch_all(pool)
     .await?;
