@@ -5872,7 +5872,12 @@ async fn main() -> anyhow::Result<()> {
     );
     let stream_status = Arc::new(RwLock::new(StreamStatus::default()));
     let rpc = (!config.solana_http_urls.is_empty()).then(|| {
-        SolanaRpc::new_with_urls(config.solana_http_urls.clone())
+        let limit_env = if config.fluxrpc_http_urls.is_empty() {
+            "HELIUS_MAX_CONCURRENT_REQUESTS"
+        } else {
+            "FLUXRPC_MAX_CONCURRENT_REQUESTS"
+        };
+        SolanaRpc::new_with_urls_and_limit(config.solana_http_urls.clone(), limit_env)
             .with_activity_events(events.clone())
     });
     let flux_rpc = (!config.fluxrpc_http_urls.is_empty()).then(|| {
