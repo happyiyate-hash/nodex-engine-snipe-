@@ -1675,17 +1675,21 @@ fn start_token_state_projector(
                         "last_activity_at": chrono::Utc::now().to_rfc3339()
                     });
                     let mut subscription = current_market_subscription.unwrap_or_else(|| json!({}));
-                    let subscription_status = subscription.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let subscription_status = subscription
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
                     if matches!(subscription_status, "pending" | "subscribed") {
                         subscription["status"] = json!("active");
                         subscription["reason"] = serde_json::Value::Null;
-                        subscription["last_market_update_at"] = data.get("received_at")
+                        subscription["last_market_update_at"] = data
+                            .get("received_at")
                             .cloned()
                             .unwrap_or(json!(chrono::Utc::now().to_rfc3339()));
                     }
                     patch["market_subscription"] = subscription;
                     patch
-                },
+                }
                 "pumpswap_volume_update" => json!({
                     "statistics": {"pumpswap_volume": data}
                 }),
