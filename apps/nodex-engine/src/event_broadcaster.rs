@@ -27,6 +27,14 @@ impl EventBroadcaster {
         self.sender.clone()
     }
 
+    /// Publish one runtime event to every active subscriber.
+    pub fn publish(
+        &self,
+        event: Value,
+    ) -> Result<usize, broadcast::error::SendError<Value>> {
+        self.sender.send(event)
+    }
+
     /// Subscribe an independent consumer to the shared runtime event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.sender.subscribe()
@@ -45,8 +53,7 @@ mod tests {
         let mut second = broadcaster.subscribe();
 
         broadcaster
-            .sender()
-            .send(json!({"type":"launch_detected","data":{"mint_address":"MintA"}}))
+            .publish(json!({"type":"launch_detected","data":{"mint_address":"MintA"}}))
             .expect("at least one receiver is active");
 
         let expected = json!({"type":"launch_detected","data":{"mint_address":"MintA"}});
@@ -68,6 +75,6 @@ mod tests {
         let broadcaster = EventBroadcaster::new(0);
         let _receiver = broadcaster.subscribe();
         // Construction with a zero capacity must still create a usable channel.
-        assert!(broadcaster.sender().send(json!({"type":"test"})).is_ok());
+        assert!(broadcaster.publish(json!({"type":"test"})).is_ok());
     }
 }
