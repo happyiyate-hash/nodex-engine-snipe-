@@ -565,7 +565,13 @@ pub async fn list_engine_activity_logs(
 ) -> Result<Vec<serde_json::Value>> {
     let safe_limit = limit.clamp(1, 1000) as i64;
     let rows = sqlx::query(
-        "SELECT id, recorded_at, activity_json FROM engine_activity_logs ORDER BY id DESC LIMIT ?",
+        "SELECT id, recorded_at, activity_json
+         FROM engine_activity_logs
+         WHERE json_extract(activity_json, '$.provider') = 'engine'
+            OR lower(COALESCE(json_extract(activity_json, '$.severity'), '')) IN ('error', 'warning')
+            OR COALESCE(CAST(json_extract(activity_json, '$.http_status') AS INTEGER), 0) >= 400
+            OR COALESCE(json_extract(activity_json, '$.error'), '') <> ''
+         ORDER BY id DESC LIMIT ?",
     )
     .bind(safe_limit)
     .fetch_all(pool)
