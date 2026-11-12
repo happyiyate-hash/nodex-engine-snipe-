@@ -3757,30 +3757,44 @@ fn start_launch_processor(
                         scheduled.remove(&mint);
                         continue;
                     }
-                    if scheduled.contains(&mint) { continue; }
-                    let retry_at = cache["retry_after"].as_str()
+                    if scheduled.contains(&mint) {
+                        continue;
+                    }
+                    let retry_at = cache["retry_after"]
+                        .as_str()
                         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
                         .map(|value| value.with_timezone(&chrono::Utc));
-                    if retry_at.as_ref().map(|deadline| deadline <= &now) != Some(true) { continue; }
-                    let signature = state.data["discovery"]["signature"].as_str().unwrap_or_default().to_string();
-                    if signature.is_empty() { continue; }
+                    if retry_at.as_ref().map(|deadline| deadline <= &now) != Some(true) {
+                        continue;
+                    }
+                    let signature = state.data["discovery"]["signature"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    if signature.is_empty() {
+                        continue;
+                    }
                     let slot = state.data["discovery"]["slot"].as_u64().unwrap_or(0);
                     match retry_work_tx.try_send((signature, slot)) {
                         Ok(()) => {
                             scheduled.insert(mint.clone());
-                            let _ = retry_events.send(json!({"type":"token_scan_retry_scheduled","data":{
-                                "mint_address":mint,
-                                "scan_attempt":cache["attempts"].as_u64().unwrap_or(0) + 1,
-                                "retry_after":retry_at.as_ref().map(|value| value.to_rfc3339()),
-                                "received_at":now.to_rfc3339()
-                            }}));
+                            let _ = retry_events.send(
+                                json!({"type":"token_scan_retry_scheduled","data":{
+                                    "mint_address":mint,
+                                    "scan_attempt":cache["attempts"].as_u64().unwrap_or(0) + 1,
+                                    "retry_after":retry_at.as_ref().map(|value| value.to_rfc3339()),
+                                    "received_at":now.to_rfc3339()
+                                }}),
+                            );
                         }
                         Err(error) => {
-                            let _ = retry_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(
-                                &mint,"token_scan_retry","launch_queue",
-                                format!("Could not enqueue scheduled security retry: {error}"),
-                                json!({"kind":"retry_queue_error","message":error.to_string()})
-                            )}));
+                            let _ = retry_events.send(
+                                json!({"type":"token_diagnostic","data":token_diagnostic(
+                                    &mint,"token_scan_retry","launch_queue",
+                                    format!("Could not enqueue scheduled security retry: {error}"),
+                                    json!({"kind":"retry_queue_error","message":error.to_string()})
+                                )}),
+                            );
                         }
                     }
                 }
