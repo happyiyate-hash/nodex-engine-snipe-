@@ -1,3 +1,4 @@
+mod event_broadcaster;
 mod sol_price;
 mod storage;
 mod token_details;
@@ -5903,7 +5904,10 @@ async fn main() -> anyhow::Result<()> {
     let portfolio_positions = Arc::new(RwLock::new(
         nodex_persistence::load_portfolio_positions(&db).await?,
     ));
-    let (events, _) = broadcast::channel::<serde_json::Value>(8192);
+    // One backend-owned broadcaster is the source for all runtime event consumers.
+    // Publishers receive a sender handle; subscribers are created through this owner.
+    let event_broadcaster = event_broadcaster::EventBroadcaster::new(8192);
+    let events = event_broadcaster.sender();
     let sol_price_state =
         sol_price::start_sol_price_feed(events.clone(), initial_sol_price.clone());
 
@@ -5911,7 +5915,7 @@ async fn main() -> anyhow::Result<()> {
     // chatter, and hand durable operator events to a bounded persistence queue.
     let (activity_queue, mut activity_queue_receiver) = mpsc::channel::<serde_json::Value>(4096);
     {
-        let mut activity_receiver = events.subscribe();
+        let mut activity_receiver = event_broadcaster.subscribe();
         tokio::spawn(async move {
             loop {
                 match activity_receiver.recv().await {
@@ -5983,7 +5987,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let (database_changes, database_change_receiver) = mpsc::channel(512);
     let gateway = websocket::Gateway::start(
-        events.subscribe(),
+        event_broadcaster.subscribe(),
         database_change_receiver,
         4096,
         portfolio_positions.clone(),
@@ -6133,7 +6137,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Keep canonical token state synchronized from independent worker events.
     start_token_state_projector(
-        events.subscribe(),
+        event_broadcaster.subscribe(),
         events.clone(),
         db.clone(),
         token_registry.clone(),
@@ -6146,7 +6150,7 @@ async fn main() -> anyhow::Result<()> {
         database_changes.clone(),
     );
     start_portfolio_price_projector(
-        events.subscribe(),
+        event_broadcaster.subscribe(),
         events.clone(),
         db.clone(),
         wallet_state.clone(),
@@ -6186,7 +6190,7 @@ async fn main() -> anyhow::Result<()> {
     // Decode actual Pump.fun buys/sells from the same confirmed logs stream.
     if !config.solana_ws_urls.is_empty() {
         start_pump_fun_trade_processor(
-            events.subscribe(),
+            event_broadcaster.subscribe(),
             events.clone(),
             config.pump_fun_program_id.clone(),
         );
@@ -6195,7 +6199,7 @@ async fn main() -> anyhow::Result<()> {
     // Decode Pump.fun creation transactions from confirmed logs notifications.
     if let Some(launch_rpc) = rpc.clone() {
         start_launch_processor(
-            events.subscribe(),
+            event_broadcaster.subscribe(),
             events.clone(),
             launch_rpc,
             flux_rpc.clone(),
@@ -6219,7 +6223,7 @@ async fn main() -> anyhow::Result<()> {
     // are never counted as trades or buyers.
     let pumpswap_status = Arc::new(RwLock::new(StreamStatus::default()));
     if !config.solana_ws_urls.is_empty() {
-        start_pumpswap_activity_processor(events.subscribe(), events.clone());
+        start_pumpswap_activity_processor(event_broadcaster.subscribe(), events.clone());
         let activity_ws_urls = config.solana_ws_urls.clone();
         let activity_events = events.clone();
         let activity_status = pumpswap_status.clone();
