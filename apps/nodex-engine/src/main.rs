@@ -5962,11 +5962,8 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 if (batch.len() >= 100 || flush_now) && !batch.is_empty() {
-                    match nodex_persistence::save_engine_activity_logs(
-                        &activity_database,
-                        &batch,
-                    )
-                    .await
+                    match nodex_persistence::save_engine_activity_logs(&activity_database, &batch)
+                        .await
                     {
                         Ok(()) => batch.clear(),
                         Err(error) => tracing::error!(
