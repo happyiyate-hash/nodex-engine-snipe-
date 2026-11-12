@@ -149,7 +149,7 @@ impl EndpointHealth {
     }
     fn is_available(&self) -> bool {
         self.cooldown_until
-            .map_or(true, |until| until <= tokio::time::Instant::now())
+            .is_none_or(|until| until <= tokio::time::Instant::now())
     }
 }
 fn retry_after_duration(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
