@@ -3803,9 +3803,8 @@ fn start_launch_processor(
                     }
                     // Fail closed: only an explicit APPROVED verdict with all core
                     // verification checks passed may enter market monitoring.
-                    let approved_for_market_monitoring = approved_registry
-                        .get(&scan_mint)
-                        .is_some_and(|state| {
+                    let approved_for_market_monitoring =
+                        approved_registry.get(&scan_mint).is_some_and(|state| {
                             token_approved_for_market_monitoring(&state.data["security"])
                         });
 
