@@ -650,6 +650,17 @@ fn timestamp_ms_from_value(value: Option<&serde_json::Value>) -> Option<i64> {
         .map(|timestamp| timestamp.timestamp_millis())
 }
 
+/// Reject an older market-account slot so delayed notifications cannot roll
+/// the token's entry price backwards. If slot tracking has begun, slotless
+/// updates are not trusted for entry evaluation.
+fn market_update_slot_is_current(last_slot: Option<u64>, incoming_slot: Option<u64>) -> bool {
+    match (last_slot, incoming_slot) {
+        (Some(last), Some(incoming)) => incoming >= last,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_confirmed_trade(
     observations: &mut HashMap<String, VecDeque<ConfirmedTradeObservation>>,
@@ -1271,6 +1282,7 @@ fn start_token_state_projector(
         let mut seen_trade_keys = HashSet::<String>::new();
         let mut last_evaluation_signatures = HashMap::<String, String>::new();
         let mut last_entry_attempts = HashMap::<String, Instant>::new();
+        let mut last_market_slots = HashMap::<String, u64>::new();
         let mut last_activity_persisted = HashMap::<String, Instant>::new();
         loop {
             let event = match receiver.recv().await {
@@ -1299,6 +1311,7 @@ fn start_token_state_projector(
                         trade_observations.remove(mint);
                         last_evaluation_signatures.remove(mint);
                         last_entry_attempts.remove(mint);
+                        last_market_slots.remove(mint);
                         last_activity_persisted.remove(mint);
                         let stale_pools = pool_to_mint
                             .iter()
@@ -1392,6 +1405,16 @@ fn start_token_state_projector(
             let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str) else {
                 continue;
             };
+            if kind == "market_price_update" {
+                let incoming_slot = json_u64(data.get("slot"));
+                let last_slot = last_market_slots.get(mint).copied();
+                if !market_update_slot_is_current(last_slot, incoming_slot) {
+                    continue;
+                }
+                if let Some(slot) = incoming_slot {
+                    last_market_slots.insert(mint.to_owned(), slot);
+                }
+            }
             if kind == "pump_fun_trade_activity" {
                 let signature = data
                     .get("signature")
@@ -5215,6 +5238,16 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod scan_progress_state_tests {
     use super::*;
+
+    #[test]
+    fn market_updates_reject_older_or_unversioned_slots_after_slot_tracking_starts() {
+        assert!(market_update_slot_is_current(None, Some(100)));
+        assert!(market_update_slot_is_current(Some(100), Some(100)));
+        assert!(market_update_slot_is_current(Some(100), Some(101)));
+        assert!(!market_update_slot_is_current(Some(100), Some(99)));
+        assert!(!market_update_slot_is_current(Some(100), None));
+        assert!(market_update_slot_is_current(None, None));
+    }
 
     #[test]
     fn activity_history_filters_successful_rpc_noise_and_keeps_provider_errors() {
