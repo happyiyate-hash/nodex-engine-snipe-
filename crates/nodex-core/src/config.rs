@@ -66,6 +66,10 @@ impl EngineConfig {
             .map(|key| format!("{flux_ws_host}/?key={key}"))
             .collect();
 
+        // FluxRPC is the active Solana provider whenever FluxRPC keys are configured.
+        // In that mode Helius endpoints are deliberately excluded so exhausted Helius
+        // quotas are not touched until FluxRPC keys are removed and the service restarts.
+        // Explicit SOLANA_RPC_* endpoints remain first-priority overrides.
         let mut http_urls = Vec::new();
         let mut ws_urls = Vec::new();
         if let Ok(value) = std::env::var("SOLANA_RPC_HTTP_URL") {
@@ -78,14 +82,27 @@ impl EngineConfig {
                 ws_urls.push(value.trim().to_owned());
             }
         }
-        for key in &keys {
-            let http = format!("https://mainnet.helius-rpc.com/?api-key={key}");
-            let ws = format!("wss://mainnet.helius-rpc.com/?api-key={key}");
-            if !http_urls.contains(&http) {
-                http_urls.push(http);
+        if !flux_keys.is_empty() {
+            for url in &fluxrpc_http_urls {
+                if !http_urls.contains(url) {
+                    http_urls.push(url.clone());
+                }
             }
-            if !ws_urls.contains(&ws) {
-                ws_urls.push(ws);
+            for url in &fluxrpc_ws_urls {
+                if !ws_urls.contains(url) {
+                    ws_urls.push(url.clone());
+                }
+            }
+        } else {
+            for key in &keys {
+                let http = format!("https://mainnet.helius-rpc.com/?api-key={key}");
+                let ws = format!("wss://mainnet.helius-rpc.com/?api-key={key}");
+                if !http_urls.contains(&http) {
+                    http_urls.push(http);
+                }
+                if !ws_urls.contains(&ws) {
+                    ws_urls.push(ws);
+                }
             }
         }
 
