@@ -1,9 +1,31 @@
 use serde_json::Value;
 
 pub(super) fn is_frontend_event(value: &Value) -> bool {
+    let event_type = value.get("type").and_then(Value::as_str);
+    if event_type == Some("engine_activity") {
+        let activity = value.get("data").unwrap_or(value);
+        let severity = activity
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let http_status = activity
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let has_error = activity
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.is_empty());
+        // Successful RPC request/response cards overwhelm the operator stream.
+        // Keep provider failures visible; lifecycle events are forwarded separately.
+        return severity.eq_ignore_ascii_case("error")
+            || severity.eq_ignore_ascii_case("warning")
+            || http_status >= 400
+            || has_error;
+    }
+
     matches!(
-        value.get("type").and_then(Value::as_str),
-        Some("engine_activity")
+        event_type,
             | Some("tokens_removed_inactive")
             | Some("connection_status")
             | Some("engine_state")
