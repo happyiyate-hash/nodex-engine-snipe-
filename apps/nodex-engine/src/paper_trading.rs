@@ -10,6 +10,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A verified security report is reusable for 15 minutes. This matches the
+/// existing diagnostic scan retry window and avoids rescanning on every market tick.
+pub(super) const SECURITY_APPROVAL_TTL_SECONDS: i64 = 900;
+
+fn security_approval_cache_is_fresh(
+    security: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    security
+        .and_then(|value| value.get("scan_cache"))
+        .and_then(|cache| cache.get("approval_expires_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|expires_at| expires_at > now)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn evaluate_and_execute_paper_entry(
     mint: &str,
@@ -136,9 +152,11 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         .and_then(|value| value.get("decision"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if !paper_entry_security_gate_passed(security) {
+    if !paper_entry_security_gate_passed(security)
+        || !security_approval_cache_is_fresh(security, chrono::Utc::now())
+    {
         gate_reasons.push(
-            "Paper entry is blocked until the token has an explicit APPROVED verdict and all core security checks pass.".to_owned(),
+            "Paper entry is blocked until the token has an explicit APPROVED verdict, all core checks pass, and its cached approval is still valid.".to_owned(),
         );
     }
     let rugcheck = security.and_then(|value| value.get("rugcheck"));
@@ -560,3 +578,50 @@ pub(super) async fn evaluate_and_execute_paper_entry(
     let _ = events.send(json!({"type":"portfolio_summary_updated","data":portfolio}));
 }
 
+
+
+#[cfg(test)]
+mod security_approval_cache_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_cached_approval_is_reused_without_an_external_rescan() {
+        let now = chrono::Utc::now();
+        let security = json!({
+            "decision":"APPROVED",
+            "scan_cache":{
+                "approval_expires_at":(now + chrono::Duration::seconds(60)).to_rfc3339()
+            }
+        });
+        assert!(security_approval_cache_is_fresh(Some(&security), now));
+    }
+
+    #[test]
+    fn expired_missing_or_malformed_approval_cache_fails_closed() {
+        let now = chrono::Utc::now();
+        let expired = json!({"scan_cache":{"approval_expires_at":
+            (now - chrono::Duration::seconds(1)).to_rfc3339()
+        }});
+        let missing = json!({"scan_cache":{}});
+        let malformed = json!({"scan_cache":{"approval_expires_at":"invalid"}});
+        assert!(!security_approval_cache_is_fresh(Some(&expired), now));
+        assert!(!security_approval_cache_is_fresh(Some(&missing), now));
+        assert!(!security_approval_cache_is_fresh(Some(&malformed), now));
+        assert!(!security_approval_cache_is_fresh(None, now));
+    }
+
+    #[test]
+    fn approval_cache_is_scoped_to_the_security_record_for_each_mint() {
+        let now = chrono::Utc::now();
+        let token_a = json!({"mint_address":"mint-a","security":{
+            "scan_cache":{"approval_expires_at":
+                (now + chrono::Duration::seconds(60)).to_rfc3339()}
+        }});
+        let token_b = json!({"mint_address":"mint-b","security":{
+            "scan_cache":{"approval_expires_at":
+                (now - chrono::Duration::seconds(60)).to_rfc3339()}
+        }});
+        assert!(security_approval_cache_is_fresh(token_a.get("security"), now));
+        assert!(!security_approval_cache_is_fresh(token_b.get("security"), now));
+    }
+}
