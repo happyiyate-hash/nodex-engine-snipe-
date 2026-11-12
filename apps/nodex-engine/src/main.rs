@@ -423,6 +423,60 @@ fn start_inactive_token_cleanup(
     });
 }
 
+fn paper_entry_activity_patch(data: &serde_json::Value) -> serde_json::Value {
+    let decision = data
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("wait")
+        .to_ascii_lowercase();
+    let reasons = data
+        .get("reasons")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|reason| !reason.trim().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let reason_text = if reasons.is_empty() {
+        data.get("message")
+            .or_else(|| data.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        reasons.join("; ")
+    };
+    let (status, label, fallback) = match decision.as_str() {
+        "reject" => (
+            "strategy_rejected",
+            "Strategy rejected",
+            "The token did not meet the strategy requirements.",
+        ),
+        "evaluate_paper_entry" => (
+            "entry_ready",
+            "Entry conditions met",
+            "Strategy gates passed; preparing a simulated paper entry.",
+        ),
+        _ => (
+            "waiting_for_entry",
+            "Waiting for entry conditions",
+            "Waiting for market and strategy conditions to align.",
+        ),
+    };
+    json!({
+        "status": status,
+        "label": label,
+        "stage": "strategy_checks",
+        "decision": decision,
+        "reasons": reasons,
+        "sub_event": if reason_text.is_empty() { fallback } else { reason_text.as_str() },
+        "evaluated_at": data.get("evaluated_at").cloned().unwrap_or(serde_json::Value::Null)
+    })
+}
+
 fn scan_progress_security_patch(
     current_security: Option<&serde_json::Value>,
     data: &serde_json::Value,
@@ -783,7 +837,7 @@ async fn evaluate_and_execute_paper_entry(
             position.get("status").and_then(serde_json::Value::as_str) == Some("open")
         })
         .count();
-    let evaluation = if gate_reasons.is_empty() && sol_quote_valid {
+    let mut evaluation = if gate_reasons.is_empty() && sol_quote_valid {
         evaluate_entry(
             &config,
             &creator_assessment,
@@ -806,6 +860,25 @@ async fn evaluate_and_execute_paper_entry(
         }
     };
     drop(open_positions);
+
+    // A strategy pass is not executable without a valid token quote in both
+    // denominations. Report it as waiting instead of leaving the card stuck
+    // at "Evaluating entry" after a silent early return.
+    if evaluation.decision == TradingBotDecision::EvaluatePaperEntry {
+        if !price_sol.is_some_and(|value| value.is_finite() && value > 0.0) {
+            evaluation.decision = TradingBotDecision::Wait;
+            evaluation.entry_speed = "blocked".into();
+            evaluation
+                .reasons
+                .push("A valid SOL-denominated token price is not available yet.".into());
+        } else if !price_usd.is_some_and(|value| value.is_finite() && value > 0.0) {
+            evaluation.decision = TradingBotDecision::Wait;
+            evaluation.entry_speed = "blocked".into();
+            evaluation
+                .reasons
+                .push("A valid USD-denominated token price is not available yet.".into());
+        }
+    }
 
     let decision_name = match evaluation.decision {
         TradingBotDecision::Reject => "reject",
@@ -1454,12 +1527,7 @@ fn start_token_state_projector(
                 }
                 // Requested/waiting subscriptions are transport setup, not active monitoring.
                 "market_subscription_requested" | "market_subscription_waiting" => None,
-                "paper_entry_evaluation" => Some(json!({
-                    "status": "evaluating",
-                    "label": "Evaluating entry",
-                    "stage": "strategy_checks",
-                    "sub_event": data.get("message").cloned().or_else(|| data.get("reason").cloned()).unwrap_or(json!("Evaluating entry criteria against strategy settings"))
-                })),
+                "paper_entry_evaluation" => Some(paper_entry_activity_patch(&data)),
                 "paper_buy_started" => Some(json!({
                     "status": "executing_buy",
                     "label": "Executing buy order",
@@ -1534,7 +1602,7 @@ fn start_token_state_projector(
                     "scanning" => 1,
                     "verified" => 2,
                     "monitoring" => 3,
-                    "evaluating" => 4,
+                    "evaluating" | "waiting_for_entry" | "entry_ready" => 4,
                     "executing_buy" => 5,
                     "monitoring_stopped" => 3,
                     "rejected" | "unverified" | "failed" | "bought_paper" | "buy_failed"
@@ -4767,7 +4835,10 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
         object.insert("portfolio".into(), portfolio);
         // The profile endpoint is the frontend's bootstrap request. Include the
         // complete persisted token states so identity metadata is restored by mint.
+        let token_snapshot_count = token_snapshots.len();
         object.insert("tokens".into(), json!(token_snapshots));
+        object.insert("token_snapshot_complete".into(), json!(true));
+        object.insert("token_snapshot_count".into(), json!(token_snapshot_count));
     }
     if let Some(portfolio_snapshot) = profile.get("portfolio") {
         if let Err(error) =
