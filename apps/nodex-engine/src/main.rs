@@ -5920,7 +5920,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let _ = events.send(json!({"type":"diagnostic","data":{
             "severity":"warning","component":"solana_http_rpc",
-            "message":"Token transaction decoding is disabled because SOLANA_RPC_HTTP_URL / HELIUS_API_KEY is not configured.",
+            "message":"Token transaction decoding is disabled because no active Solana HTTP RPC provider is configured. Add FluxRPC keys or Helius fallback keys.",
             "received_at":chrono::Utc::now().to_rfc3339()
         }}));
     }
@@ -5958,7 +5958,7 @@ async fn main() -> anyhow::Result<()> {
             runtime_receiver.clone(),
         );
     } else {
-        tracing::warn!("Helius not configured; set HELIUS_API_KEY or SOLANA_RPC_WS_URL");
+        tracing::warn!("No active Solana WebSocket provider configured; set FluxRPC keys or Helius fallback keys.");
     }
 
     let state = AppState {
