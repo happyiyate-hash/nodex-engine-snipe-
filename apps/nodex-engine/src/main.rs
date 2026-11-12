@@ -3708,6 +3708,75 @@ async fn update_trading_config(
     ))
 }
 
+async fn update_paper_execution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let object = payload.as_object().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Paper execution update must be a JSON object.".to_string(),
+    ))?;
+    if object.len() != 1 || !object.contains_key("enabled") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only the enabled boolean can be changed through this endpoint.".to_string(),
+        ));
+    }
+    let enabled = payload
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "The enabled field must be a boolean.".to_string(),
+        ))?;
+
+    let control = state.control.read().await;
+    if enabled
+        && (control.mode != "paper"
+            || !control.available_modes.paper
+            || control.real_trading_available)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Paper execution can only be enabled while paper mode is active. Live trading remains unavailable.".into(),
+        ));
+    }
+    drop(control);
+
+    let mut settings = state.trading_settings.read().await.clone();
+    settings.execution_enabled = enabled;
+    settings
+        .validate()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let serialized = serde_json::to_string(&settings)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    sqlx::query(
+        "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at"
+    )
+    .bind(serialized)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&state.database)
+    .await
+    .map_err(|error| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Could not persist paper execution setting: {error}"),
+    ))?;
+
+    *state.trading_settings.write().await = settings.clone();
+    let _ = state
+        .database_changes
+        .send(json!({"type":"trading_config_updated","data":settings}))
+        .await;
+    Ok(Json(json!({
+        "status":"ok",
+        "config":settings,
+        "mode":"paper",
+        "real_trading_available":false
+    })))
+}
+
 async fn patch_runtime_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5716,6 +5785,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/config/trading",
             get(get_trading_config).put(update_trading_config),
+        )
+        .route(
+            "/api/v1/config/trading/execution",
+            patch(update_paper_execution),
         )
         .route(
             "/api/config",
