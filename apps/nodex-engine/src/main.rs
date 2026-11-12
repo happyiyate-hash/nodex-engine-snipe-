@@ -2957,7 +2957,6 @@ fn start_pumpswap_activity_processor(
     });
 }
 
-
 fn verify_operator_key(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let expected = state
         .admin_api_key
