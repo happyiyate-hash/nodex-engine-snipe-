@@ -21,8 +21,8 @@ use launch_detector::{detect_pump_fun_launch, CreateInstruction};
 use nodex_core::{config::EngineConfig, TokenRegistry};
 use nodex_solana::{
     decode_pump_fun_create, decode_pump_fun_trade_logs, decode_pump_swap_activity_logs,
-    run_logs_stream, MarketMonitor, PumpSwapActivityEvent, SolanaRpc,
-    StreamStatus, PUMPSWAP_PROGRAM_ID,
+    run_logs_stream, MarketMonitor, PumpSwapActivityEvent, SolanaRpc, StreamStatus,
+    PUMPSWAP_PROGRAM_ID,
 };
 use nodex_trading::{
     main_bot::{
