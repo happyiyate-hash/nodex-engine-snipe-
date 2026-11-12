@@ -423,6 +423,111 @@ fn start_inactive_token_cleanup(
     });
 }
 
+/// Convert only useful operator activity into durable event history.
+/// Successful low-level RPC request/response cards stay out of the UI and DB;
+/// provider errors and meaningful engine lifecycle events remain observable.
+fn activity_log_from_event(event: &serde_json::Value) -> Option<serde_json::Value> {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str)?;
+
+    if event_type == "engine_activity" {
+        let activity = event.get("data")?.clone();
+        let severity = activity
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let http_status = activity
+            .get("http_status")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let has_error = activity
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| !message.is_empty());
+        if severity.eq_ignore_ascii_case("error")
+            || severity.eq_ignore_ascii_case("warning")
+            || http_status >= 400
+            || has_error
+        {
+            return Some(activity);
+        }
+        return None;
+    }
+
+    if !matches!(
+        event_type,
+        "launch_detected"
+            | "new_token_detected"
+            | "token_approval_pending"
+            | "token_scan_started"
+            | "token_scan_progress"
+            | "token_scan_update"
+            | "token_scan_completed"
+            | "token_scan_failed"
+            | "token_diagnostic"
+            | "diagnostic"
+            | "token_metadata_started"
+            | "token_metadata_failed"
+            | "token_metadata_updated"
+            | "token_monitoring_started"
+            | "token_monitoring_update"
+            | "token_monitoring_completed"
+            | "pump_fun_trade_activity"
+            | "strategy_rejected_token"
+            | "paper_buy_started"
+            | "paper_buy_executed"
+            | "paper_buy_failed"
+            | "paper_entry_evaluation"
+            | "market_subscription_requested"
+            | "market_subscription_subscribed"
+            | "market_subscription_waiting"
+            | "market_subscription_failed"
+            | "provider_status"
+            | "connection_status"
+            | "engine_state"
+            | "market_curve_completed"
+            | "paper_sell_executed"
+            | "paper_sell_failed"
+            | "paper_exit_triggered"
+            | "swap_started"
+            | "swap_updated"
+            | "swap_completed"
+            | "swap_failed"
+            | "transaction_submitted"
+            | "transaction_confirmed"
+            | "transaction_failed"
+    ) {
+        return None;
+    }
+
+    let data = event
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| event.clone());
+    let severity = if event_type.ends_with("_failed")
+        || data.get("severity").and_then(serde_json::Value::as_str) == Some("error")
+    {
+        "error"
+    } else if data.get("severity").and_then(serde_json::Value::as_str) == Some("warning") {
+        "warning"
+    } else {
+        "info"
+    };
+
+    Some(serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "timestamp": data.get("timestamp")
+            .or_else(|| data.get("received_at"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::String(chrono::Utc::now().to_rfc3339())),
+        "direction": "event",
+        "provider": "engine",
+        "operation": event_type,
+        "token_mint": data.get("mint_address").or_else(|| data.get("token_mint")),
+        "severity": severity,
+        "event": data
+    }))
+}
+
 fn interrupted_entry_recovery_patch() -> serde_json::Value {
     json!({
         "activity": {
@@ -5804,95 +5909,77 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel::<serde_json::Value>(8192);
     let sol_price_state =
         sol_price::start_sol_price_feed(events.clone(), initial_sol_price.clone());
-    // Persist every structured provider request/response card independently of
-    // the WebSocket client, so the operator can inspect history after reconnecting.
+
+    // Read the broadcast stream quickly, filter out successful low-level RPC
+    // chatter, and hand durable operator events to a bounded persistence queue.
+    let (activity_queue, mut activity_queue_receiver) = mpsc::channel::<serde_json::Value>(4096);
     {
         let mut activity_receiver = events.subscribe();
-        let activity_database = db.clone();
         tokio::spawn(async move {
             loop {
                 match activity_receiver.recv().await {
                     Ok(event) => {
-                        let event_type = event.get("type").and_then(serde_json::Value::as_str);
-                        let activity = if event_type == Some("engine_activity") {
-                            event.get("data").cloned()
-                        } else if matches!(
-                            event_type,
-                            Some("token_scan_started")
-                                | Some("token_scan_progress")
-                                | Some("token_scan_update")
-                                | Some("token_scan_completed")
-                                | Some("token_scan_failed")
-                                | Some("token_diagnostic")
-                                | Some("diagnostic")
-                                | Some("token_metadata_started")
-                                | Some("token_metadata_failed")
-                                | Some("token_metadata_updated")
-                                | Some("token_monitoring_started")
-                                | Some("token_monitoring_update")
-                                | Some("token_monitoring_completed")
-                                | Some("pump_fun_trade_activity")
-                                | Some("strategy_rejected_token")
-                                | Some("paper_buy_started")
-                                | Some("paper_buy_executed")
-                                | Some("paper_buy_failed")
-                                | Some("paper_entry_evaluation")
-                                | Some("market_subscription_waiting")
-                                | Some("paper_sell_executed")
-                                | Some("paper_sell_failed")
-                                | Some("paper_exit_triggered")
-                                | Some("swap_started")
-                                | Some("swap_updated")
-                                | Some("swap_completed")
-                                | Some("swap_failed")
-                                | Some("transaction_submitted")
-                                | Some("transaction_confirmed")
-                                | Some("transaction_failed")
-                        ) {
-                            let data = event.get("data").cloned().unwrap_or_else(|| event.clone());
-                            let severity = if event_type
-                                .is_some_and(|kind| kind.ends_with("_failed"))
-                                || data.get("severity").and_then(serde_json::Value::as_str)
-                                    == Some("error")
-                            {
-                                "error"
-                            } else {
-                                "info"
-                            };
-                            Some(serde_json::json!({
-                                "id": uuid::Uuid::new_v4().to_string(),
-                                "timestamp": data.get("timestamp")
-                                    .or_else(|| data.get("received_at"))
-                                    .cloned()
-                                    .unwrap_or_else(|| serde_json::Value::String(chrono::Utc::now().to_rfc3339())),
-                                "direction": "event",
-                                "provider": "engine",
-                                "operation": event_type.unwrap_or("engine_event"),
-                                "token_mint": data.get("mint_address").or_else(|| data.get("token_mint")),
-                                "severity": severity,
-                                "event": data
-                            }))
-                        } else {
-                            None
-                        };
-                        if let Some(activity) = activity {
-                            if let Err(error) = nodex_persistence::save_engine_activity_log(
-                                &activity_database,
-                                &activity,
-                            )
-                            .await
-                            {
-                                tracing::error!(%error, "Could not persist engine activity log");
+                        if let Some(activity) = activity_log_from_event(&event) {
+                            if activity_queue.send(activity).await.is_err() {
+                                break;
                             }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(
+                        tracing::error!(
                             dropped_events = count,
-                            "Engine activity persistence subscriber lagged"
+                            "Engine activity event reader lagged before persistence queue"
                         );
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let activity_database = db.clone();
+        tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(100);
+            let mut flush_interval = tokio::time::interval(Duration::from_millis(250));
+            flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            flush_interval.tick().await;
+
+            loop {
+                let mut flush_now = false;
+                let mut queue_closed = false;
+                tokio::select! {
+                    activity = activity_queue_receiver.recv() => {
+                        match activity {
+                            Some(activity) => batch.push(activity),
+                            None => {
+                                flush_now = true;
+                                queue_closed = true;
+                            }
+                        }
+                    }
+                    _ = flush_interval.tick() => flush_now = true,
+                }
+
+                if batch.len() >= 100 || flush_now {
+                    if !batch.is_empty() {
+                        match nodex_persistence::save_engine_activity_logs(
+                            &activity_database,
+                            &batch,
+                        )
+                        .await
+                        {
+                            Ok(()) => batch.clear(),
+                            Err(error) => tracing::error!(
+                                %error,
+                                queued_events = batch.len(),
+                                "Could not persist batched engine activity logs"
+                            ),
+                        }
+                    }
+                }
+
+                if queue_closed {
+                    break;
                 }
             }
         });
@@ -6259,6 +6346,43 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod scan_progress_state_tests {
     use super::*;
+
+    #[test]
+    fn activity_history_filters_successful_rpc_noise_and_keeps_provider_errors() {
+        let success = json!({
+            "type":"engine_activity",
+            "data":{"direction":"response","operation":"getAsset","severity":"info","http_status":200}
+        });
+        assert!(activity_log_from_event(&success).is_none());
+
+        let failure = json!({
+            "type":"engine_activity",
+            "data":{"direction":"response","operation":"getAsset","severity":"error","http_status":401,"error":"unauthorized"}
+        });
+        let persisted = activity_log_from_event(&failure).expect("provider failure is retained");
+        assert_eq!(persisted["operation"], "getAsset");
+        assert_eq!(persisted["http_status"], 401);
+    }
+
+    #[test]
+    fn activity_history_retains_launch_and_market_subscription_lifecycle() {
+        let launch = json!({
+            "type":"launch_detected",
+            "data":{"mint_address":"test-mint","signature":"test-signature"}
+        });
+        let persisted = activity_log_from_event(&launch).expect("launch event is retained");
+        assert_eq!(persisted["operation"], "launch_detected");
+        assert_eq!(persisted["event"]["mint_address"], "test-mint");
+
+        let subscribed = json!({
+            "type":"market_subscription_subscribed",
+            "data":{"mint_address":"test-mint"}
+        });
+        assert_eq!(
+            activity_log_from_event(&subscribed).expect("subscription event is retained")["operation"],
+            "market_subscription_subscribed"
+        );
+    }
 
     #[test]
     fn interrupted_entry_recovery_preserves_monitoring_lifecycle() {
