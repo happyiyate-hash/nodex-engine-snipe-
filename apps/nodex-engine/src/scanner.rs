@@ -94,7 +94,7 @@ pub(super) fn start_launch_processor(
                     Ok(Some(decoded)) => decoded,
                     Ok(None) => continue,
                     Err(error) => {
-                        let _ = events.send(json!({"type":"diagnostic","data":{
+                        let _ = events.publish(json!({"type":"diagnostic","data":{
                             "severity":"error","component":"pump_fun_decoder",
                             "message":error.to_string(),"signature":signature,
                             "received_at":chrono::Utc::now().to_rfc3339()
@@ -130,7 +130,7 @@ pub(super) fn start_launch_processor(
                     })
                     .unwrap_or(false);
                 if whitelist_only_mode && !creator_is_preferred {
-                    let _ = events.send(json!({
+                    let _ = events.publish(json!({
                         "type":"creator_watchlist_status",
                         "data":{
                             "mint_address":launch.mint_address.clone(),
@@ -285,12 +285,12 @@ pub(super) fn start_launch_processor(
                         if let Err(error) =
                             nodex_persistence::save_token_state(&database, &snapshot).await
                         {
-                            let _ = events.send(json!({"type":"token_diagnostic","data":token_diagnostic(
+                            let _ = events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(
                                 &mint_address,"token_scan_cache","sqlite",error.to_string(),
                                 json!({"kind":"database_persistence_error","message":error.to_string()})
                             )}));
                         }
-                        let _ = events.send(json!({
+                        let _ = events.publish(json!({
                             "type":"new_token_detected",
                             "data":{
                                 "mint_address":mint_address,
@@ -316,12 +316,12 @@ pub(super) fn start_launch_processor(
                         }
                         // Keep the legacy event enriched so existing clients also receive
                         // metadata before the scanner begins.
-                        let _ = events.send(json!({"type":"launch_detected","data":legacy_launch}));
+                        let _ = events.publish(json!({"type":"launch_detected","data":legacy_launch}));
                         for diagnostic in &metadata.errors {
                             let _ =
-                                events.send(json!({"type":"token_diagnostic","data":diagnostic}));
+                                events.publish(json!({"type":"token_diagnostic","data":diagnostic}));
                         }
-                        let _ = events.send(json!({"type":"token_scan_started","data":{
+                        let _ = events.publish(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
                             "scan_attempt":scan_attempts + 1,
@@ -356,7 +356,7 @@ pub(super) fn start_launch_processor(
                             &scan_mint,
                             scan_settings.diagnostic_mode,
                             move |stage, progress, message| {
-                                let _ = progress_events.send(
+                                let _ = progress_events.publish(
                                     json!({"type":"token_scan_progress","data":{
                                         "mint_address":progress_mint,
                                         "scan_attempt":scan_attempt,
@@ -419,13 +419,13 @@ pub(super) fn start_launch_processor(
                                     report.rugcheck.error.clone().unwrap_or_else(|| {
                                         "RugCheck provider request failed.".into()
                                     });
-                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"rugcheck","rugcheck",message,details)}));
+                                let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"rugcheck","rugcheck",message,details)}));
                             }
                             for check in &report.checks {
                                 if check.name == "holder_distribution"
                                     && check.detail.contains("NODEX_PROVIDER_ERROR_JSON:")
                                 {
-                                    let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"holder_distribution","solana_rpc",check.detail.clone(),provider_error_details(&check.detail))}));
+                                    let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"holder_distribution","solana_rpc",check.detail.clone(),provider_error_details(&check.detail))}));
                                 }
                             }
                             // Read the latest persisted policy after all evidence is collected.
@@ -499,7 +499,7 @@ pub(super) fn start_launch_processor(
                                         Ok(true) => true,
                                         Ok(false) => true,
                                         Err(error) => {
-                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                            let _ = scan_events.publish(json!({"type":"diagnostic","data":{
                                                 "severity":"error","component":"launch_persistence",
                                                 "message":error.to_string(),"mint_address":scan_mint
                                             }}));
@@ -525,7 +525,7 @@ pub(super) fn start_launch_processor(
                                         .await
                                         .is_ok(),
                                         Err(error) => {
-                                            let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                            let _ = scan_events.publish(json!({"type":"diagnostic","data":{
                                                 "severity":"error","component":"token_approval_registry",
                                                 "message":error,"mint_address":scan_mint
                                             }}));
@@ -533,9 +533,9 @@ pub(super) fn start_launch_processor(
                                         }
                                     };
                                     if approval_persisted {
-                                        let _ = scan_events.send(json!({"type":"token_scan_update","data":report_payload.clone()}));
+                                        let _ = scan_events.publish(json!({"type":"token_scan_update","data":report_payload.clone()}));
                                         if let Some(snapshot) = approved_registry.get(&scan_mint) {
-                                            let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                                            let _ = scan_events.publish(json!({"type":"token_state_updated","data":snapshot}));
                                         }
                                     } else {
                                         terminal_status = "unverified";
@@ -548,9 +548,9 @@ pub(super) fn start_launch_processor(
                                             json!({"security":report_payload.clone(),"market":{"status":"not_started"}}),
                                         ) {
                                             let _ = nodex_persistence::save_token_state(&approved_database, &snapshot).await;
-                                            let _ = scan_events.send(json!({"type":"token_state_updated","data":snapshot}));
+                                            let _ = scan_events.publish(json!({"type":"token_state_updated","data":snapshot}));
                                         }
-                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",message,json!({"kind":"database_persistence_error","message":message}))}));
+                                        let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",message,json!({"kind":"database_persistence_error","message":message}))}));
                                     }
                                 }
                                 "REJECTED" => {
@@ -593,7 +593,7 @@ pub(super) fn start_launch_processor(
                                                 let message = format!(
                                                     "Rejected token state could not be persisted: {error}"
                                                 );
-                                                let _ = scan_events.send(json!({
+                                                let _ = scan_events.publish(json!({
                                                     "type":"token_diagnostic",
                                                     "data":token_diagnostic(
                                                         &scan_mint,
@@ -604,14 +604,14 @@ pub(super) fn start_launch_processor(
                                                     )
                                                 }));
                                             } else {
-                                                let _ = scan_events.send(json!({
+                                                let _ = scan_events.publish(json!({
                                                     "type":"token_state_updated",
                                                     "data":snapshot
                                                 }));
                                             }
                                         }
                                         Err(error) => {
-                                            let _ = scan_events.send(json!({
+                                            let _ = scan_events.publish(json!({
                                                 "type":"token_diagnostic",
                                                 "data":token_diagnostic(
                                                     &scan_mint,
@@ -627,7 +627,7 @@ pub(super) fn start_launch_processor(
                                         nodex_persistence::save_launch(&approved_database, &launch)
                                             .await
                                     {
-                                        let _ = scan_events.send(json!({
+                                        let _ = scan_events.publish(json!({
                                             "type":"token_diagnostic",
                                             "data":token_diagnostic(
                                                 &scan_mint,
@@ -638,11 +638,11 @@ pub(super) fn start_launch_processor(
                                             )
                                         }));
                                     }
-                                    let _ = scan_events.send(json!({
+                                    let _ = scan_events.publish(json!({
                                         "type":"token_scan_update",
                                         "data":report.clone()
                                     }));
-                                    let _ = scan_events.send(json!({
+                                    let _ = scan_events.publish(json!({
                                         "type":"token_approval_pending",
                                         "data":{
                                             "mint_address":scan_mint,
@@ -661,24 +661,24 @@ pub(super) fn start_launch_processor(
                                         Ok(snapshot)=>{
                                             if let Err(error)=nodex_persistence::save_token_state(&approved_database,&snapshot).await{
                                                 terminal_status="unverified";
-                                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
-                                            }else{let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));}
+                                                let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
+                                            }else{let _=scan_events.publish(json!({"type":"token_state_updated","data":snapshot}));}
                                         }
-                                        Err(error)=>{let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",error.to_string(),json!({"kind":"token_registry_error","message":error.to_string()}))}));}
+                                        Err(error)=>{let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",error.to_string(),json!({"kind":"token_registry_error","message":error.to_string()}))}));}
                                     }
                                     if let Err(error) =
                                         nodex_persistence::save_launch(&approved_database, &launch)
                                             .await
                                     {
-                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
+                                        let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",error.to_string(),json!({"kind":"database_persistence_error","message":error.to_string()}))}));
                                     }
-                                    let _ = scan_events.send(
+                                    let _ = scan_events.publish(
                                         json!({"type":"token_scan_update","data":report.clone()}),
                                     );
-                                    let _=scan_events.send(json!({"type":"token_approval_pending","data":{"mint_address":scan_mint,"decision":decision,"reason":"Token remains visible but isolated until an explicit APPROVED decision is produced."}}));
+                                    let _=scan_events.publish(json!({"type":"token_approval_pending","data":{"mint_address":scan_mint,"decision":decision,"reason":"Token remains visible but isolated until an explicit APPROVED decision is produced."}}));
                                 }
                             }
-                            let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
+                            let _ = scan_events.publish(json!({"type":"token_scan_completed","data":{
                                 "mint_address":scan_mint,"scan_attempt":scan_attempt,"decision":decision,"status":terminal_status,
                                 "progress":100,
                                 "message":report_payload.get("decision_reason").cloned().unwrap_or(json!("Security scan finished.")),
@@ -758,7 +758,7 @@ pub(super) fn start_launch_processor(
                                 )
                                 .await
                                 {
-                                    let _ = scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(
+                                    let _ = scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(
                                         &scan_mint,"token_scan_cache","sqlite",error.to_string(),
                                         json!({"kind":"database_persistence_error","message":error.to_string()})
                                     )}));
@@ -767,8 +767,8 @@ pub(super) fn start_launch_processor(
                         }
                         Err(error) => {
                             let error_details = provider_error_details(&error);
-                            let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
-                            let _=scan_events.send(json!({"type":"diagnostic","data":{"severity":"error","component":"token_security_scanner","message":error,"mint_address":scan_mint,"received_at":chrono::Utc::now().to_rfc3339()}}));
+                            let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"security_scan","solana_rpc",error.clone(),error_details.clone())}));
+                            let _=scan_events.publish(json!({"type":"diagnostic","data":{"severity":"error","component":"token_security_scanner","message":error,"mint_address":scan_mint,"received_at":chrono::Utc::now().to_rfc3339()}}));
                             let failure_check = json!({
                                 "name":"security_scan",
                                 "status":"unverified",
@@ -780,7 +780,7 @@ pub(super) fn start_launch_processor(
                                 "method":"security_scan",
                                 "response":error_details
                             });
-                            let _=scan_events.send(json!({"type":"token_scan_failed","data":{
+                            let _=scan_events.publish(json!({"type":"token_scan_failed","data":{
                                 "mint_address":scan_mint,
                                 "scan_attempt":scan_attempt,
                                 "decision":"UNVERIFIED",
@@ -840,15 +840,15 @@ pub(super) fn start_launch_processor(
                             },"market":{"status":"not_started"}})){
                                 Ok(snapshot)=>{
                                     if let Err(persist_error)=nodex_persistence::save_token_state(&approved_database,&snapshot).await{
-                                        let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
-                                    }else{let _=scan_events.send(json!({"type":"token_state_updated","data":snapshot}));}
+                                        let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
+                                    }else{let _=scan_events.publish(json!({"type":"token_state_updated","data":snapshot}));}
                                 }
-                                Err(state_error)=>{let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",state_error.to_string(),json!({"kind":"token_registry_error","message":state_error.to_string()}))}));}
+                                Err(state_error)=>{let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"token_state","nodex_token_registry",state_error.to_string(),json!({"kind":"token_registry_error","message":state_error.to_string()}))}));}
                             }
                             if let Err(persist_error) =
                                 nodex_persistence::save_launch(&approved_database, &launch).await
                             {
-                                let _=scan_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
+                                let _=scan_events.publish(json!({"type":"token_diagnostic","data":token_diagnostic(&scan_mint,"launch_persistence","sqlite",persist_error.to_string(),json!({"kind":"database_persistence_error","message":persist_error.to_string()}))}));
                             }
                         }
                     }
@@ -872,7 +872,7 @@ pub(super) fn start_launch_processor(
                                     nodex_persistence::save_token_state(&approved_database, &snapshot)
                                         .await
                                 {
-                                    let _ = scan_events.send(json!({
+                                    let _ = scan_events.publish(json!({
                                         "type":"token_diagnostic",
                                         "data":token_diagnostic(
                                             &scan_mint,
@@ -883,14 +883,14 @@ pub(super) fn start_launch_processor(
                                         )
                                     }));
                                 } else {
-                                    let _ = scan_events.send(json!({
+                                    let _ = scan_events.publish(json!({
                                         "type":"token_state_updated",
                                         "data":snapshot
                                     }));
                                 }
                             }
                             Err(error) => {
-                                let _ = scan_events.send(json!({
+                                let _ = scan_events.publish(json!({
                                     "type":"token_diagnostic",
                                     "data":token_diagnostic(
                                         &scan_mint,
@@ -908,7 +908,7 @@ pub(super) fn start_launch_processor(
                             .await
                         {
                             Ok(account_address) => {
-                                let _ = scan_events.send(
+                                let _ = scan_events.publish(
                                     json!({"type":"market_subscription_requested","data":{
                                         "mint_address":scan_mint,"account_address":account_address,
                                         "venue":"pump_fun_bonding_curve","status":"pending",
@@ -917,7 +917,7 @@ pub(super) fn start_launch_processor(
                                 );
                             }
                             Err(error) => {
-                                let _ = scan_events.send(
+                                let _ = scan_events.publish(
                                     json!({"type":"market_subscription_failed","data":{
                                         "mint_address":scan_mint,
                                         "venue":"pump_fun_bonding_curve",
@@ -927,7 +927,7 @@ pub(super) fn start_launch_processor(
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}),
                                 );
-                                let _ = scan_events.send(json!({"type":"diagnostic","data":{
+                                let _ = scan_events.publish(json!({"type":"diagnostic","data":{
                                     "severity":"warning","component":"market_monitor_registration",
                                     "message":error.to_string(),"mint_address":scan_mint,
                                     "received_at":chrono::Utc::now().to_rfc3339()
@@ -936,7 +936,7 @@ pub(super) fn start_launch_processor(
                         }
                     } else {
                         let _ =
-                            scan_events.send(json!({"type":"market_subscription_failed","data":{
+                            scan_events.publish(json!({"type":"market_subscription_failed","data":{
                                 "mint_address":scan_mint,
                                 "venue":"pump_fun_bonding_curve",
                                 "status":"failed",
@@ -1000,7 +1000,7 @@ pub(super) fn start_launch_processor(
                     match retry_work_tx.try_send((signature, slot)) {
                         Ok(()) => {
                             scheduled.insert(mint.clone(), tokio::time::Instant::now());
-                            let _ = retry_events.send(
+                            let _ = retry_events.publish(
                                 json!({"type":"token_scan_retry_scheduled","data":{
                                     "mint_address":mint,
                                     "scan_attempt":cache["attempts"].as_u64().unwrap_or(0) + 1,
@@ -1010,7 +1010,7 @@ pub(super) fn start_launch_processor(
                             );
                         }
                         Err(error) => {
-                            let _ = retry_events.send(
+                            let _ = retry_events.publish(
                                 json!({"type":"token_diagnostic","data":token_diagnostic(
                                     &mint,"token_scan_retry","launch_queue",
                                     format!("Could not enqueue scheduled security retry: {error}"),
@@ -1032,7 +1032,7 @@ pub(super) fn start_launch_processor(
             let notification = match receiver.recv().await {
                 Ok(value) => value,
                 Err(broadcast::error::RecvError::Lagged(count)) => {
-                    let _ = events.send(json!({"type":"diagnostic","data":{
+                    let _ = events.publish(json!({"type":"diagnostic","data":{
                         "severity":"warning",
                         "component":"pump_fun_launch_queue",
                         "message":"Launch notification consumer lagged; stream backfill may replay missed signatures.",
@@ -1094,7 +1094,7 @@ pub(super) fn start_launch_processor(
             if let Err(error) = work_tx.try_send((signature.clone(), slot)) {
                 // Do not permanently suppress a signature that could not enter the queue.
                 seen_signatures.lock().await.remove(&signature);
-                let _ = events.send(json!({"type":"diagnostic","data":{
+                let _ = events.publish(json!({"type":"diagnostic","data":{
                     "severity":"warning",
                     "component":"pump_fun_launch_queue",
                     "message":format!("Could not enqueue launch transaction: {error}"),
