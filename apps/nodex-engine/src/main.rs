@@ -3745,7 +3745,10 @@ async fn update_paper_execution(
     }
     drop(control);
 
-    let mut settings = state.trading_settings.read().await.clone();
+    // Hold the settings write lock through persistence so a concurrent full
+    // trading-config update cannot be overwritten by this single-field change.
+    let mut settings_guard = state.trading_settings.write().await;
+    let mut settings = settings_guard.clone();
     settings.execution_enabled = enabled;
     settings
         .validate()
@@ -3764,7 +3767,8 @@ async fn update_paper_execution(
         format!("Could not persist paper execution setting: {error}"),
     ))?;
 
-    *state.trading_settings.write().await = settings.clone();
+    *settings_guard = settings.clone();
+    drop(settings_guard);
     let _ = state
         .database_changes
         .send(json!({"type":"trading_config_updated","data":settings}))
