@@ -1508,7 +1508,9 @@ fn start_token_state_projector(
                 }
                 // A provider subscription acknowledgement is not market data. Keep the
                 // verified badge while waiting for the first valid price update.
-                "market_subscription_subscribed" | "market_subscription_active" => {
+                "market_subscription_requested"
+                | "market_subscription_subscribed"
+                | "market_subscription_active" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         !security
                             .get("diagnostic_only")
@@ -1549,7 +1551,6 @@ fn start_token_state_projector(
                         "sub_event":"Market data unavailable"
                     }))
                 }
-                "market_subscription_requested" => None,
                 "paper_entry_evaluation" => {
                     let is_monitoring = current_activity.as_ref()
                         .and_then(|activity| activity.get("status"))
