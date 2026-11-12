@@ -701,12 +701,12 @@ async fn connect_market_stream(
                                 if let Some(subscription_id) = value.get("result").and_then(Value::as_u64) {
                                     active.insert(subscription_id, subscription.clone());
                                     let _ = events.send(json!({
-                                        "type":"market_subscription_active",
+                                        "type":"market_subscription_subscribed",
                                         "data":{
                                             "mint_address":subscription.mint,
                                             "account_address":subscription.account,
                                             "venue":subscription.venue,
-                                            "status":"active",
+                                            "status":"subscribed",
                                             "subscription_id":subscription_id,
                                             "active_subscriptions":active.len(),
                                             "received_at":chrono::Utc::now().to_rfc3339()
