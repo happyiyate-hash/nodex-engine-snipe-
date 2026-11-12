@@ -464,9 +464,18 @@ fn paper_entry_activity_patch(data: &serde_json::Value) -> serde_json::Value {
         reasons.join("; ")
     };
     let (label, fallback) = match decision.as_str() {
-        "reject" => ("Strategy rejected", "The token did not meet the strategy requirements."),
-        "evaluate_paper_entry" => ("Entry conditions met", "Strategy gates passed; preparing a simulated paper entry."),
-        _ => ("Checking entry conditions", "Waiting for market and strategy conditions to align."),
+        "reject" => (
+            "Strategy rejected",
+            "The token did not meet the strategy requirements.",
+        ),
+        "evaluate_paper_entry" => (
+            "Entry conditions met",
+            "Strategy gates passed; preparing a simulated paper entry.",
+        ),
+        _ => (
+            "Checking entry conditions",
+            "Waiting for market and strategy conditions to align.",
+        ),
     };
     json!({
         "status": "monitoring",
@@ -1525,14 +1534,18 @@ fn start_token_state_projector(
                             .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    security_is_verified.then(|| json!({
-                        "status": "verified",
-                        "label": "Verified",
-                        "stage": "waiting_for_market_data",
-                        "sub_event": "Getting market data"
-                    }))
+                    security_is_verified.then(|| {
+                        json!({
+                            "status": "verified",
+                            "label": "Verified",
+                            "stage": "waiting_for_market_data",
+                            "sub_event": "Getting market data"
+                        })
+                    })
                 }
-                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_failed" => None,
+                "market_subscription_requested"
+                | "market_subscription_waiting"
+                | "market_subscription_failed" => None,
                 "paper_entry_evaluation" => Some(paper_entry_activity_patch(&data)),
                 "paper_buy_started" => Some(json!({
                     "status": "monitoring",
@@ -1676,11 +1689,23 @@ fn start_token_state_projector(
                         "market": data,
                         "last_activity_at": chrono::Utc::now().to_rfc3339()
                     });
-                    let has_valid_market_price = data.get("price_sol").and_then(serde_json::Value::as_f64).is_some_and(|price| price.is_finite() && price > 0.0)
-                        || data.get("price_usd").and_then(serde_json::Value::as_f64).is_some_and(|price| price.is_finite() && price > 0.0)
-                        || data.get("current_price_usd").and_then(serde_json::Value::as_f64).is_some_and(|price| price.is_finite() && price > 0.0);
+                    let has_valid_market_price = data
+                        .get("price_sol")
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|price| price.is_finite() && price > 0.0)
+                        || data
+                            .get("price_usd")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_some_and(|price| price.is_finite() && price > 0.0)
+                        || data
+                            .get("current_price_usd")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_some_and(|price| price.is_finite() && price > 0.0);
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
                     if has_valid_market_price && security_is_verified {
