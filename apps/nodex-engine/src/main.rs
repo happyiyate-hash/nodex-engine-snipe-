@@ -5463,7 +5463,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_default()
             .to_owned();
         let evaluation_was_interrupted =
-            matches!(activity_status.as_str(), "evaluating" | "entry_ready" | "executing_buy");
+            matches!(activity_status.as_str(), "evaluating" | "entry_ready");
         token_registry
             .restore(snapshot)
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -5982,6 +5982,17 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod scan_progress_state_tests {
     use super::*;
+
+    #[test]
+    fn interrupted_entry_recovery_returns_to_waiting_state() {
+        let patch = interrupted_entry_recovery_patch();
+        assert_eq!(patch["activity"]["status"], "waiting_for_entry");
+        assert_eq!(patch["activity"]["decision"], "wait");
+        assert!(patch["activity"]["sub_event"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("interrupted"));
+    }
 
     #[test]
     fn paper_entry_wait_is_reported_as_waiting_with_reasons() {
