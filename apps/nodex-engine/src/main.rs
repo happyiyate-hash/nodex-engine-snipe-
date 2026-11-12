@@ -463,26 +463,14 @@ fn paper_entry_activity_patch(data: &serde_json::Value) -> serde_json::Value {
     } else {
         reasons.join("; ")
     };
-    let (status, label, fallback) = match decision.as_str() {
-        "reject" => (
-            "strategy_rejected",
-            "Strategy rejected",
-            "The token did not meet the strategy requirements.",
-        ),
-        "evaluate_paper_entry" => (
-            "entry_ready",
-            "Entry conditions met",
-            "Strategy gates passed; preparing a simulated paper entry.",
-        ),
-        _ => (
-            "waiting_for_entry",
-            "Waiting for entry conditions",
-            "Waiting for market and strategy conditions to align.",
-        ),
+    let (label, fallback) = match decision.as_str() {
+        "reject" => ("Strategy rejected", "The token did not meet the strategy requirements."),
+        "evaluate_paper_entry" => ("Entry conditions met", "Strategy gates passed; preparing a simulated paper entry."),
+        _ => ("Checking entry conditions", "Waiting for market and strategy conditions to align."),
     };
     json!({
-        "status": status,
-        "label": label,
+        "status": "monitoring",
+        "label": "Monitoring",
         "stage": "strategy_checks",
         "decision": decision,
         "reasons": reasons,
@@ -1527,8 +1515,8 @@ fn start_token_state_projector(
                         "sub_event": data.get("message").cloned().unwrap_or(json!("Market feed subscription was removed"))
                     }))
                 }
-                // A provider acknowledgement is the first point at which the token can
-                // truthfully move from Verified to Monitoring. A queued request is not enough.
+                // A provider subscription acknowledgement is not market data. Keep the
+                // verified badge while waiting for the first valid price update.
                 "market_subscription_subscribed" | "market_subscription_active" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         !security
@@ -1537,35 +1525,30 @@ fn start_token_state_projector(
                             .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    security_is_verified.then(|| {
-                        json!({
-                            "status": "monitoring",
-                            "label": "Monitoring",
-                            "stage": "market_watch",
-                            "sub_event": data.get("message").cloned().unwrap_or(json!("The provider confirmed the live market feed subscription."))
-                        })
-                    })
+                    security_is_verified.then(|| json!({
+                        "status": "verified",
+                        "label": "Verified",
+                        "stage": "waiting_for_market_data",
+                        "sub_event": "Getting market data"
+                    }))
                 }
-                // Requests, capacity waits and provider failures are not active monitoring.
-                "market_subscription_requested"
-                | "market_subscription_waiting"
-                | "market_subscription_failed" => None,
+                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_failed" => None,
                 "paper_entry_evaluation" => Some(paper_entry_activity_patch(&data)),
                 "paper_buy_started" => Some(json!({
-                    "status": "executing_buy",
-                    "label": "Executing buy order",
+                    "status": "monitoring",
+                    "label": "Monitoring",
                     "stage": data.get("stage").cloned().unwrap_or(json!("paper_order_start")),
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Preparing simulated purchase order"))
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Paper entry conditions met"))
                 })),
                 "paper_buy_executed" => Some(json!({
-                    "status": "bought_paper",
-                    "label": "Paper buy executed",
+                    "status": "monitoring",
+                    "label": "Monitoring",
                     "stage": "position_open",
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Simulated position opened"))
+                    "sub_event": data.get("message").cloned().unwrap_or(json!("Paper position opened"))
                 })),
                 "paper_buy_failed" => Some(json!({
-                    "status": "buy_failed",
-                    "label": "Buy failed",
+                    "status": "monitoring",
+                    "label": "Monitoring",
                     "stage": data.get("stage").cloned().unwrap_or(json!("entry_failed")),
                     "sub_event": data.get("reason").cloned().or_else(|| data.get("message").cloned()).unwrap_or(json!("Paper buy failed")),
                     "error": {
@@ -1693,6 +1676,22 @@ fn start_token_state_projector(
                         "market": data,
                         "last_activity_at": chrono::Utc::now().to_rfc3339()
                     });
+                    let has_valid_market_price = data.get("price_sol").and_then(serde_json::Value::as_f64).is_some_and(|price| price.is_finite() && price > 0.0)
+                        || data.get("price_usd").and_then(serde_json::Value::as_f64).is_some_and(|price| price.is_finite() && price > 0.0)
+                        || data.get("current_price_usd").and_then(serde_json::Value::as_f64).is_some_and(|price| price.is_finite() && price > 0.0);
+                    let security_is_verified = current_security.as_ref().is_some_and(|security| {
+                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                            && core_verification_gate_passed(security)
+                    });
+                    if has_valid_market_price && security_is_verified {
+                        patch["activity"] = json!({
+                            "status":"monitoring",
+                            "label":"Monitoring",
+                            "stage":"market_watch",
+                            "sub_event":"Monitoring market activity",
+                            "updated_at":chrono::Utc::now().to_rfc3339()
+                        });
+                    }
                     let mut subscription = current_market_subscription.unwrap_or_else(|| json!({}));
                     let subscription_status = subscription
                         .get("status")
