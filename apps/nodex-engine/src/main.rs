@@ -3090,6 +3090,15 @@ fn start_launch_processor(
                                 "started_at": chrono::Utc::now().to_rfc3339()
                             }
                         },
+                        "activity": {
+                            "status": "scanning",
+                            "label": "Scanning",
+                            "scan_attempt": scan_attempts + 1,
+                            "progress": 0,
+                            "stage": "initializing",
+                            "sub_event": "Scanning",
+                            "updated_at": chrono::Utc::now().to_rfc3339()
+                        },
                         "market": {"status": "not_started"}
                     }),
                 );
