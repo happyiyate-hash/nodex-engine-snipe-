@@ -898,7 +898,8 @@ async fn evaluate_and_execute_paper_entry(
                     "buy_count_5m":market_assessment.buy_count_5m,
                     "sell_count_5m":market_assessment.sell_count_5m,
                     "estimated_slippage_pct":market_assessment.estimated_slippage_pct,
-                    "confirmed_trade_events":market_assessment.confirmed_trade_events
+                    "confirmed_trade_events":market_assessment.confirmed_trade_events,
+                    "buy_pressure_pct":market_assessment.buy_pressure_pct
                 },
                 "evaluated_at":chrono::Utc::now().to_rfc3339(),
                 "paper_only":true
