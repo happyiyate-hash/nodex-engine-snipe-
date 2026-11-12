@@ -369,9 +369,7 @@ fn start_inactive_token_cleanup(
         loop {
             interval.tick().await;
             // Never infer inactivity while the upstream feed is unhealthy.
-            if !stream_status.read().await.connected
-                || market_monitor.read().await.is_none()
-            {
+            if !stream_status.read().await.connected || market_monitor.read().await.is_none() {
                 continue;
             }
             let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -392,7 +390,8 @@ fn start_inactive_token_cleanup(
             if inactive_mints.is_empty() {
                 continue;
             }
-            match nodex_persistence::delete_inactive_token_history(&database, &inactive_mints).await {
+            match nodex_persistence::delete_inactive_token_history(&database, &inactive_mints).await
+            {
                 Ok(deleted_mints) if !deleted_mints.is_empty() => {
                     for mint in &deleted_mints {
                         let _ = registry.remove(mint);
@@ -1099,7 +1098,10 @@ fn start_token_state_projector(
                 continue;
             };
             if kind == "tokens_removed_inactive" {
-                if let Some(mints) = data.get("mint_addresses").and_then(serde_json::Value::as_array) {
+                if let Some(mints) = data
+                    .get("mint_addresses")
+                    .and_then(serde_json::Value::as_array)
+                {
                     for mint in mints.iter().filter_map(serde_json::Value::as_str) {
                         trade_observations.remove(mint);
                         last_evaluation_signatures.remove(mint);
@@ -1182,7 +1184,9 @@ fn start_token_state_projector(
                         .map(|last| last.elapsed() >= Duration::from_secs(60))
                         .unwrap_or(true);
                     if should_persist {
-                        if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                        if let Err(error) =
+                            nodex_persistence::save_token_state(&database, &snapshot).await
+                        {
                             tracing::warn!(%error, mint_address = %mint, "Could not persist confirmed trade activity timestamp");
                         } else {
                             last_activity_persisted.insert(mint.clone(), Instant::now());
@@ -1393,9 +1397,9 @@ fn start_token_state_projector(
                 "token_monitoring_started" | "token_monitoring_update" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         !security
-                                .get("diagnostic_only")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(true)
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
                     security_is_verified.then(|| json!({
@@ -3083,9 +3087,12 @@ fn start_launch_processor(
                             report_payload["all_checks_verified"] = json!(all_checks_verified);
                             report_payload["verification_gate_passed"] =
                                 json!(verification_gate_passed);
-                            report_payload["verification_status"] = json!(
-                                if verification_gate_passed { "VERIFIED" } else { "UNVERIFIED" }
-                            );
+                            report_payload["verification_status"] =
+                                json!(if verification_gate_passed {
+                                    "VERIFIED"
+                                } else {
+                                    "UNVERIFIED"
+                                });
                             let decision = report.decision.clone();
                             let mut terminal_status = match decision.as_str() {
                                 "REJECTED" => "rejected",
@@ -3094,15 +3101,13 @@ fn start_launch_processor(
                             };
                             // Persist the terminal lifecycle status alongside the verdict.
                             // A report can carry a stale intermediate "scanning" field.
-                            report_payload["status"] = json!(
-                                if verification_gate_passed {
-                                    "verified"
-                                } else if decision.eq_ignore_ascii_case("REJECTED") {
-                                    "rejected"
-                                } else {
-                                    "unverified"
-                                }
-                            );
+                            report_payload["status"] = json!(if verification_gate_passed {
+                                "verified"
+                            } else if decision.eq_ignore_ascii_case("REJECTED") {
+                                "rejected"
+                            } else {
+                                "unverified"
+                            });
                             match decision.as_str() {
                                 "APPROVED" => {
                                     let launch_saved = match nodex_persistence::save_launch(
@@ -3176,11 +3181,19 @@ fn start_launch_processor(
                                     if let Some(object) = security_state.as_object_mut() {
                                         object.insert(
                                             "status".into(),
-                                            json!(if verification_gate_passed { "verified" } else { "rejected" }),
+                                            json!(if verification_gate_passed {
+                                                "verified"
+                                            } else {
+                                                "rejected"
+                                            }),
                                         );
                                         object.insert(
                                             "verification_status".into(),
-                                            json!(if verification_gate_passed { "VERIFIED" } else { "UNVERIFIED" }),
+                                            json!(if verification_gate_passed {
+                                                "VERIFIED"
+                                            } else {
+                                                "UNVERIFIED"
+                                            }),
                                         );
                                     }
                                     match approved_registry.upsert_patch(
@@ -4708,11 +4721,17 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
                     .get("decision")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|decision| decision.eq_ignore_ascii_case("REJECTED"));
-                let status = if verified { "VERIFIED" } else if rejected { "REJECTED" } else { "UNVERIFIED" };
+                let status = if verified {
+                    "VERIFIED"
+                } else if rejected {
+                    "REJECTED"
+                } else {
+                    "UNVERIFIED"
+                };
                 let security_status = match status {
                     "VERIFIED" => "verified",
                     "REJECTED" => "rejected",
-                    _ => "unverified"
+                    _ => "unverified",
                 };
                 if let Some(security_object) = fields
                     .get_mut("security")
@@ -4723,13 +4742,14 @@ async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
                     security_object.insert("verification_gate_passed".into(), json!(verified));
                 }
                 fields.insert("verification_status".into(), json!(status));
-                fields.insert("verification_label".into(), json!(
-                    match status {
+                fields.insert(
+                    "verification_label".into(),
+                    json!(match status {
                         "VERIFIED" => "Verified",
                         "REJECTED" => "Rejected",
-                        _ => "Unverified"
-                    }
-                ));
+                        _ => "Unverified",
+                    }),
+                );
                 fields.insert("is_verified".into(), json!(verified));
                 fields.insert("mint_address".into(), json!(snapshot.mint_address));
                 fields.insert("version".into(), json!(snapshot.version));
