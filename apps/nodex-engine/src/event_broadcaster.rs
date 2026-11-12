@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::ops::Deref;
 use tokio::sync::broadcast;
 
 /// Owns the single in-process runtime event channel.
@@ -10,6 +11,14 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub struct EventBroadcaster {
     sender: broadcast::Sender<Value>,
+}
+
+impl Deref for EventBroadcaster {
+    type Target = broadcast::Sender<Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sender
+    }
 }
 
 impl EventBroadcaster {
