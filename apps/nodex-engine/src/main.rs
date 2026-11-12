@@ -5317,16 +5317,19 @@ async fn ensure_market_monitor(state: &AppState) {
         }
     };
     let Some(monitor) = monitor else {
-        let reason = "Market monitoring is unavailable because no Solana WebSocket URL is configured.";
+        let reason =
+            "Market monitoring is unavailable because no Solana WebSocket URL is configured.";
         for token in token_states {
-            let _ = state.events.send(json!({"type":"market_subscription_failed","data":{
-                "mint_address":token.mint_address,
-                "venue":"pump_fun_bonding_curve",
-                "status":"failed",
-                "reason":reason,
-                "message":reason,
-                "received_at":chrono::Utc::now().to_rfc3339()
-            }}));
+            let _ = state
+                .events
+                .send(json!({"type":"market_subscription_failed","data":{
+                    "mint_address":token.mint_address,
+                    "venue":"pump_fun_bonding_curve",
+                    "status":"failed",
+                    "reason":reason,
+                    "message":reason,
+                    "received_at":chrono::Utc::now().to_rfc3339()
+                }}));
         }
         tracing::warn!(%reason, "Could not restore market subscriptions");
         return;
@@ -5353,20 +5356,27 @@ async fn ensure_market_monitor(state: &AppState) {
             }
             Err(error) => {
                 failed += 1;
-                let reason = format!("Could not restore the saved token's market subscription: {error}");
-                let _ = state.events.send(json!({"type":"market_subscription_failed","data":{
-                    "mint_address":mint,
-                    "venue":"pump_fun_bonding_curve",
-                    "status":"failed",
-                    "reason":reason,
-                    "message":reason,
-                    "received_at":chrono::Utc::now().to_rfc3339()
-                }}));
+                let reason =
+                    format!("Could not restore the saved token's market subscription: {error}");
+                let _ = state
+                    .events
+                    .send(json!({"type":"market_subscription_failed","data":{
+                        "mint_address":mint,
+                        "venue":"pump_fun_bonding_curve",
+                        "status":"failed",
+                        "reason":reason,
+                        "message":reason,
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }}));
                 tracing::warn!(%error, mint_address = %mint, "Could not restore persisted market subscription");
             }
         }
     }
-    tracing::info!(restored, failed, "Restored saved-token market subscriptions from SQLite token states");
+    tracing::info!(
+        restored,
+        failed,
+        "Restored saved-token market subscriptions from SQLite token states"
+    );
 }
 
 fn spawn_controlled_log_stream(
