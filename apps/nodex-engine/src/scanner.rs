@@ -316,10 +316,11 @@ pub(super) fn start_launch_processor(
                         }
                         // Keep the legacy event enriched so existing clients also receive
                         // metadata before the scanner begins.
-                        let _ = events.publish(json!({"type":"launch_detected","data":legacy_launch}));
+                        let _ =
+                            events.publish(json!({"type":"launch_detected","data":legacy_launch}));
                         for diagnostic in &metadata.errors {
-                            let _ =
-                                events.publish(json!({"type":"token_diagnostic","data":diagnostic}));
+                            let _ = events
+                                .publish(json!({"type":"token_diagnostic","data":diagnostic}));
                         }
                         let _ = events.publish(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
@@ -935,15 +936,16 @@ pub(super) fn start_launch_processor(
                             }
                         }
                     } else {
-                        let _ =
-                            scan_events.publish(json!({"type":"market_subscription_failed","data":{
+                        let _ = scan_events.publish(
+                            json!({"type":"market_subscription_failed","data":{
                                 "mint_address":scan_mint,
                                 "venue":"pump_fun_bonding_curve",
                                 "status":"failed",
                                 "reason":"Market monitor is unavailable",
                                 "message":"Market data unavailable",
                                 "received_at":chrono::Utc::now().to_rfc3339()
-                            }}));
+                            }}),
+                        );
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
