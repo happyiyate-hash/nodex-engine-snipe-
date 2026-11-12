@@ -1459,6 +1459,7 @@ fn start_token_state_projector(
                     "status": "failed",
                     "label": "Scan failed",
                     "progress": 0,
+                    "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                     "stage": data.get("stage").cloned().unwrap_or(json!("security_failed")),
                     "sub_event": "Security scan failed",
                     "error": {
