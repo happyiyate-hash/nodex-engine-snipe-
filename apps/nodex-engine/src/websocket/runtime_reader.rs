@@ -233,10 +233,12 @@ pub(super) fn spawn(
                     };
                     if let Some(mint) = event_mint(&event) {
                         match event_type.as_str() {
-                            // Only the active acknowledgement enables no-position
-                            // market delivery. "requested"/"subscribed" are not
-                            // proof that the provider is streaming account updates.
-                            "market_subscription_active" => {
+                            // The Solana JSON-RPC subscription response carries the
+                            // subscription ID and is emitted as "subscribed". This is the
+                            // actual provider acknowledgement; this monitor does not emit
+                            // a separate "active" event. Treat both names as active for
+                            // compatibility with providers that emit the explicit variant.
+                            "market_subscription_subscribed" | "market_subscription_active" => {
                                 actively_subscribed_mints.insert(mint);
                             }
                             "market_subscription_failed"
