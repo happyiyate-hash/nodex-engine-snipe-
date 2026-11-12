@@ -423,6 +423,20 @@ fn start_inactive_token_cleanup(
     });
 }
 
+fn interrupted_entry_recovery_patch() -> serde_json::Value {
+    json!({
+        "activity": {
+            "status": "waiting_for_entry",
+            "label": "Waiting for entry conditions",
+            "stage": "strategy_checks",
+            "decision": "wait",
+            "reasons": ["The previous entry evaluation was interrupted by a backend restart; waiting for fresh market data."],
+            "sub_event": "The previous entry evaluation was interrupted by a backend restart; waiting for fresh market data.",
+            "updated_at": chrono::Utc::now().to_rfc3339()
+        }
+    })
+}
+
 fn paper_entry_activity_patch(data: &serde_json::Value) -> serde_json::Value {
     let decision = data
         .get("decision")
@@ -5439,9 +5453,34 @@ async fn main() -> anyhow::Result<()> {
     );
     let token_registry = TokenRegistry::new();
     for snapshot in nodex_persistence::load_token_states(&db).await? {
+        let mint = snapshot.mint_address.clone();
+        let activity_status = snapshot
+            .data
+            .get("activity")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|activity| activity.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let evaluation_was_interrupted =
+            matches!(activity_status, "evaluating" | "entry_ready" | "executing_buy");
         token_registry
             .restore(snapshot)
             .map_err(|error| anyhow::anyhow!(error))?;
+
+        // A process restart can interrupt an in-flight simulated entry between
+        // its progress event and the final result. Never restore that stale
+        // transient state as if an order were still executing.
+        if evaluation_was_interrupted {
+            let recovered = token_registry
+                .upsert_patch(&mint, interrupted_entry_recovery_patch())
+                .map_err(|error| anyhow::anyhow!(error))?;
+            nodex_persistence::save_token_state(&db, &recovered).await?;
+            tracing::warn!(
+                mint_address = %mint,
+                previous_status = %activity_status,
+                "Recovered interrupted paper-entry evaluation after restart"
+            );
+        }
     }
     tracing::info!(
         restored_tokens = token_registry.len(),
