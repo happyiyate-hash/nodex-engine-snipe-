@@ -109,7 +109,7 @@ async fn run_market_monitor(
     loop {
         let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
         match connect_market_stream(&active_url, &events, &mut commands, &mut desired).await {
-            // A disconnect or provider rejection rotates to the next configured Helius key.
+            // A disconnect or provider rejection rotates to the next configured provider endpoint.
             Ok(()) => {
                 reconnect_count = reconnect_count.saturating_add(1);
                 let message =
