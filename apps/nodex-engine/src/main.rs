@@ -1575,10 +1575,10 @@ fn start_token_state_projector(
                     }
                 })),
                 "strategy_rejected_token" => Some(json!({
-                    "status": "strategy_rejected",
-                    "label": "Strategy rejected",
+                    "status": "monitoring",
+                    "label": "Monitoring",
                     "stage": data.get("stage").cloned().unwrap_or(json!("strategy_checks")),
-                    "sub_event": data.get("reason").cloned().or_else(|| data.get("message").cloned()).unwrap_or(json!("Token did not meet strategy criteria"))
+                    "sub_event": "Strategy rejected"
                 })),
                 "paper_sell_executed" => Some(json!({
                     "status": "closed",
