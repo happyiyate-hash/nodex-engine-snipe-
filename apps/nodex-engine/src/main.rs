@@ -1547,7 +1547,9 @@ fn start_token_state_projector(
                     })
                 }
                 // Requests, capacity waits and provider failures are not active monitoring.
-                "market_subscription_requested" | "market_subscription_waiting" | "market_subscription_failed" => None,
+                "market_subscription_requested"
+                | "market_subscription_waiting"
+                | "market_subscription_failed" => None,
                 "paper_entry_evaluation" => Some(paper_entry_activity_patch(&data)),
                 "paper_buy_started" => Some(json!({
                     "status": "executing_buy",
