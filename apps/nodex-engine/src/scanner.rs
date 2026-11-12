@@ -903,49 +903,15 @@ pub(super) fn start_launch_processor(
                                 }));
                             }
                         }
-                    } else if let Some(monitor) = approved_monitor.read().await.clone() {
-                        match monitor
-                            .subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id)
-                            .await
-                        {
-                            Ok(account_address) => {
-                                let _ = scan_events.publish(
-                                    json!({"type":"market_subscription_requested","data":{
-                                        "mint_address":scan_mint,"account_address":account_address,
-                                        "venue":"pump_fun_bonding_curve","status":"pending",
-                                        "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}),
-                                );
-                            }
-                            Err(error) => {
-                                let _ = scan_events.publish(
-                                    json!({"type":"market_subscription_failed","data":{
-                                        "mint_address":scan_mint,
-                                        "venue":"pump_fun_bonding_curve",
-                                        "status":"failed",
-                                        "reason":error.to_string(),
-                                        "message":"Market data unavailable",
-                                        "received_at":chrono::Utc::now().to_rfc3339()
-                                    }}),
-                                );
-                                let _ = scan_events.publish(json!({"type":"diagnostic","data":{
-                                    "severity":"warning","component":"market_monitor_registration",
-                                    "message":error.to_string(),"mint_address":scan_mint,
-                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                }}));
-                            }
-                        }
                     } else {
-                        let _ = scan_events.publish(
-                            json!({"type":"market_subscription_failed","data":{
-                                "mint_address":scan_mint,
-                                "venue":"pump_fun_bonding_curve",
-                                "status":"failed",
-                                "reason":"Market monitor is unavailable",
-                                "message":"Market data unavailable",
-                                "received_at":chrono::Utc::now().to_rfc3339()
-                            }}),
-                        );
+                        let monitor = approved_monitor.read().await.clone();
+                        crate::market_monitoring::request_pump_fun_subscription(
+                            monitor.as_ref(),
+                            &scan_mint,
+                            &approved_program_id,
+                            &scan_events,
+                        )
+                        .await;
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
