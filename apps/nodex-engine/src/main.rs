@@ -1401,14 +1401,14 @@ fn start_token_state_projector(
                     "label": "Scanning",
                     "progress": 0,
                     "stage": "initializing",
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Preparing security scan"))
+                    "sub_event": "Scanning"
                 })),
                 "token_scan_progress" => Some(json!({
                     "status": "scanning",
                     "label": "Scanning",
                     "progress": data.get("progress").cloned().unwrap_or(json!(0)),
                     "stage": data.get("stage").cloned().unwrap_or(json!("security_checks")),
-                    "sub_event": data.get("message").cloned().or_else(|| data.get("stage").cloned()).unwrap_or(json!("Security checks in progress"))
+                    "sub_event": "Scanning"
                 })),
                 "token_scan_completed" => {
                     let decision = data
