@@ -1529,27 +1529,37 @@ fn start_token_state_projector(
                 }
                 "market_subscription_waiting" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    security_is_verified.then(|| json!({
-                        "status":"verified",
-                        "label":"Verified",
-                        "stage":"waiting_for_market_data",
-                        "sub_event":"Getting market data"
-                    }))
+                    security_is_verified.then(|| {
+                        json!({
+                            "status":"verified",
+                            "label":"Verified",
+                            "stage":"waiting_for_market_data",
+                            "sub_event":"Getting market data"
+                        })
+                    })
                 }
                 "market_subscription_failed" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    security_is_verified.then(|| json!({
-                        "status":"verified",
-                        "label":"Verified",
-                        "stage":"market_data_unavailable",
-                        "sub_event":"Market data unavailable"
-                    }))
+                    security_is_verified.then(|| {
+                        json!({
+                            "status":"verified",
+                            "label":"Verified",
+                            "stage":"market_data_unavailable",
+                            "sub_event":"Market data unavailable"
+                        })
+                    })
                 }
                 "paper_entry_evaluation" => {
                     let is_monitoring = current_activity
