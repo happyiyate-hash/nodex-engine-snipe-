@@ -426,12 +426,12 @@ fn start_inactive_token_cleanup(
 fn interrupted_entry_recovery_patch() -> serde_json::Value {
     json!({
         "activity": {
-            "status": "waiting_for_entry",
-            "label": "Waiting for entry conditions",
+            "status": "monitoring",
+            "label": "Monitoring",
             "stage": "strategy_checks",
             "decision": "wait",
             "reasons": ["The previous entry evaluation was interrupted by a backend restart; waiting for fresh market data."],
-            "sub_event": "The previous entry evaluation was interrupted by a backend restart; waiting for fresh market data.",
+            "sub_event": "Checking entry conditions",
             "updated_at": chrono::Utc::now().to_rfc3339()
         }
     })
@@ -6136,44 +6136,43 @@ mod scan_progress_state_tests {
     use super::*;
 
     #[test]
-    fn interrupted_entry_recovery_returns_to_waiting_state() {
+    fn interrupted_entry_recovery_preserves_monitoring_lifecycle() {
         let patch = interrupted_entry_recovery_patch();
-        assert_eq!(patch["activity"]["status"], "waiting_for_entry");
+        assert_eq!(patch["activity"]["status"], "monitoring");
+        assert_eq!(patch["activity"]["label"], "Monitoring");
         assert_eq!(patch["activity"]["decision"], "wait");
-        assert!(patch["activity"]["sub_event"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("interrupted"));
+        assert_eq!(patch["activity"]["sub_event"], "Checking entry conditions");
     }
 
     #[test]
-    fn paper_entry_wait_is_reported_as_waiting_with_reasons() {
+    fn paper_entry_wait_keeps_monitoring_and_uses_a_short_subtitle() {
         let activity = paper_entry_activity_patch(&json!({
             "decision":"wait",
             "reasons":["Insufficient confirmed buyers","Liquidity is below the configured minimum"]
         }));
-        assert_eq!(activity["status"], "waiting_for_entry");
-        assert_eq!(activity["label"], "Waiting for entry conditions");
-        assert_eq!(
-            activity["sub_event"],
-            "Insufficient confirmed buyers; Liquidity is below the configured minimum"
-        );
+        assert_eq!(activity["status"], "monitoring");
+        assert_eq!(activity["label"], "Monitoring");
+        assert_eq!(activity["sub_event"], "Checking entry conditions");
+        assert_eq!(activity["reasons"].as_array().unwrap().len(), 2);
     }
 
     #[test]
-    fn paper_entry_rejection_and_approval_have_distinct_terminal_states() {
+    fn paper_entry_rejection_and_approval_are_monitoring_sub_events() {
         let rejected = paper_entry_activity_patch(&json!({
             "decision":"reject",
             "reasons":["Creator is on the rug blacklist"]
         }));
-        assert_eq!(rejected["status"], "strategy_rejected");
+        assert_eq!(rejected["status"], "monitoring");
+        assert_eq!(rejected["label"], "Monitoring");
+        assert_eq!(rejected["sub_event"], "Strategy rejected");
 
         let ready = paper_entry_activity_patch(&json!({
             "decision":"evaluate_paper_entry",
             "reasons":[]
         }));
-        assert_eq!(ready["status"], "entry_ready");
-        assert_eq!(ready["label"], "Entry conditions met");
+        assert_eq!(ready["status"], "monitoring");
+        assert_eq!(ready["label"], "Monitoring");
+        assert_eq!(ready["sub_event"], "Entry conditions met");
     }
 
     #[test]
