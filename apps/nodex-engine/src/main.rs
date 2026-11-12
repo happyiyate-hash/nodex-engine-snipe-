@@ -5944,6 +5944,36 @@ mod scan_progress_state_tests {
     use super::*;
 
     #[test]
+    fn paper_entry_wait_is_reported_as_waiting_with_reasons() {
+        let activity = paper_entry_activity_patch(&json!({
+            "decision":"wait",
+            "reasons":["Insufficient confirmed buyers","Liquidity is below the configured minimum"]
+        }));
+        assert_eq!(activity["status"], "waiting_for_entry");
+        assert_eq!(activity["label"], "Waiting for entry conditions");
+        assert_eq!(
+            activity["sub_event"],
+            "Insufficient confirmed buyers; Liquidity is below the configured minimum"
+        );
+    }
+
+    #[test]
+    fn paper_entry_rejection_and_approval_have_distinct_terminal_states() {
+        let rejected = paper_entry_activity_patch(&json!({
+            "decision":"reject",
+            "reasons":["Creator is on the rug blacklist"]
+        }));
+        assert_eq!(rejected["status"], "strategy_rejected");
+
+        let ready = paper_entry_activity_patch(&json!({
+            "decision":"evaluate_paper_entry",
+            "reasons":[]
+        }));
+        assert_eq!(ready["status"], "entry_ready");
+        assert_eq!(ready["label"], "Entry conditions met");
+    }
+
+    #[test]
     fn late_scan_progress_does_not_downgrade_approved_verdict() {
         let current = json!({"decision":"APPROVED","status":"completed"});
         let patch = scan_progress_security_patch(
