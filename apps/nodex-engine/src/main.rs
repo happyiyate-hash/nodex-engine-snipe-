@@ -5460,9 +5460,10 @@ async fn main() -> anyhow::Result<()> {
             .and_then(serde_json::Value::as_object)
             .and_then(|activity| activity.get("status"))
             .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_owned();
         let evaluation_was_interrupted =
-            matches!(activity_status, "evaluating" | "entry_ready" | "executing_buy");
+            matches!(activity_status.as_str(), "evaluating" | "entry_ready" | "executing_buy");
         token_registry
             .restore(snapshot)
             .map_err(|error| anyhow::anyhow!(error))?;
