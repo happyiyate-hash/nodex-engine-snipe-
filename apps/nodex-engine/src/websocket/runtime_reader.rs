@@ -296,7 +296,7 @@ pub(super) fn spawn(
                         );
                         continue;
                     };
-                    if let Some(mint) = event_mint(&event) {
+                    if event_mint(&event).is_some() {
                         // The Solana JSON-RPC response includes a subscription ID and
                         // is emitted as "subscribed"; no separate "active" event exists.
                         update_active_subscription_tracking(
