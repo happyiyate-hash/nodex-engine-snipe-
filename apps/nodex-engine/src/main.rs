@@ -5328,7 +5328,7 @@ async fn ensure_market_monitor(state: &AppState) {
                 "received_at":chrono::Utc::now().to_rfc3339()
             }}));
         }
-        tracing::warn!(reason, "Could not restore market subscriptions");
+        tracing::warn!(%reason, "Could not restore market subscriptions");
         return;
     };
 
