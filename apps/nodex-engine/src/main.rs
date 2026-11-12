@@ -5896,7 +5896,7 @@ mod scan_progress_state_tests {
 
     #[test]
     fn supplementary_failures_do_not_block_core_verification() {
-        let report = json!({
+        let mut report = json!({
             "decision":"APPROVED",
             "diagnostic_only":false,
             "checks":[
