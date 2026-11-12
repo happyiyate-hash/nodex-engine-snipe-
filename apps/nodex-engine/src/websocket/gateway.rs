@@ -12,6 +12,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("new_token_detected")
             | Some("token_removed")
             | Some("token_approval_pending")
+            | Some("token_scan_retry_scheduled")
             | Some("token_scan_started")
             | Some("token_scan_update")
             | Some("token_scan_progress")
