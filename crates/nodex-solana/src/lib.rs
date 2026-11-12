@@ -437,7 +437,10 @@ impl SolanaRpc {
                     json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"response":error})
                 ));
                 if limited {
-                    self.endpoint_health[index].lock().await.record_failure(retry_after);
+                    self.endpoint_health[index]
+                        .lock()
+                        .await
+                        .record_failure(retry_after);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
