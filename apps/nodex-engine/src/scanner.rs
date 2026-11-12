@@ -5,6 +5,7 @@
 //! module during this incremental extraction.
 
 use super::*;
+use crate::event_broadcaster::EventBroadcaster;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_launch_processor(
