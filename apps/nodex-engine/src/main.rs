@@ -356,6 +356,16 @@ fn core_verification_gate_passed(security: &serde_json::Value) -> bool {
         })
 }
 
+/// Market monitoring is reserved for tokens that passed the complete core
+/// verification gate and received an explicit APPROVED verdict.
+fn token_approved_for_market_monitoring(security: &serde_json::Value) -> bool {
+    security
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|decision| decision.eq_ignore_ascii_case("APPROVED"))
+        && core_verification_gate_passed(security)
+}
+
 fn start_inactive_token_cleanup(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
@@ -3791,12 +3801,58 @@ fn start_launch_processor(
                             }
                         }
                     }
-                    // Mint/freeze authorities are checked once in the launch scan.
-                    // Do not run a second polling loop that can overwrite a completed
-                    // verification verdict with a generic UNVERIFIED monitoring state.
-                    // Market data is discovery/monitoring, not a security approval. Subscribe
-                    // every detected Pump.fun curve, including unverified and rejected launches.
-                    if let Some(monitor) = approved_monitor.read().await.clone() {
+                    // Fail closed: only an explicit APPROVED verdict with all core
+                    // verification checks passed may enter market monitoring.
+                    let approved_for_market_monitoring = approved_registry
+                        .get(&scan_mint)
+                        .is_some_and(|state| {
+                            token_approved_for_market_monitoring(&state.data["security"])
+                        });
+
+                    if !approved_for_market_monitoring {
+                        match approved_registry.upsert_patch(
+                            &scan_mint,
+                            json!({"market":{
+                                "status":"not_started",
+                                "reason":"Security verification is not approved; market monitoring is restricted to verified tokens."
+                            }}),
+                        ) {
+                            Ok(snapshot) => {
+                                if let Err(error) =
+                                    nodex_persistence::save_token_state(&approved_database, &snapshot)
+                                        .await
+                                {
+                                    let _ = scan_events.send(json!({
+                                        "type":"token_diagnostic",
+                                        "data":token_diagnostic(
+                                            &scan_mint,
+                                            "market_monitoring_gate",
+                                            "sqlite",
+                                            error.to_string(),
+                                            json!({"kind":"database_persistence_error","message":error.to_string()})
+                                        )
+                                    }));
+                                } else {
+                                    let _ = scan_events.send(json!({
+                                        "type":"token_state_updated",
+                                        "data":snapshot
+                                    }));
+                                }
+                            }
+                            Err(error) => {
+                                let _ = scan_events.send(json!({
+                                    "type":"token_diagnostic",
+                                    "data":token_diagnostic(
+                                        &scan_mint,
+                                        "market_monitoring_gate",
+                                        "nodex_token_registry",
+                                        error.to_string(),
+                                        json!({"kind":"token_registry_error","message":error.to_string()})
+                                    )
+                                }));
+                            }
+                        }
+                    } else if let Some(monitor) = approved_monitor.read().await.clone() {
                         match monitor
                             .subscribe_pump_fun_bonding_curve(&scan_mint, &approved_program_id)
                             .await
@@ -3809,8 +3865,6 @@ fn start_launch_processor(
                                         "received_at":chrono::Utc::now().to_rfc3339()
                                     }}),
                                 );
-                                // Active monitoring is confirmed later by the backend's
-                                // market_subscription_active event, not by this request acknowledgement.
                             }
                             Err(error) => {
                                 let _ = scan_events.send(
@@ -6459,6 +6513,42 @@ mod scan_progress_state_tests {
         assert!(core_verification_gate_passed(&report));
         report["decision"] = json!("REJECTED");
         assert!(core_verification_gate_passed(&report));
+    }
+
+    #[test]
+    fn market_monitoring_requires_explicit_approval_and_core_verification() {
+        let approved = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"rugcheck_summary","status":"verified"}
+            ]
+        });
+        assert!(token_approved_for_market_monitoring(&approved));
+
+        let rejected = json!({
+            "decision":"REJECTED",
+            "diagnostic_only":false,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"rugcheck_summary","status":"passed"}
+            ]
+        });
+        assert!(!token_approved_for_market_monitoring(&rejected));
+
+        let diagnostic = json!({
+            "decision":"APPROVED",
+            "diagnostic_only":true,
+            "checks":[
+                {"name":"mint_authority","status":"passed"},
+                {"name":"freeze_authority","status":"passed"},
+                {"name":"rugcheck_summary","status":"passed"}
+            ]
+        });
+        assert!(!token_approved_for_market_monitoring(&diagnostic));
     }
 
     #[test]
