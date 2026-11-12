@@ -454,28 +454,10 @@ fn paper_entry_activity_patch(data: &serde_json::Value) -> serde_json::Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let reason_text = if reasons.is_empty() {
-        data.get("message")
-            .or_else(|| data.get("reason"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    } else {
-        reasons.join("; ")
-    };
-    let (label, fallback) = match decision.as_str() {
-        "reject" => (
-            "Strategy rejected",
-            "The token did not meet the strategy requirements.",
-        ),
-        "evaluate_paper_entry" => (
-            "Entry conditions met",
-            "Strategy gates passed; preparing a simulated paper entry.",
-        ),
-        _ => (
-            "Checking entry conditions",
-            "Waiting for market and strategy conditions to align.",
-        ),
+    let sub_event = match decision.as_str() {
+        "reject" => "Strategy rejected",
+        "evaluate_paper_entry" => "Entry conditions met",
+        _ => "Checking entry conditions",
     };
     json!({
         "status": "monitoring",
@@ -483,7 +465,7 @@ fn paper_entry_activity_patch(data: &serde_json::Value) -> serde_json::Value {
         "stage": "strategy_checks",
         "decision": decision,
         "reasons": reasons,
-        "sub_event": if reason_text.is_empty() { fallback } else { reason_text.as_str() },
+        "sub_event": sub_event,
         "evaluated_at": data.get("evaluated_at").cloned().unwrap_or(serde_json::Value::Null)
     })
 }
@@ -1551,19 +1533,19 @@ fn start_token_state_projector(
                     "status": "monitoring",
                     "label": "Monitoring",
                     "stage": data.get("stage").cloned().unwrap_or(json!("paper_order_start")),
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Paper entry conditions met"))
+                    "sub_event": "Paper buy in progress"
                 })),
                 "paper_buy_executed" => Some(json!({
                     "status": "monitoring",
                     "label": "Monitoring",
                     "stage": "position_open",
-                    "sub_event": data.get("message").cloned().unwrap_or(json!("Paper position opened"))
+                    "sub_event": "Paper position opened"
                 })),
                 "paper_buy_failed" => Some(json!({
                     "status": "monitoring",
                     "label": "Monitoring",
                     "stage": data.get("stage").cloned().unwrap_or(json!("entry_failed")),
-                    "sub_event": data.get("reason").cloned().or_else(|| data.get("message").cloned()).unwrap_or(json!("Paper buy failed")),
+                    "sub_event": "Paper buy failed",
                     "error": {
                         "severity": "error",
                         "stage": data.get("stage").cloned().unwrap_or(json!("entry_failed")),
