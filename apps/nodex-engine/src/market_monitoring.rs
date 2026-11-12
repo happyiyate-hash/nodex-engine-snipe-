@@ -20,7 +20,10 @@ pub(super) async fn request_pump_fun_subscription(
         return;
     };
 
-    match monitor.subscribe_pump_fun_bonding_curve(mint, program_id).await {
+    match monitor
+        .subscribe_pump_fun_bonding_curve(mint, program_id)
+        .await
+    {
         Ok(account_address) => {
             let _ = events.publish(json!({"type":"market_subscription_requested","data":{
                 "mint_address":mint,
