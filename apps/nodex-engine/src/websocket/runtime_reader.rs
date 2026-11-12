@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -174,6 +174,14 @@ fn has_open_position(positions: &[Value], mint: &str) -> bool {
     })
 }
 
+fn should_forward_position_scoped_market_event(
+    positions: &[Value],
+    actively_subscribed_mints: &HashSet<String>,
+    mint: &str,
+) -> bool {
+    has_open_position(positions, mint) || actively_subscribed_mints.contains(mint)
+}
+
 pub(super) fn enforce_exact_mint(mut event: Value) -> Option<Value> {
     let event_type = event
         .get("type")
@@ -194,6 +202,10 @@ pub(super) fn spawn(
 ) {
     tokio::spawn(async move {
         let mut pool_to_mint = HashMap::<String, String>::new();
+        // Market data is useful for verified, actively subscribed tokens even
+        // when no paper position exists. Keep the position check as a fallback
+        // for position monitoring, but do not make it the only delivery path.
+        let mut actively_subscribed_mints = HashSet::<String>::new();
         loop {
             match runtime_events.recv().await {
                 Ok(mut event) => {
@@ -219,12 +231,33 @@ pub(super) fn spawn(
                         );
                         continue;
                     };
+                    if let Some(mint) = event_mint(&event) {
+                        match event_type.as_str() {
+                            // Only the active acknowledgement enables no-position
+                            // market delivery. "requested"/"subscribed" are not
+                            // proof that the provider is streaming account updates.
+                            "market_subscription_active" => {
+                                actively_subscribed_mints.insert(mint);
+                            }
+                            "market_subscription_failed"
+                            | "market_subscription_waiting"
+                            | "market_subscriptions_removed"
+                            | "token_removed" => {
+                                actively_subscribed_mints.remove(&mint);
+                            }
+                            _ => {}
+                        }
+                    }
                     if POSITION_SCOPED_MARKET_EVENTS.contains(&event_type.as_str()) {
                         let Some(mint) = event_mint(&event) else {
                             continue;
                         };
                         let positions = portfolio_positions.read().await;
-                        if !has_open_position(&positions, &mint) {
+                        if !should_forward_position_scoped_market_event(
+                            &positions,
+                            &actively_subscribed_mints,
+                            &mint,
+                        ) {
                             continue;
                         }
                     }
@@ -315,12 +348,42 @@ mod tests {
     }
 
     #[test]
-    fn closed_positions_do_not_receive_market_ticks() {
+    fn closed_positions_do_not_receive_market_ticks_without_active_subscription() {
         let positions = vec![json!({
             "mint": "MintClosed",
             "status": "CLOSED_PROFIT"
         })];
-        assert!(!has_open_position(&positions, "MintClosed"));
+        let active = HashSet::new();
+        assert!(!should_forward_position_scoped_market_event(
+            &positions,
+            &active,
+            "MintClosed"
+        ));
+    }
+
+    #[test]
+    fn actively_subscribed_verified_tokens_receive_market_ticks_without_positions() {
+        let positions = Vec::new();
+        let active = HashSet::from(["MintVerified".to_owned()]);
+        assert!(should_forward_position_scoped_market_event(
+            &positions,
+            &active,
+            "MintVerified"
+        ));
+    }
+
+    #[test]
+    fn open_positions_keep_receiving_market_ticks_without_subscription_tracking() {
+        let positions = vec![json!({
+            "mint": "MintPosition",
+            "status": "open"
+        })];
+        let active = HashSet::new();
+        assert!(should_forward_position_scoped_market_event(
+            &positions,
+            &active,
+            "MintPosition"
+        ));
     }
 
     #[test]
