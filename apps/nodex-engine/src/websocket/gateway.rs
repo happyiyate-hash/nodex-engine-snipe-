@@ -26,7 +26,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
 
     matches!(
         event_type,
-            | Some("tokens_removed_inactive")
+            Some("tokens_removed_inactive")
             | Some("connection_status")
             | Some("engine_state")
             | Some("trading_config_updated")
