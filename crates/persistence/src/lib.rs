@@ -536,13 +536,11 @@ pub async fn save_engine_activity_logs(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         let activity_json = serde_json::to_string(activity)?;
-        sqlx::query(
-            "INSERT INTO engine_activity_logs (recorded_at, activity_json) VALUES (?, ?)",
-        )
-        .bind(recorded_at)
-        .bind(activity_json)
-        .execute(&mut *transaction)
-        .await?;
+        sqlx::query("INSERT INTO engine_activity_logs (recorded_at, activity_json) VALUES (?, ?)")
+            .bind(recorded_at)
+            .bind(activity_json)
+            .execute(&mut *transaction)
+            .await?;
     }
 
     sqlx::query(
