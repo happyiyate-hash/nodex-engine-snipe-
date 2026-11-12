@@ -98,8 +98,35 @@ pub struct SolanaRpc {
     http_urls: Vec<String>,
     active_http_index: Arc<AtomicUsize>,
     request_limit: Arc<Semaphore>,
+    queue_limit: Arc<Semaphore>,
+    endpoint_health: Arc<Vec<Mutex<EndpointHealth>>>,
     client: reqwest::Client,
     activity_events: Option<broadcast::Sender<Value>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EndpointHealth {
+    consecutive_failures: u32,
+    cooldown_until: Option<tokio::time::Instant>,
+}
+impl EndpointHealth {
+    fn record_success(&mut self) { self.consecutive_failures = 0; self.cooldown_until = None; }
+    fn record_failure(&mut self, retry_after: Option<std::time::Duration>) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(5);
+        let backoff = std::time::Duration::from_secs(2_u64.saturating_pow(exponent).min(60));
+        let cooldown = retry_after.unwrap_or(backoff)
+            .max(std::time::Duration::from_millis(500))
+            .min(std::time::Duration::from_secs(120));
+        self.cooldown_until = Some(tokio::time::Instant::now() + cooldown);
+    }
+    fn is_available(&self) -> bool {
+        self.cooldown_until.map_or(true, |until| until <= tokio::time::Instant::now())
+    }
+}
+fn retry_after_duration(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim()
+        .parse::<u64>().ok().map(std::time::Duration::from_secs)
 }
 
 fn redact_provider_value(value: &mut Value) {
@@ -145,10 +172,16 @@ impl SolanaRpc {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(20)
             .clamp(1, 100);
+        let queue_capacity = std::env::var("SOLANA_RPC_MAX_QUEUED_REQUESTS")
+            .ok().and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(request_limit.saturating_mul(4)).clamp(1, 500);
+        let endpoint_health = (0..http_urls.len()).map(|_| Mutex::new(EndpointHealth::default())).collect();
         Self {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
             request_limit: Arc::new(Semaphore::new(request_limit)),
+            queue_limit: Arc::new(Semaphore::new(request_limit.saturating_add(queue_capacity))),
+            endpoint_health: Arc::new(endpoint_health),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
@@ -202,10 +235,12 @@ impl SolanaRpc {
         if self.http_urls.is_empty() {
             return Err(anyhow!("No Solana HTTP RPC endpoints are configured"));
         }
-        let _request_permit = self
-            .request_limit
-            .acquire()
-            .await
+        // Bound active + waiting requests; reject excess work instead of building
+        // an unbounded backlog of Tokio tasks waiting on the concurrency semaphore.
+        let _queue_permit = self.queue_limit.clone().try_acquire_owned()
+            .map_err(|_| anyhow!("Solana RPC request queue is full"))?;
+        let _request_permit = self.request_limit
+            .acquire().await
             .map_err(|_| anyhow!("Solana RPC request scheduler is shutting down"))?;
         let mut last_error = None;
         let count = self.http_urls.len();
@@ -222,6 +257,7 @@ impl SolanaRpc {
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
+            if !self.endpoint_health[index].lock().await.is_available() { continue; }
             let attempt_started = std::time::Instant::now();
             let attempt_id = format!("{correlation_id}-{index}");
             let endpoint_host = reqwest::Url::parse(url)
@@ -262,6 +298,7 @@ impl SolanaRpc {
                         "severity": "error",
                         "error": error.to_string()
                     }));
+                    self.endpoint_health[index].lock().await.record_failure(None);
                     last_error = Some(anyhow!(
                         "NODEX_PROVIDER_ERROR_JSON:{}",
                         json!({"provider":"solana_rpc","method":method,"kind":"transport_error","message":error.to_string()})
@@ -270,6 +307,7 @@ impl SolanaRpc {
                 }
             };
             let status = response.status();
+            let retry_after = retry_after_duration(response.headers());
             let body = match response.text().await {
                 Ok(body) => body,
                 Err(error) => {
@@ -307,6 +345,9 @@ impl SolanaRpc {
                 "response": response_body
             }));
             if !status.is_success() {
+                if status.as_u16() == 429 || status.is_server_error() {
+                    self.endpoint_health[index].lock().await.record_failure(retry_after);
+                }
                 last_error = Some(anyhow!(
                     "NODEX_PROVIDER_ERROR_JSON:{}",
                     json!({"provider":"solana_rpc","method":method,"kind":"http_error","http_status":status.as_u16(),"response":response_json})
@@ -342,11 +383,13 @@ impl SolanaRpc {
                     json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"response":error})
                 ));
                 if limited {
+                    self.endpoint_health[index].lock().await.record_failure(retry_after);
                     continue;
                 }
                 return Err(last_error.expect("error was set"));
             }
             if let Some(result) = decoded.result {
+                self.endpoint_health[index].lock().await.record_success();
                 return Ok((result, response_json));
             }
             return Err(anyhow!(
