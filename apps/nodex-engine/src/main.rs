@@ -1396,6 +1396,14 @@ fn start_token_state_projector(
                 .get(mint)
                 .and_then(|snapshot| snapshot.data.get("market_subscription").cloned());
             let activity_patch = match kind {
+                "token_scan_retry_scheduled" => Some(json!({
+                    "status": "retrying",
+                    "label": "Retrying",
+                    "progress": 0,
+                    "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
+                    "stage": "retry_wait",
+                    "sub_event": "Retrying security scan"
+                })),
                 "token_scan_started" => Some(json!({
                     "status": "scanning",
                     "label": "Scanning",
@@ -1655,7 +1663,7 @@ fn start_token_state_projector(
             }
             let activity_patch = activity_patch.filter(|incoming| {
                 let rank = |status: &str| match status {
-                    "scanning" => 1,
+                    "scanning" | "retrying" => 1,
                     "verified" => 2,
                     "monitoring" => 3,
                     "evaluating" | "waiting_for_entry" | "entry_ready" => 4,
@@ -1702,7 +1710,8 @@ fn start_token_state_projector(
             if activity_patch.is_none()
                 && matches!(
                     kind,
-                    "token_scan_started"
+                    "token_scan_retry_scheduled"
+                        | "token_scan_started"
                         | "token_scan_progress"
                         | "token_scan_completed"
                         | "token_scan_failed"
@@ -1784,7 +1793,8 @@ fn start_token_state_projector(
                 "pumpswap_volume_update" => json!({
                     "statistics": {"pumpswap_volume": data}
                 }),
-                "token_scan_completed"
+                "token_scan_retry_scheduled"
+                | "token_scan_completed"
                 | "token_scan_failed"
                 | "token_monitoring_started"
                 | "token_monitoring_update"
