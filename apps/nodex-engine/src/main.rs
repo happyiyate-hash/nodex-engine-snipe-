@@ -499,10 +499,7 @@ fn activity_log_from_event(event: &serde_json::Value) -> Option<serde_json::Valu
         return None;
     }
 
-    let data = event
-        .get("data")
-        .cloned()
-        .unwrap_or_else(|| event.clone());
+    let data = event.get("data").cloned().unwrap_or_else(|| event.clone());
     let severity = if event_type.ends_with("_failed")
         || data.get("severity").and_then(serde_json::Value::as_str) == Some("error")
     {
