@@ -1413,6 +1413,9 @@ fn start_token_state_projector(
             let current_activity = registry
                 .get(mint)
                 .and_then(|snapshot| snapshot.data.get("activity").cloned());
+            let current_market_subscription = registry
+                .get(mint)
+                .and_then(|snapshot| snapshot.data.get("market_subscription").cloned());
             let activity_patch = match kind {
                 "token_scan_started" => Some(json!({
                     "status": "scanning",
@@ -1666,10 +1669,23 @@ fn start_token_state_projector(
                             .unwrap_or(serde_json::Value::Null)
                     }
                 }),
-                "market_price_update" => json!({
-                    "market": data,
-                    "last_activity_at": chrono::Utc::now().to_rfc3339()
-                }),
+                "market_price_update" => {
+                    let mut patch = json!({
+                        "market": data,
+                        "last_activity_at": chrono::Utc::now().to_rfc3339()
+                    });
+                    let mut subscription = current_market_subscription.unwrap_or_else(|| json!({}));
+                    let subscription_status = subscription.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    if matches!(subscription_status, "pending" | "subscribed") {
+                        subscription["status"] = json!("active");
+                        subscription["reason"] = serde_json::Value::Null;
+                        subscription["last_market_update_at"] = data.get("received_at")
+                            .cloned()
+                            .unwrap_or(json!(chrono::Utc::now().to_rfc3339()));
+                    }
+                    patch["market_subscription"] = subscription;
+                    patch
+                },
                 "pumpswap_volume_update" => json!({
                     "statistics": {"pumpswap_volume": data}
                 }),
@@ -1688,6 +1704,7 @@ fn start_token_state_projector(
                     json!({"activity": activity_patch.clone().unwrap_or_else(|| json!({}))})
                 }
                 "market_subscription_requested"
+                | "market_subscription_subscribed"
                 | "market_subscription_waiting"
                 | "market_subscription_active"
                 | "market_subscription_failed"
