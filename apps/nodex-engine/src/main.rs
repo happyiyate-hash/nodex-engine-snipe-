@@ -1552,11 +1552,13 @@ fn start_token_state_projector(
                     }))
                 }
                 "paper_entry_evaluation" => {
-                    let is_monitoring = current_activity.as_ref()
+                    let is_monitoring = current_activity
+                        .as_ref()
                         .and_then(|activity| activity.get("status"))
-                        .and_then(serde_json::Value::as_str) == Some("monitoring");
+                        .and_then(serde_json::Value::as_str)
+                        == Some("monitoring");
                     is_monitoring.then(|| paper_entry_activity_patch(&data))
-                },
+                }
                 "paper_buy_started" => Some(json!({
                     "status": "monitoring",
                     "label": "Monitoring",
@@ -1598,16 +1600,20 @@ fn start_token_state_projector(
                     }
                 })),
                 "strategy_rejected_token" => {
-                    let is_monitoring = current_activity.as_ref()
+                    let is_monitoring = current_activity
+                        .as_ref()
                         .and_then(|activity| activity.get("status"))
-                        .and_then(serde_json::Value::as_str) == Some("monitoring");
-                    is_monitoring.then(|| json!({
-                        "status": "monitoring",
-                        "label": "Monitoring",
-                        "stage": data.get("stage").cloned().unwrap_or(json!("strategy_checks")),
-                        "sub_event": "Strategy rejected"
-                    }))
-                },
+                        .and_then(serde_json::Value::as_str)
+                        == Some("monitoring");
+                    is_monitoring.then(|| {
+                        json!({
+                            "status": "monitoring",
+                            "label": "Monitoring",
+                            "stage": data.get("stage").cloned().unwrap_or(json!("strategy_checks")),
+                            "sub_event": "Strategy rejected"
+                        })
+                    })
+                }
                 "paper_sell_executed" => Some(json!({
                     "status": "closed",
                     "label": "Position closed",
@@ -3642,14 +3648,16 @@ fn start_launch_processor(
                                 // market_subscription_active event, not by this request acknowledgement.
                             }
                             Err(error) => {
-                                let _ = scan_events.send(json!({"type":"market_subscription_failed","data":{
-                                    "mint_address":scan_mint,
-                                    "venue":"pump_fun_bonding_curve",
-                                    "status":"failed",
-                                    "reason":error.to_string(),
-                                    "message":"Market data unavailable",
-                                    "received_at":chrono::Utc::now().to_rfc3339()
-                                }}));
+                                let _ = scan_events.send(
+                                    json!({"type":"market_subscription_failed","data":{
+                                        "mint_address":scan_mint,
+                                        "venue":"pump_fun_bonding_curve",
+                                        "status":"failed",
+                                        "reason":error.to_string(),
+                                        "message":"Market data unavailable",
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }}),
+                                );
                                 let _ = scan_events.send(json!({"type":"diagnostic","data":{
                                     "severity":"warning","component":"market_monitor_registration",
                                     "message":error.to_string(),"mint_address":scan_mint,
@@ -3658,14 +3666,15 @@ fn start_launch_processor(
                             }
                         }
                     } else {
-                        let _ = scan_events.send(json!({"type":"market_subscription_failed","data":{
-                            "mint_address":scan_mint,
-                            "venue":"pump_fun_bonding_curve",
-                            "status":"failed",
-                            "reason":"Market monitor is unavailable",
-                            "message":"Market data unavailable",
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }}));
+                        let _ =
+                            scan_events.send(json!({"type":"market_subscription_failed","data":{
+                                "mint_address":scan_mint,
+                                "venue":"pump_fun_bonding_curve",
+                                "status":"failed",
+                                "reason":"Market monitor is unavailable",
+                                "message":"Market data unavailable",
+                                "received_at":chrono::Utc::now().to_rfc3339()
+                            }}));
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
