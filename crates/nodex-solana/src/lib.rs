@@ -36,11 +36,18 @@ fn shared_rpc_limits(
     queue_capacity: usize,
 ) -> SharedRpcLimits {
     let registry = RPC_LIMITS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut registry = registry.lock().expect("RPC scheduler registry lock poisoned");
-    registry.entry(provider_group.to_owned()).or_insert_with(|| (
-        Arc::new(Semaphore::new(concurrency)),
-        Arc::new(Semaphore::new(concurrency.saturating_add(queue_capacity))),
-    )).clone()
+    let mut registry = registry
+        .lock()
+        .expect("RPC scheduler registry lock poisoned");
+    registry
+        .entry(provider_group.to_owned())
+        .or_insert_with(|| {
+            (
+                Arc::new(Semaphore::new(concurrency)),
+                Arc::new(Semaphore::new(concurrency.saturating_add(queue_capacity))),
+            )
+        })
+        .clone()
 }
 
 const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [0x18, 0x1e, 0xc8, 0x28, 0x05, 0x1c, 0x07, 0x77];
@@ -126,23 +133,34 @@ struct EndpointHealth {
     cooldown_until: Option<tokio::time::Instant>,
 }
 impl EndpointHealth {
-    fn record_success(&mut self) { self.consecutive_failures = 0; self.cooldown_until = None; }
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.cooldown_until = None;
+    }
     fn record_failure(&mut self, retry_after: Option<std::time::Duration>) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let exponent = self.consecutive_failures.saturating_sub(1).min(5);
         let backoff = std::time::Duration::from_secs(2_u64.saturating_pow(exponent).min(60));
-        let cooldown = retry_after.unwrap_or(backoff)
+        let cooldown = retry_after
+            .unwrap_or(backoff)
             .max(std::time::Duration::from_millis(500))
             .min(std::time::Duration::from_secs(120));
         self.cooldown_until = Some(tokio::time::Instant::now() + cooldown);
     }
     fn is_available(&self) -> bool {
-        self.cooldown_until.map_or(true, |until| until <= tokio::time::Instant::now())
+        self.cooldown_until
+            .map_or(true, |until| until <= tokio::time::Instant::now())
     }
 }
 fn retry_after_duration(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
-    headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim()
-        .parse::<u64>().ok().map(std::time::Duration::from_secs)
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 fn redact_provider_value(value: &mut Value) {
@@ -189,11 +207,16 @@ impl SolanaRpc {
             .unwrap_or(20)
             .clamp(1, 100);
         let queue_capacity = std::env::var("SOLANA_RPC_MAX_QUEUED_REQUESTS")
-            .ok().and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(request_limit.saturating_mul(4)).clamp(1, 500);
-        let endpoint_health = (0..http_urls.len()).map(|_| Mutex::new(EndpointHealth::default())).collect();
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(request_limit.saturating_mul(4))
+            .clamp(1, 500);
+        let endpoint_health = (0..http_urls.len())
+            .map(|_| Mutex::new(EndpointHealth::default()))
+            .collect();
         // Both primary and security RPC clients share one provider-group limiter.
-        let (request_limit, queue_limit) = shared_rpc_limits(limit_env, request_limit, queue_capacity);
+        let (request_limit, queue_limit) =
+            shared_rpc_limits(limit_env, request_limit, queue_capacity);
         Self {
             http_urls,
             active_http_index: Arc::new(AtomicUsize::new(0)),
@@ -255,10 +278,15 @@ impl SolanaRpc {
         }
         // Bound active + waiting requests; reject excess work instead of building
         // an unbounded backlog of Tokio tasks waiting on the concurrency semaphore.
-        let _queue_permit = self.queue_limit.clone().try_acquire_owned()
+        let _queue_permit = self
+            .queue_limit
+            .clone()
+            .try_acquire_owned()
             .map_err(|_| anyhow!("Solana RPC request queue is full"))?;
-        let _request_permit = self.request_limit
-            .acquire().await
+        let _request_permit = self
+            .request_limit
+            .acquire()
+            .await
             .map_err(|_| anyhow!("Solana RPC request scheduler is shutting down"))?;
         let mut last_error = None;
         let count = self.http_urls.len();
@@ -275,7 +303,9 @@ impl SolanaRpc {
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
-            if !self.endpoint_health[index].lock().await.is_available() { continue; }
+            if !self.endpoint_health[index].lock().await.is_available() {
+                continue;
+            }
             let attempt_started = std::time::Instant::now();
             let attempt_id = format!("{correlation_id}-{index}");
             let endpoint_host = reqwest::Url::parse(url)
@@ -316,7 +346,10 @@ impl SolanaRpc {
                         "severity": "error",
                         "error": error.to_string()
                     }));
-                    self.endpoint_health[index].lock().await.record_failure(None);
+                    self.endpoint_health[index]
+                        .lock()
+                        .await
+                        .record_failure(None);
                     last_error = Some(anyhow!(
                         "NODEX_PROVIDER_ERROR_JSON:{}",
                         json!({"provider":"solana_rpc","method":method,"kind":"transport_error","message":error.to_string()})
@@ -364,7 +397,10 @@ impl SolanaRpc {
             }));
             if !status.is_success() {
                 if status.as_u16() == 429 || status.is_server_error() {
-                    self.endpoint_health[index].lock().await.record_failure(retry_after);
+                    self.endpoint_health[index]
+                        .lock()
+                        .await
+                        .record_failure(retry_after);
                 }
                 last_error = Some(anyhow!(
                     "NODEX_PROVIDER_ERROR_JSON:{}",
