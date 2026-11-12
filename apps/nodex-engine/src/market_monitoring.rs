@@ -1,4 +1,5 @@
 use super::*;
+use nodex_solana::start_market_monitor;
 
 pub(super) async fn ensure_market_monitor(state: &AppState) {
     // Create the monitor once, then restore the newest persisted launch subscriptions.
