@@ -578,8 +578,6 @@ pub(super) async fn evaluate_and_execute_paper_entry(
     let _ = events.send(json!({"type":"portfolio_summary_updated","data":portfolio}));
 }
 
-
-
 #[cfg(test)]
 mod security_approval_cache_tests {
     use super::*;
@@ -621,7 +619,13 @@ mod security_approval_cache_tests {
             "scan_cache":{"approval_expires_at":
                 (now - chrono::Duration::seconds(60)).to_rfc3339()}
         }});
-        assert!(security_approval_cache_is_fresh(token_a.get("security"), now));
-        assert!(!security_approval_cache_is_fresh(token_b.get("security"), now));
+        assert!(security_approval_cache_is_fresh(
+            token_a.get("security"),
+            now
+        ));
+        assert!(!security_approval_cache_is_fresh(
+            token_b.get("security"),
+            now
+        ));
     }
 }
