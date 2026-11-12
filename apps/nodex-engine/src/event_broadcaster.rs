@@ -50,8 +50,17 @@ mod tests {
             .expect("at least one receiver is active");
 
         let expected = json!({"type":"launch_detected","data":{"mint_address":"MintA"}});
-        assert_eq!(first.recv().await.expect("first subscriber receives event"), expected);
-        assert_eq!(second.recv().await.expect("second subscriber receives event"), expected);
+        assert_eq!(
+            first.recv().await.expect("first subscriber receives event"),
+            expected
+        );
+        assert_eq!(
+            second
+                .recv()
+                .await
+                .expect("second subscriber receives event"),
+            expected
+        );
     }
 
     #[test]
