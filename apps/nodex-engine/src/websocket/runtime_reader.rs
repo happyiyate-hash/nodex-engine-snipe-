@@ -179,7 +179,10 @@ fn should_forward_position_scoped_market_event(
     active_accounts_by_mint: &HashMap<String, HashSet<String>>,
     mint: &str,
 ) -> bool {
-    has_open_position(positions, mint) || active_accounts_by_mint.get(mint).is_some_and(|accounts| !accounts.is_empty())
+    has_open_position(positions, mint)
+        || active_accounts_by_mint
+            .get(mint)
+            .is_some_and(|accounts| !accounts.is_empty())
 }
 
 fn update_active_subscription_tracking(
@@ -201,7 +204,10 @@ fn update_active_subscription_tracking(
     match event_type {
         "market_subscription_subscribed" | "market_subscription_active" => {
             if let Some(account) = account {
-                active_accounts_by_mint.entry(mint).or_default().insert(account);
+                active_accounts_by_mint
+                    .entry(mint)
+                    .or_default()
+                    .insert(account);
             }
         }
         "market_subscription_failed" => {
@@ -414,7 +420,9 @@ mod tests {
             }}),
             &mut active,
         );
-        assert!(active.get("MintVerified").is_some_and(|accounts| accounts.contains("CurveAccount")));
+        assert!(active
+            .get("MintVerified")
+            .is_some_and(|accounts| accounts.contains("CurveAccount")));
         assert!(should_forward_position_scoped_market_event(
             &[],
             &active,
@@ -448,7 +456,10 @@ mod tests {
     #[test]
     fn actively_subscribed_verified_tokens_receive_market_ticks_without_positions() {
         let positions = Vec::new();
-        let active = HashMap::from([("MintVerified".to_owned(), HashSet::from(["CurveAccount".to_owned()]))]);
+        let active = HashMap::from([(
+            "MintVerified".to_owned(),
+            HashSet::from(["CurveAccount".to_owned()]),
+        )]);
         assert!(should_forward_position_scoped_market_event(
             &positions,
             &active,
@@ -469,7 +480,6 @@ mod tests {
             "MintPosition"
         ));
     }
-    
     #[test]
     fn failing_one_account_does_not_deactivate_other_accounts_for_same_mint() {
         let mut active = HashMap::new();
@@ -490,7 +500,11 @@ mod tests {
             &mut active,
         );
         assert_eq!(active["MintMulti"].len(), 2);
-        assert!(should_forward_position_scoped_market_event(&[], &active, "MintMulti"));
+        assert!(should_forward_position_scoped_market_event(
+            &[],
+            &active,
+            "MintMulti"
+        ));
     }
 
     #[test]
