@@ -531,7 +531,6 @@ mod tests {
         ));
     }
 
-    
     #[test]
     fn removing_all_market_subscriptions_clears_the_mint_entry() {
         let mut active = HashMap::from([(
