@@ -1400,6 +1400,7 @@ fn start_token_state_projector(
                     "status": "scanning",
                     "label": "Scanning",
                     "progress": 0,
+                    "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                     "stage": "initializing",
                     "sub_event": "Scanning"
                 })),
@@ -1407,6 +1408,7 @@ fn start_token_state_projector(
                     "status": "scanning",
                     "label": "Scanning",
                     "progress": data.get("progress").cloned().unwrap_or(json!(0)),
+                    "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                     "stage": data.get("stage").cloned().unwrap_or(json!("security_checks")),
                     "sub_event": "Scanning"
                 })),
@@ -1429,6 +1431,7 @@ fn start_token_state_projector(
                             "status": "verified",
                             "label": "Verified",
                             "progress": 100,
+                            "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                             "stage": "security_complete",
                             "sub_event": "Getting market data"
                         }))
@@ -1437,6 +1440,7 @@ fn start_token_state_projector(
                             "status": "rejected",
                             "label": "Risk detected",
                             "progress": 100,
+                            "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                             "stage": "security_complete",
                             "sub_event": "Unverified"
                         }))
@@ -1445,6 +1449,7 @@ fn start_token_state_projector(
                             "status": "unverified",
                             "label": "Unverified",
                             "progress": 100,
+                            "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                             "stage": "security_complete",
                             "sub_event": "Unverified"
                         }))
@@ -1679,7 +1684,18 @@ fn start_token_state_projector(
                     .get("progress")
                     .and_then(serde_json::Value::as_f64)
                     .unwrap_or(current_progress);
-                incoming_rank > current_rank
+                let current_attempt = current_activity
+                    .as_ref()
+                    .and_then(|activity| activity.get("scan_attempt"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let incoming_attempt = incoming
+                    .get("scan_attempt")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                // A newer scan attempt may legitimately move a token back to Scanning.
+                incoming_attempt > current_attempt
+                    || incoming_rank > current_rank
                     || incoming_rank == current_rank && incoming_progress >= current_progress
             });
             if activity_patch.is_none()
@@ -3063,6 +3079,7 @@ fn start_launch_processor(
                             "scan_cache": {
                                 "status": "scanning",
                                 "attempts": scan_attempts,
+                                "scan_attempt": scan_attempts + 1,
                                 "started_at": chrono::Utc::now().to_rfc3339()
                             }
                         },
@@ -3115,6 +3132,8 @@ fn start_launch_processor(
                         let _ = events.send(json!({"type":"token_scan_started","data":{
                             "mint_address":mint_address,
                             "status":"scanning",
+                            "scan_attempt":scan_attempts + 1,
+                            "state_version":snapshot.version,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
                     }
@@ -3138,6 +3157,7 @@ fn start_launch_processor(
                     let scan_settings = trading_settings_for_scan.read().await.clone();
                     let progress_events = scan_events.clone();
                     let progress_mint = scan_mint.clone();
+                    let scan_attempt = scan_attempts + 1;
                     let scan_result = match tokio::time::timeout(
                         Duration::from_secs(45),
                         scan_rpc.scan_token_security_with_progress_mode(
@@ -3147,6 +3167,7 @@ fn start_launch_processor(
                                 let _ = progress_events.send(
                                     json!({"type":"token_scan_progress","data":{
                                         "mint_address":progress_mint,
+                                        "scan_attempt":scan_attempt,
                                         "stage":stage,
                                         "progress":progress,
                                         "message":message,
@@ -3466,7 +3487,7 @@ fn start_launch_processor(
                                 }
                             }
                             let _ = scan_events.send(json!({"type":"token_scan_completed","data":{
-                                "mint_address":scan_mint,"decision":decision,"status":terminal_status,
+                                "mint_address":scan_mint,"scan_attempt":scan_attempt,"decision":decision,"status":terminal_status,
                                 "progress":100,
                                 "message":report_payload.get("decision_reason").cloned().unwrap_or(json!("Security scan finished.")),
                                 "diagnostic_only":report.diagnostic_only,
@@ -3530,7 +3551,8 @@ fn start_launch_processor(
                                             "status": cache_status,
                                             "verified": cache_status == "verified",
                                             "diagnostic_only": diagnostic_only,
-                                            "attempts": scan_attempts + u64::from(provider_limited),
+                                            "attempts": scan_attempts + 1,
+                                            "scan_attempt": scan_attempt,
                                             "scanned_at": scanned_at.to_rfc3339(),
                                             "retry_after": retry_after,
                                             "provider_rate_limited": provider_limited
@@ -3568,6 +3590,7 @@ fn start_launch_processor(
                             });
                             let _=scan_events.send(json!({"type":"token_scan_failed","data":{
                                 "mint_address":scan_mint,
+                                "scan_attempt":scan_attempt,
                                 "decision":"UNVERIFIED",
                                 "decision_reason":"Diagnostic-only mode is active. This scan failed before provider evidence could be fully collected; no token is being verified.",
                                 "diagnostic_only":true,
@@ -3607,6 +3630,7 @@ fn start_launch_processor(
                                     "status":"retry_wait",
                                     "verified":false,
                                     "attempts":attempts,
+                                    "scan_attempt":attempts,
                                     "last_error":error,
                                     "rate_limited":rate_limited,
                                     "retry_after":retry_after
@@ -3688,6 +3712,61 @@ fn start_launch_processor(
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
+            }
+        });
+    }
+
+    // Requeue transient diagnostic scans when their persisted retry deadline expires.
+    {
+        let retry_registry = token_registry.clone();
+        let retry_work_tx = work_tx.clone();
+        let retry_events = events.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut scheduled = HashSet::<String>::new();
+            loop {
+                interval.tick().await;
+                let now = chrono::Utc::now();
+                for state in retry_registry.snapshot() {
+                    let mint = state.mint_address.clone();
+                    let cache = &state.data["security"]["scan_cache"];
+                    let cache_status = cache["status"].as_str().unwrap_or_default();
+                    if cache_status == "scanning" {
+                        scheduled.remove(&mint);
+                        continue;
+                    }
+                    if !matches!(cache_status, "retry_wait" | "completed_diagnostic") {
+                        scheduled.remove(&mint);
+                        continue;
+                    }
+                    if scheduled.contains(&mint) { continue; }
+                    let retry_at = cache["retry_after"].as_str()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&chrono::Utc));
+                    if !retry_at.is_some_and(|deadline| deadline <= now) { continue; }
+                    let signature = state.data["discovery"]["signature"].as_str().unwrap_or_default().to_string();
+                    if signature.is_empty() { continue; }
+                    let slot = state.data["discovery"]["slot"].as_u64().unwrap_or(0);
+                    match retry_work_tx.try_send((signature, slot)) {
+                        Ok(()) => {
+                            scheduled.insert(mint.clone());
+                            let _ = retry_events.send(json!({"type":"token_scan_retry_scheduled","data":{
+                                "mint_address":mint,
+                                "scan_attempt":cache["attempts"].as_u64().unwrap_or(0) + 1,
+                                "retry_after":retry_at.map(|value| value.to_rfc3339()),
+                                "received_at":now.to_rfc3339()
+                            }}));
+                        }
+                        Err(error) => {
+                            let _ = retry_events.send(json!({"type":"token_diagnostic","data":token_diagnostic(
+                                &mint,"token_scan_retry","launch_queue",
+                                format!("Could not enqueue scheduled security retry: {error}"),
+                                json!({"kind":"retry_queue_error","message":error.to_string()})
+                            )}));
+                        }
+                    }
+                }
             }
         });
     }
