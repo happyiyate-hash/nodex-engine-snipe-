@@ -1,6 +1,6 @@
 use super::*;
 
-async fn ensure_market_monitor(state: &AppState) {
+pub(super) async fn ensure_market_monitor(state: &AppState) {
     // Create the monitor once, then restore the newest persisted launch subscriptions.
     // The monitor itself retains its desired set across WebSocket reconnects; this
     // rehydration closes the process-restart gap as well.
