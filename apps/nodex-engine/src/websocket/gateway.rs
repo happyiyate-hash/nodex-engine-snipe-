@@ -48,6 +48,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("market_curve_completed")
             | Some("market_monitor_status")
             | Some("market_subscription_requested")
+            | Some("market_subscription_subscribed")
             | Some("market_subscription_active")
             | Some("market_subscription_waiting")
             | Some("market_subscription_failed")
