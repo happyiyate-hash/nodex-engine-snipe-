@@ -241,6 +241,10 @@ fn update_active_subscription_tracking(
                         active_accounts_by_mint.remove(&mint);
                     }
                 }
+            } else {
+                // The monitor emits this event only after removing every desired
+                // account for the mint, so the whole mint entry can be cleared.
+                active_accounts_by_mint.remove(&mint);
             }
         }
         "token_removed" => {
@@ -525,6 +529,23 @@ mod tests {
             &active,
             "MintMulti"
         ));
+    }
+
+    
+    #[test]
+    fn removing_all_market_subscriptions_clears_the_mint_entry() {
+        let mut active = HashMap::from([(
+            "MintRemoved".to_owned(),
+            HashSet::from(["CurveAccount".to_owned(), "PoolAccount".to_owned()]),
+        )]);
+        update_active_subscription_tracking(
+            "market_subscriptions_removed",
+            &json!({"type":"market_subscriptions_removed","data":{
+                "mint_address":"MintRemoved","removed_active":2,"cancelled_pending":0
+            }}),
+            &mut active,
+        );
+        assert!(!active.contains_key("MintRemoved"));
     }
 
     #[test]
