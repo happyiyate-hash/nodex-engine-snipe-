@@ -176,27 +176,73 @@ fn has_open_position(positions: &[Value], mint: &str) -> bool {
 
 fn should_forward_position_scoped_market_event(
     positions: &[Value],
-    actively_subscribed_mints: &HashSet<String>,
+    active_accounts_by_mint: &HashMap<String, HashSet<String>>,
     mint: &str,
 ) -> bool {
-    has_open_position(positions, mint) || actively_subscribed_mints.contains(mint)
+    has_open_position(positions, mint) || active_accounts_by_mint.get(mint).is_some_and(|accounts| !accounts.is_empty())
 }
 
 fn update_active_subscription_tracking(
     event_type: &str,
-    mint: String,
-    actively_subscribed_mints: &mut HashSet<String>,
+    event: &Value,
+    active_accounts_by_mint: &mut HashMap<String, HashSet<String>>,
 ) {
+    let Some(mint) = event_mint(event) else {
+        return;
+    };
+    let data = event.get("data").unwrap_or(event);
+    let account = data
+        .get("account_address")
+        .or_else(|| data.get("account"))
+        .and_then(Value::as_str)
+        .filter(|account| !account.trim().is_empty())
+        .map(str::to_owned);
+
     match event_type {
         "market_subscription_subscribed" | "market_subscription_active" => {
-            actively_subscribed_mints.insert(mint);
+            if let Some(account) = account {
+                active_accounts_by_mint.entry(mint).or_default().insert(account);
+            }
         }
-        "market_subscription_failed"
-        | "market_subscription_waiting"
-        | "market_subscriptions_removed"
-        | "token_removed" => {
-            actively_subscribed_mints.remove(&mint);
+        "market_subscription_failed" => {
+            if let Some(account) = account {
+                if let Some(accounts) = active_accounts_by_mint.get_mut(&mint) {
+                    accounts.remove(&account);
+                    if accounts.is_empty() {
+                        active_accounts_by_mint.remove(&mint);
+                    }
+                }
+            }
         }
+        "market_subscriptions_removed" => {
+            let accounts = data
+                .get("account_addresses")
+                .or_else(|| data.get("accounts"))
+                .and_then(Value::as_array);
+            if let Some(accounts) = accounts {
+                if let Some(active) = active_accounts_by_mint.get_mut(&mint) {
+                    for account in accounts.iter().filter_map(Value::as_str) {
+                        active.remove(account);
+                    }
+                    if active.is_empty() {
+                        active_accounts_by_mint.remove(&mint);
+                    }
+                }
+            } else if let Some(account) = account {
+                if let Some(active) = active_accounts_by_mint.get_mut(&mint) {
+                    active.remove(&account);
+                    if active.is_empty() {
+                        active_accounts_by_mint.remove(&mint);
+                    }
+                }
+            }
+        }
+        "token_removed" => {
+            active_accounts_by_mint.remove(&mint);
+        }
+        // Waiting for capacity is an account-level pending state. It must never
+        // deactivate other accounts that are already receiving updates.
+        "market_subscription_waiting" => {}
         _ => {}
     }
 }
@@ -224,7 +270,7 @@ pub(super) fn spawn(
         // Market data is useful for verified, actively subscribed tokens even
         // when no paper position exists. Keep the position check as a fallback
         // for position monitoring, but do not make it the only delivery path.
-        let mut actively_subscribed_mints = HashSet::<String>::new();
+        let mut active_accounts_by_mint = HashMap::<String, HashSet<String>>::new();
         loop {
             match runtime_events.recv().await {
                 Ok(mut event) => {
@@ -255,8 +301,8 @@ pub(super) fn spawn(
                         // is emitted as "subscribed"; no separate "active" event exists.
                         update_active_subscription_tracking(
                             &event_type,
-                            mint,
-                            &mut actively_subscribed_mints,
+                            &event,
+                            &mut active_accounts_by_mint,
                         );
                     }
                     if POSITION_SCOPED_MARKET_EVENTS.contains(&event_type.as_str()) {
@@ -266,7 +312,7 @@ pub(super) fn spawn(
                         let positions = portfolio_positions.read().await;
                         if !should_forward_position_scoped_market_event(
                             &positions,
-                            &actively_subscribed_mints,
+                            &active_accounts_by_mint,
                             &mint,
                         ) {
                             continue;
@@ -360,13 +406,15 @@ mod tests {
 
     #[test]
     fn provider_subscription_acknowledgement_enables_market_ticks_without_a_position() {
-        let mut active = HashSet::new();
+        let mut active = HashMap::new();
         update_active_subscription_tracking(
             "market_subscription_subscribed",
-            "MintVerified".to_owned(),
+            &json!({"type":"market_subscription_subscribed","data":{
+                "mint_address":"MintVerified","account_address":"CurveAccount"
+            }}),
             &mut active,
         );
-        assert!(active.contains("MintVerified"));
+        assert!(active.get("MintVerified").is_some_and(|accounts| accounts.contains("CurveAccount")));
         assert!(should_forward_position_scoped_market_event(
             &[],
             &active,
@@ -375,10 +423,12 @@ mod tests {
 
         update_active_subscription_tracking(
             "market_subscription_failed",
-            "MintVerified".to_owned(),
+            &json!({"type":"market_subscription_failed","data":{
+                "mint_address":"MintVerified","account_address":"CurveAccount"
+            }}),
             &mut active,
         );
-        assert!(!active.contains("MintVerified"));
+        assert!(!active.contains_key("MintVerified"));
     }
 
     #[test]
@@ -387,7 +437,7 @@ mod tests {
             "mint": "MintClosed",
             "status": "CLOSED_PROFIT"
         })];
-        let active = HashSet::new();
+        let active = HashMap::new();
         assert!(!should_forward_position_scoped_market_event(
             &positions,
             &active,
@@ -398,7 +448,7 @@ mod tests {
     #[test]
     fn actively_subscribed_verified_tokens_receive_market_ticks_without_positions() {
         let positions = Vec::new();
-        let active = HashSet::from(["MintVerified".to_owned()]);
+        let active = HashMap::from([("MintVerified".to_owned(), HashSet::from(["CurveAccount".to_owned()]))]);
         assert!(should_forward_position_scoped_market_event(
             &positions,
             &active,
@@ -412,12 +462,51 @@ mod tests {
             "mint": "MintPosition",
             "status": "open"
         })];
-        let active = HashSet::new();
+        let active = HashMap::new();
         assert!(should_forward_position_scoped_market_event(
             &positions,
             &active,
             "MintPosition"
         ));
+    }
+    
+    #[test]
+    fn failing_one_account_does_not_deactivate_other_accounts_for_same_mint() {
+        let mut active = HashMap::new();
+        for account in ["CurveAccount", "PoolAccount", "VaultAccount"] {
+            update_active_subscription_tracking(
+                "market_subscription_subscribed",
+                &json!({"type":"market_subscription_subscribed","data":{
+                    "mint_address":"MintMulti","account_address":account
+                }}),
+                &mut active,
+            );
+        }
+        update_active_subscription_tracking(
+            "market_subscription_failed",
+            &json!({"type":"market_subscription_failed","data":{
+                "mint_address":"MintMulti","account_address":"PoolAccount"
+            }}),
+            &mut active,
+        );
+        assert_eq!(active["MintMulti"].len(), 2);
+        assert!(should_forward_position_scoped_market_event(&[], &active, "MintMulti"));
+    }
+
+    #[test]
+    fn waiting_for_capacity_does_not_remove_existing_active_accounts() {
+        let mut active = HashMap::from([(
+            "MintMulti".to_owned(),
+            HashSet::from(["CurveAccount".to_owned()]),
+        )]);
+        update_active_subscription_tracking(
+            "market_subscription_waiting",
+            &json!({"type":"market_subscription_waiting","data":{
+                "mint_address":"MintMulti","status":"waiting_for_capacity"
+            }}),
+            &mut active,
+        );
+        assert!(should_forward_position_scoped_market_event(&[], &active, "MintMulti"));
     }
 
     #[test]
