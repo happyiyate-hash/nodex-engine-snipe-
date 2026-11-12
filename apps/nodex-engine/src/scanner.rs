@@ -9,7 +9,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_launch_processor(
     mut receiver: broadcast::Receiver<serde_json::Value>,
-    events: broadcast::Sender<serde_json::Value>,
+    events: EventBroadcaster,
     rpc: SolanaRpc,
     security_rpc: Option<SolanaRpc>,
     database: sqlx::SqlitePool,
@@ -80,7 +80,7 @@ pub(super) fn start_launch_processor(
                     let message = last_error.unwrap_or_else(|| {
                         "RPC returned null for this confirmed transaction after retries".to_string()
                     });
-                    let _ = events.send(json!({"type":"diagnostic","data":{
+                    let _ = events.publish(json!({"type":"diagnostic","data":{
                         "severity":"warning","component":"solana_get_transaction",
                         "message":message,"signature":signature,"slot_hint":slot_hint,
                         "retry_exhausted":true,"received_at":chrono::Utc::now().to_rfc3339()
