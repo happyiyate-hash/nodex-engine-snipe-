@@ -1527,10 +1527,25 @@ fn start_token_state_projector(
                         "sub_event": data.get("message").cloned().unwrap_or(json!("Market feed subscription was removed"))
                     }))
                 }
-                // Market-feed state is stored independently from the security/strategy lifecycle.
-                "market_subscription_active" => None,
-                // Requested/waiting subscriptions are transport setup, not active monitoring.
-                "market_subscription_requested" | "market_subscription_waiting" => None,
+                // A provider acknowledgement is the first point at which the token can
+                // truthfully move from Verified to Monitoring. A queued request is not enough.
+                "market_subscription_active" => {
+                    let security_is_verified = current_security.as_ref().is_some_and(|security| {
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
+                            && core_verification_gate_passed(security)
+                    });
+                    security_is_verified.then(|| json!({
+                        "status": "monitoring",
+                        "label": "Monitoring",
+                        "stage": "market_watch",
+                        "sub_event": data.get("message").cloned().unwrap_or(json!("The provider confirmed the live market feed subscription."))
+                    }))
+                }
+                // Requested/waiting/subscribed events are transport setup, not active monitoring.
+                "market_subscription_requested" | "market_subscription_subscribed" | "market_subscription_waiting" | "market_subscription_failed" => None,
                 "paper_entry_evaluation" => Some(paper_entry_activity_patch(&data)),
                 "paper_buy_started" => Some(json!({
                     "status": "executing_buy",
