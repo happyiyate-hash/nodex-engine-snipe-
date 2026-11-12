@@ -3075,7 +3075,14 @@ fn start_launch_processor(
                             "metadata_status": metadata.status
                         },
                         "security": {
-                            "status": "pending",
+                            // A retry is a new scan generation, not a continuation of
+                            // the previous terminal verdict. Clear the old decision before
+                            // publishing the new Scanning state.
+                            "status": "scanning",
+                            "decision": "PENDING",
+                            "verification_status": "PENDING",
+                            "decision_reason": "A new security scan attempt is in progress.",
+                            "scanned_at": null,
                             "scan_cache": {
                                 "status": "scanning",
                                 "attempts": scan_attempts,
