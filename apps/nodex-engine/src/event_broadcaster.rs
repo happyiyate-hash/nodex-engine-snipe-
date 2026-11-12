@@ -28,10 +28,7 @@ impl EventBroadcaster {
     }
 
     /// Publish one runtime event to every active subscriber.
-    pub fn publish(
-        &self,
-        event: Value,
-    ) -> Result<usize, broadcast::error::SendError<Value>> {
+    pub fn publish(&self, event: Value) -> Result<usize, broadcast::error::SendError<Value>> {
         self.sender.send(event)
     }
 
