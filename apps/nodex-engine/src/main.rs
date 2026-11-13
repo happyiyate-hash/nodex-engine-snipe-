@@ -29,8 +29,8 @@ use nodex_solana::{
 };
 use nodex_trading::{
     main_bot::{
-        capture_position_risk, CreatorReputation, LiveMarketActivity,
-        PositionRiskPolicy, SecurityAssessment, TradingBotConfig, TradingBotDecision,
+        capture_position_risk, CreatorReputation, LiveMarketActivity, PositionRiskPolicy,
+        SecurityAssessment, TradingBotConfig, TradingBotDecision,
     },
     paper_wallet::{BuyCostBreakdown, PaperWallet, LAMPORTS_PER_SOL},
 };
@@ -1537,10 +1537,7 @@ fn start_token_state_projector(
                                     price_sol,
                                     &price_snapshot,
                                 );
-                                if trading_decisions::position_exit::evaluate_exit(
-                                    position,
-                                    price_sol,
-                                ) {
+                                if trading_decisions::position_exit::evaluate_exit(position, price_sol) {
                                     triggered_positions.push(position.clone());
                                 }
                                 updated_positions.push(position.clone());
