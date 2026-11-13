@@ -266,11 +266,16 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         .and_then(|value| value.get("activity_score"))
         .and_then(serde_json::Value::as_f64);
 
-    let scanned_at_ms = security
-        .and_then(|value| value.get("scanned_at"))
+    // Use the actual launch-detection timestamp, not the later security-scan
+    // completion time. Otherwise an old token could receive a fresh five-minute
+    // entry window merely because its scan finished late.
+    let detected_at_ms = token_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.data.get("discovery"))
+        .and_then(|discovery| discovery.get("detected_at"))
         .and_then(|value| timestamp_ms_from_value(Some(value)));
     let first_trade_ms = recent_trades.first().map(|trade| trade.timestamp_ms);
-    let seconds_since_launch = scanned_at_ms
+    let seconds_since_launch = detected_at_ms
         .or(first_trade_ms)
         .map(|timestamp| now_ms.saturating_sub(timestamp).max(0) as u64 / 1_000)
         .unwrap_or(0);
