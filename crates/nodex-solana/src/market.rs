@@ -110,7 +110,15 @@ async fn run_market_monitor(
     }
     loop {
         let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
-        match connect_market_stream(&active_url, &events, &mut commands, &mut desired, &mut waiting).await {
+        match connect_market_stream(
+            &active_url,
+            &events,
+            &mut commands,
+            &mut desired,
+            &mut waiting,
+        )
+        .await
+        {
             // A disconnect or provider rejection rotates to the next configured provider endpoint.
             Ok(()) => {
                 reconnect_count = reconnect_count.saturating_add(1);
@@ -582,7 +590,9 @@ where
     S::Error: std::error::Error + Send + Sync + 'static,
 {
     while desired.len().saturating_add(cancelled_pending_count) < MAX_MARKET_SUBSCRIPTIONS {
-        let Some(subscription) = waiting.pop_front() else { break; };
+        let Some(subscription) = waiting.pop_front() else {
+            break;
+        };
         if desired.contains_key(&subscription.account) {
             continue;
         }
@@ -614,15 +624,23 @@ async fn connect_market_stream(
     let mut pumpswap_states = HashMap::<String, PumpSwapLiveState>::new();
 
     for subscription in desired.values() {
-        if pending.len() >= MAX_MARKET_SUBSCRIPTIONS { break; }
+        if pending.len() >= MAX_MARKET_SUBSCRIPTIONS {
+            break;
+        }
         let request_id = next_request_id;
         next_request_id = next_request_id.saturating_add(1);
         send_account_subscribe(&mut sink, request_id, &subscription.account).await?;
         pending.insert(request_id, subscription.clone());
     }
     fill_waiting_market_subscriptions(
-        &mut sink, &mut next_request_id, desired, &mut pending, waiting, 0
-    ).await?;
+        &mut sink,
+        &mut next_request_id,
+        desired,
+        &mut pending,
+        waiting,
+        0,
+    )
+    .await?;
 
     let _ = events.send(json!({
         "type":"market_monitor_status",
