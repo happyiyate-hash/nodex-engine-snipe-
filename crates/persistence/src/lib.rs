@@ -1231,23 +1231,43 @@ mod paper_buy_transaction_tests {
             "status":"open",
             "cost_basis_sol":0.01
         });
-        commit_paper_buy(&pool, &wallet, &buy_ledger, "paper-position-sell", "mint-sell", &open)
-            .await.unwrap();
+        commit_paper_buy(
+            &pool,
+            &wallet,
+            &buy_ledger,
+            "paper-position-sell",
+            "mint-sell",
+            &open,
+        )
+        .await
+        .unwrap();
 
-        let sell_ledger = wallet.settle_full_sale("mint-sell", 10_000_000, 15_000_000).unwrap();
+        let sell_ledger = wallet
+            .settle_full_sale("mint-sell", 10_000_000, 15_000_000)
+            .unwrap();
         let closed = serde_json::json!({
             "position_id":"paper-position-sell",
             "mint_address":"mint-sell",
             "status":"closed",
             "realized_pnl_sol":0.005
         });
-        commit_paper_sell(&pool, &wallet, &sell_ledger, "paper-position-sell", "mint-sell", &closed)
-            .await.unwrap();
+        commit_paper_sell(
+            &pool,
+            &wallet,
+            &sell_ledger,
+            "paper-position-sell",
+            "mint-sell",
+            &closed,
+        )
+        .await
+        .unwrap();
 
         let restored_wallet = load_paper_wallet(&pool).await.unwrap().unwrap();
         let positions = load_portfolio_positions(&pool).await.unwrap();
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(restored_wallet.available_balance_lamports, 105_000_000);
         assert_eq!(restored_wallet.invested_balance_lamports, 0);
         assert_eq!(positions[0]["status"], "closed");
