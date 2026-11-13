@@ -972,10 +972,15 @@ pub(super) fn start_launch_processor(
                         )
                         .await;
                         if let Some(monitor) = monitor {
+                            let early_entry_window_seconds = trading_settings_for_scan
+                                .read()
+                                .await
+                                .maximum_early_entry_age_seconds;
                             crate::market_monitoring::schedule_early_monitor_expiry(
                                 monitor,
                                 scan_mint.clone(),
                                 launch.detected_at.clone(),
+                                early_entry_window_seconds,
                                 approved_database.clone(),
                                 approved_registry.clone(),
                                 scan_events.clone(),
