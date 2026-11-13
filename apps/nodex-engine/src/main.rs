@@ -1,6 +1,7 @@
 mod event_broadcaster;
 mod market_monitoring;
 mod paper_trading;
+mod portfolio;
 mod scanner;
 mod sol_price;
 mod storage;
@@ -36,6 +37,7 @@ use nodex_trading::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sol_price::SolPriceSnapshot;
+use portfolio::calculator::calculate_portfolio_snapshot;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1516,219 +1518,71 @@ fn start_token_state_projector(
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
                         {
-                            // Mark open positions in memory. Never read/write SQLite for every tick.
+                            // Market data owns token prices. This subsystem only values open
+                            // positions from the incoming authoritative market tick.
                             let price_snapshot = sol_price.read().await.clone();
-                            let sol_usd = price_snapshot.price_usd;
-                            let usd_quote_valid = price_snapshot.status == "live"
-                                && sol_usd.is_finite()
-                                && sol_usd > 0.0;
                             let mut positions = portfolio_positions.write().await;
                             let mut triggered_positions = Vec::new();
+                            let mut updated_positions = Vec::new();
                             for position in positions.iter_mut().filter(|position| {
-                                position
-                                    .get("mint_address")
-                                    .and_then(serde_json::Value::as_str)
+                                position.get("mint_address").and_then(serde_json::Value::as_str)
                                     == Some(mint)
                                     && position.get("status").and_then(serde_json::Value::as_str)
                                         == Some("open")
                             }) {
-                                let quantity = position
-                                    .get("token_quantity")
-                                    .or_else(|| position.get("quantity"))
-                                    .and_then(serde_json::Value::as_f64)
-                                    .unwrap_or(0.0);
-                                let cost_basis = position
-                                    .get("cost_basis_sol")
-                                    .or_else(|| position.get("invested_sol"))
-                                    .and_then(serde_json::Value::as_f64)
-                                    .unwrap_or(0.0);
-                                let current_value = quantity * price_sol;
-                                let pnl = current_value - cost_basis;
-                                let entry_sol_usd = position
-                                    .get("entry_sol_price_usd")
-                                    .or_else(|| position.get("sol_usd_at_entry"))
-                                    .and_then(serde_json::Value::as_f64)
-                                    .filter(|value| value.is_finite() && *value > 0.0)
-                                    .unwrap_or(sol_usd);
-                                let invested_usd = position
-                                    .get("initial_investment_usd")
-                                    .or_else(|| position.get("cost_basis_usd"))
-                                    .and_then(serde_json::Value::as_f64)
-                                    .filter(|value| value.is_finite() && *value > 0.0)
-                                    .unwrap_or(cost_basis * entry_sol_usd);
-                                let entry_price_usd = position
-                                    .get("entry_price_usd")
-                                    .and_then(serde_json::Value::as_f64)
-                                    .filter(|value| value.is_finite() && *value > 0.0)
-                                    .unwrap_or_else(|| {
-                                        position
-                                            .get("entry_price_sol")
-                                            .and_then(serde_json::Value::as_f64)
-                                            .unwrap_or(price_sol)
-                                            * entry_sol_usd
-                                    });
-                                let current_price_usd = price_sol * sol_usd;
-                                let current_value_usd = current_value * sol_usd;
-                                let pnl_usd = current_value_usd - invested_usd;
-                                let pnl_pct = if invested_usd > 0.0 {
-                                    pnl_usd / invested_usd * 100.0
-                                } else {
-                                    0.0
-                                };
-                                if let Some(object) = position.as_object_mut() {
-                                    object.insert("current_price_sol".into(), json!(price_sol));
-                                    object.insert("current_value_sol".into(), json!(current_value));
-                                    object.insert("unrealized_pnl_sol".into(), json!(pnl));
-                                    if usd_quote_valid {
-                                        object.insert(
-                                            "current_price_usd".into(),
-                                            json!(current_price_usd),
-                                        );
-                                        object.insert(
-                                            "entry_price_usd".into(),
-                                            json!(entry_price_usd),
-                                        );
-                                        object.insert(
-                                            "initial_investment_usd".into(),
-                                            json!(invested_usd),
-                                        );
-                                        object.insert(
-                                            "current_position_value_usd".into(),
-                                            json!(current_value_usd),
-                                        );
-                                        object.insert("pnl_usd".into(), json!(pnl_usd));
-                                        object.insert("unrealized_pnl_usd".into(), json!(pnl_usd));
-                                        object.insert("pnl_pct".into(), json!(pnl_pct));
-                                        object.insert("unrealized_pnl_pct".into(), json!(pnl_pct));
-                                        object
-                                            .insert("sol_price_usd_at_mark".into(), json!(sol_usd));
-                                        object.insert(
-                                            "sol_price_source_at_mark".into(),
-                                            json!(price_snapshot.source.clone()),
-                                        );
-                                    }
-                                    object.insert(
-                                        "marked_at".into(),
-                                        json!(chrono::Utc::now().to_rfc3339()),
-                                    );
-                                }
-                                // Each open position carries its own frozen exit policy.
-                                // A trigger is recorded once for this position only; it does
-                                // not change or close any other token's position.
-                                let risk_value = position.get("risk_policy").cloned();
-                                let mut exit_was_triggered = false;
-                                if let Some(value) = risk_value {
-                                    if let Ok(mut policy) =
-                                        serde_json::from_value::<PositionRiskPolicy>(value)
-                                    {
-                                        let trigger =
-                                            evaluate_position_exit(&mut policy, price_sol);
-                                        if let Some(object) = position.as_object_mut() {
-                                            object.insert(
-                                                "risk_policy".into(),
-                                                serde_json::to_value(&policy)
-                                                    .unwrap_or(serde_json::Value::Null),
-                                            );
-                                            if let Some(trigger) = trigger {
-                                                if object
-                                                    .get("exit_requested")
-                                                    .and_then(serde_json::Value::as_bool)
-                                                    != Some(true)
-                                                {
-                                                    object.insert(
-                                                        "exit_requested".into(),
-                                                        json!(true),
-                                                    );
-                                                    object.insert(
-                                                        "exit_trigger_reason".into(),
-                                                        json!(trigger.reason),
-                                                    );
-                                                    object.insert(
-                                                        "exit_trigger_price_sol".into(),
-                                                        json!(trigger.trigger_price_sol),
-                                                    );
-                                                    object.insert(
-                                                        "exit_trigger_pnl_pct".into(),
-                                                        json!(trigger.pnl_pct),
-                                                    );
-                                                    object.insert(
-                                                        "exit_triggered_at".into(),
-                                                        json!(chrono::Utc::now().to_rfc3339()),
-                                                    );
-                                                    exit_was_triggered = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if exit_was_triggered {
-                                    triggered_positions.push(position.clone());
-                                    let _ = events.send(json!({
-                                        "type":"paper_exit_triggered",
-                                        "data":position.clone()
-                                    }));
-                                }
-                                let _ = events.send(
-                                    json!({"type":"position_updated","data":position.clone()}),
+                                let triggered = portfolio::position_valuation::mark_position(
+                                    position,
+                                    price_sol,
+                                    &price_snapshot,
                                 );
+                                if triggered {
+                                    triggered_positions.push(position.clone());
+                                }
+                                updated_positions.push(position.clone());
                             }
                             let wallet_snapshot = wallet.read().await.clone();
-                            let portfolio = calculate_portfolio_snapshot(
+                            let portfolio_snapshot = portfolio::calculator::calculate_portfolio_snapshot(
                                 &wallet_snapshot,
                                 &price_snapshot,
                                 &positions,
                             );
                             drop(positions);
+
                             for triggered in triggered_positions {
-                                let position_id = triggered
-                                    .get("position_id")
-                                    .and_then(serde_json::Value::as_str);
-                                let triggered_mint = triggered
-                                    .get("mint_address")
-                                    .and_then(serde_json::Value::as_str);
-                                if let (Some(position_id), Some(triggered_mint)) =
-                                    (position_id, triggered_mint)
-                                {
+                                let position_id = triggered.get("position_id").and_then(serde_json::Value::as_str);
+                                let triggered_mint = triggered.get("mint_address").and_then(serde_json::Value::as_str);
+                                if let (Some(position_id), Some(triggered_mint)) = (position_id, triggered_mint) {
                                     if let Err(error) = nodex_persistence::save_portfolio_position(
-                                        &database,
-                                        position_id,
-                                        triggered_mint,
-                                        "open",
-                                        &triggered,
-                                    )
-                                    .await
-                                    {
+                                        &database, position_id, triggered_mint, "open", &triggered,
+                                    ).await {
                                         tracing::error!(%error, position_id, "Could not persist independent paper exit trigger");
                                     }
                                 }
                             }
-                            if let Err(error) =
-                                nodex_persistence::save_portfolio_snapshot(&database, &portfolio)
-                                    .await
-                            {
+                            for position in &updated_positions {
+                                portfolio::event_publisher::publish_position_update(&events, position);
+                            }
+
+                            if let Err(error) = nodex_persistence::save_portfolio_snapshot(
+                                &database, &portfolio_snapshot,
+                            ).await {
                                 tracing::error!(%error, "Could not persist portfolio snapshot after token price update");
                             } else {
-                                let mut current_profile = profile.write().await;
-                                if let Some(object) = current_profile.as_object_mut() {
-                                    object.insert("paper_wallet".into(), json!(wallet_snapshot));
-                                    object.insert("sol_price".into(), json!(price_snapshot));
-                                    object.insert("portfolio".into(), portfolio.clone());
-                                }
-                                let profile_snapshot = current_profile.clone();
-                                drop(current_profile);
-                                if let Err(error) =
-                                    nodex_persistence::save_profile(&database, &profile_snapshot)
-                                        .await
-                                {
+                                let profile_snapshot = {
+                                    let mut current_profile = profile.write().await;
+                                    if let Some(object) = current_profile.as_object_mut() {
+                                        object.insert("paper_wallet".into(), json!(wallet_snapshot));
+                                        object.insert("sol_price".into(), json!(price_snapshot));
+                                        object.insert("portfolio".into(), portfolio_snapshot.clone());
+                                    }
+                                    current_profile.clone()
+                                };
+                                if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await {
                                     tracing::error!(%error, "Could not persist profile after portfolio price update");
                                 }
-                                let _ = events.send(
-                                    json!({"type":"profile_updated","data":profile_snapshot}),
+                                portfolio::event_publisher::publish_profile_and_summary(
+                                    &events, profile_snapshot, portfolio_snapshot,
                                 );
-                                let _ = events.send(json!({
-                                    "type":"portfolio_summary_updated",
-                                    "data":portfolio
-                                }));
                             }
                         }
                     }
@@ -1737,59 +1591,6 @@ fn start_token_state_projector(
                     tracing::error!(%error, mint_address = mint, "Could not update canonical token state")
                 }
             }
-        }
-    });
-}
-
-/// Recalculate, persist and publish the complete portfolio whenever SOL/USD changes.
-fn start_portfolio_price_projector(
-    mut receiver: broadcast::Receiver<serde_json::Value>,
-    events: broadcast::Sender<serde_json::Value>,
-    database: sqlx::SqlitePool,
-    wallet: Arc<RwLock<PaperWallet>>,
-    sol_price: Arc<RwLock<SolPriceSnapshot>>,
-    positions: Arc<RwLock<Vec<serde_json::Value>>>,
-    profile: Arc<RwLock<serde_json::Value>>,
-) {
-    tokio::spawn(async move {
-        loop {
-            let event = match receiver.recv().await {
-                Ok(event) => event,
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    tracing::warn!(dropped_events=count, "Portfolio price projector lagged; next SOL quote will reconcile the snapshot");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            if event.get("type").and_then(serde_json::Value::as_str) != Some("sol_price_update") {
-                continue;
-            }
-            let wallet_snapshot = wallet.read().await.clone();
-            let price_snapshot = sol_price.read().await.clone();
-            let position_snapshot = positions.read().await.clone();
-            let portfolio =
-                calculate_portfolio_snapshot(&wallet_snapshot, &price_snapshot, &position_snapshot);
-            if let Err(error) =
-                nodex_persistence::save_portfolio_snapshot(&database, &portfolio).await
-            {
-                tracing::error!(%error, "Could not persist portfolio snapshot after SOL price update");
-                continue;
-            }
-            let profile_snapshot = {
-                let mut current = profile.write().await;
-                if let Some(object) = current.as_object_mut() {
-                    object.insert("paper_wallet".into(), json!(wallet_snapshot));
-                    object.insert("sol_price".into(), json!(price_snapshot));
-                    object.insert("portfolio".into(), portfolio.clone());
-                }
-                current.clone()
-            };
-            if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await
-            {
-                tracing::error!(%error, "Could not persist profile after SOL price update");
-            }
-            let _ = events.send(json!({"type":"profile_updated","data":profile_snapshot}));
-            let _ = events.send(json!({"type":"portfolio_summary_updated","data":portfolio}));
         }
     });
 }
@@ -3255,109 +3056,6 @@ async fn sol_price(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!(state.sol_price.read().await.clone()))
 }
 
-/// Build the one authoritative USD portfolio valuation used by REST, SQLite and WebSocket.
-fn calculate_portfolio_snapshot(
-    wallet: &PaperWallet,
-    price: &SolPriceSnapshot,
-    positions: &[serde_json::Value],
-) -> serde_json::Value {
-    let sol_price_usd = if price.price_usd.is_finite() && price.price_usd > 0.0 {
-        price.price_usd
-    } else {
-        0.0
-    };
-    let open_positions: Vec<serde_json::Value> = positions
-        .iter()
-        .filter(|position| {
-            position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-        })
-        .map(|position| {
-            let mut value = position.clone();
-            if let Some(fields) = value.as_object_mut() {
-                if let Some(value_sol) = fields
-                    .get("current_value_sol")
-                    .and_then(serde_json::Value::as_f64)
-                {
-                    fields.insert("current_value_usd".into(), json!(value_sol * sol_price_usd));
-                }
-                if let Some(price_sol) = fields
-                    .get("current_price_sol")
-                    .and_then(serde_json::Value::as_f64)
-                {
-                    fields.insert("current_price_usd".into(), json!(price_sol * sol_price_usd));
-                }
-                fields.insert("sol_price_usd".into(), json!(sol_price_usd));
-            }
-            value
-        })
-        .collect();
-    let sum = |field: &str| -> f64 {
-        open_positions
-            .iter()
-            .filter_map(|position| position.get(field).and_then(serde_json::Value::as_f64))
-            .filter(|value| value.is_finite())
-            .sum()
-    };
-    let positions_value_sol = sum("current_value_sol");
-    let unrealized_pnl_sol = sum("unrealized_pnl_sol");
-    let realized_pnl_sol: f64 = positions
-        .iter()
-        .filter_map(|position| {
-            position
-                .get("realized_pnl_sol")
-                .and_then(serde_json::Value::as_f64)
-        })
-        .filter(|value| value.is_finite())
-        .sum();
-    let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let total_sol = available_sol + positions_value_sol + locked_rent_sol;
-    let starting_sol_price_usd =
-        if wallet.starting_sol_price_usd.is_finite() && wallet.starting_sol_price_usd > 0.0 {
-            wallet.starting_sol_price_usd
-        } else {
-            sol_price_usd
-        };
-    let starting_balance_sol = wallet.starting_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-    let starting_balance_usd = starting_balance_sol * starting_sol_price_usd;
-    let sol_unrealized_pnl_usd =
-        (available_sol + locked_rent_sol) * (sol_price_usd - starting_sol_price_usd);
-    let token_unrealized_pnl_usd = unrealized_pnl_sol * sol_price_usd;
-    let unrealized_pnl_usd = sol_unrealized_pnl_usd + token_unrealized_pnl_usd;
-    let portfolio_balance_usd = total_sol * sol_price_usd;
-    let total_pnl_usd = portfolio_balance_usd - starting_balance_usd;
-    let unrealized_pnl_pct = if starting_balance_usd > 0.0 {
-        unrealized_pnl_usd / starting_balance_usd * 100.0
-    } else {
-        0.0
-    };
-    let total_pnl_pct = if starting_balance_usd > 0.0 {
-        total_pnl_usd / starting_balance_usd * 100.0
-    } else {
-        0.0
-    };
-    json!({
-        "portfolio_balance_sol": total_sol, "total_portfolio_value_sol": total_sol,
-        "portfolio_balance_usd": portfolio_balance_usd, "total_portfolio_value_usd": portfolio_balance_usd,
-        "total_value_usd": portfolio_balance_usd, "available_balance_usd": available_sol * sol_price_usd,
-        "invested_balance_usd": invested_sol * sol_price_usd, "starting_balance_usd": starting_balance_usd,
-        "starting_balance_sol": starting_balance_sol, "starting_sol_price_usd": starting_sol_price_usd,
-        "unrealized_pnl_usd": unrealized_pnl_usd, "sol_unrealized_pnl_usd": sol_unrealized_pnl_usd,
-        "token_unrealized_pnl_usd": token_unrealized_pnl_usd, "unrealized_pnl_sol": unrealized_pnl_sol,
-        "unrealized_pnl_pct": unrealized_pnl_pct, "realized_pnl_usd": realized_pnl_sol * sol_price_usd,
-        "realized_pnl_sol": realized_pnl_sol, "total_pnl_usd": total_pnl_usd,
-        "total_pnl_sol": if sol_price_usd > 0.0 { total_pnl_usd / sol_price_usd } else { 0.0 }, "total_pnl_pct": total_pnl_pct,
-        "positions_value_usd": positions_value_sol * sol_price_usd, "positions_value_sol": positions_value_sol,
-        "locked_rent_value_usd": locked_rent_sol * sol_price_usd, "available_balance_sol": available_sol,
-        "invested_balance_sol": invested_sol, "locked_rent_sol": locked_rent_sol, "total_value_sol": total_sol,
-        "sol_price_usd": sol_price_usd, "sol_price_source": price.source, "sol_price_updated_at": price.updated_at,
-        "sol_price_status": price.status, "price_updated_at": price.updated_at, "price_status": price.status,
-        "position_count": open_positions.len(), "positions": open_positions,
-        "updated_at": chrono::Utc::now().to_rfc3339()
-    })
-}
-
 /// Aggregate paper-account equity in USD: available SOL + open token holdings
 /// + recoverable rent, all valued using the latest SOL/USD quote.
 async fn portfolio_balance(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -4491,7 +4189,7 @@ async fn main() -> anyhow::Result<()> {
         trading_settings_state.clone(),
         database_changes.clone(),
     );
-    start_portfolio_price_projector(
+    portfolio::start_price_projector(
         event_broadcaster.subscribe(),
         events.clone(),
         db.clone(),
