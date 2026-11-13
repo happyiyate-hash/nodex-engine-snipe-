@@ -341,9 +341,14 @@ mod tests {
         let mut wallet = PaperWallet::default();
         wallet.reserve_buy(&costs()).unwrap();
         let available_before = wallet.available_balance_lamports;
-        let ledger = wallet.settle_full_sale("mint-a", 10_000_000, 15_000_000).unwrap();
+        let ledger = wallet
+            .settle_full_sale("mint-a", 10_000_000, 15_000_000)
+            .unwrap();
         assert_eq!(wallet.invested_balance_lamports, 0);
-        assert_eq!(wallet.available_balance_lamports, available_before + 15_000_000);
+        assert_eq!(
+            wallet.available_balance_lamports,
+            available_before + 15_000_000
+        );
         assert_eq!(ledger.kind, "paper_sell_settlement");
         assert_eq!(ledger.reference.as_deref(), Some("mint-a"));
     }
