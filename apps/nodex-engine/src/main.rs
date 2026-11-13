@@ -1537,7 +1537,9 @@ fn start_token_state_projector(
                                     price_sol,
                                     &price_snapshot,
                                 );
-                                if trading_decisions::position_exit::evaluate_exit(position, price_sol) {
+                                if trading_decisions::position_exit::evaluate_exit(
+                                    position, price_sol,
+                                ) {
                                     triggered_positions.push(position.clone());
                                 }
                                 updated_positions.push(position.clone());
