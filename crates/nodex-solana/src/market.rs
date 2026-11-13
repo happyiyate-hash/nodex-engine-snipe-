@@ -651,6 +651,7 @@ async fn connect_market_stream(
                         let (pending_ids, active_ids) = remove_mint_subscriptions(
                             &mint, desired, &mut pending, &mut active,
                         );
+                        waiting.retain(|subscription| subscription.mint != mint);
                         let cancelled_count = pending_ids.len();
                         for request_id in pending_ids {
                             cancelled_pending.insert(request_id);
@@ -678,7 +679,9 @@ async fn connect_market_stream(
                     }
                     MarketCommand::Subscribe(subscription) => subscription,
                 };
-                if desired.contains_key(&subscription.account) {
+                if desired.contains_key(&subscription.account)
+                    || waiting.iter().any(|queued| queued.account == subscription.account)
+                {
                     continue;
                 }
                 if desired.len().saturating_add(cancelled_pending.len()) >= MAX_MARKET_SUBSCRIPTIONS {
