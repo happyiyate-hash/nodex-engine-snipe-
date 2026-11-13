@@ -370,8 +370,8 @@ pub(super) fn start_launch_processor(
                 let scan_control = control.clone();
                 tokio::spawn(async move {
                     if scan_control.read().await.paused {
-                        let retry_after = (chrono::Utc::now() + chrono::Duration::seconds(5))
-                            .to_rfc3339();
+                        let retry_after =
+                            (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339();
                         if let Ok(snapshot) = approved_registry.upsert_patch(
                             &scan_mint,
                             json!({
