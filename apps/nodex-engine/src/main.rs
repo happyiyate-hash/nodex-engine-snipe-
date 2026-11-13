@@ -3498,7 +3498,7 @@ async fn manual_paper_sell(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
-    let pending = {
+    {
         let mut positions = state.portfolio_positions.write().await;
         let position = positions
             .iter_mut()
@@ -3553,13 +3553,19 @@ async fn manual_paper_sell(
         StatusCode::SERVICE_UNAVAILABLE,
         format!("Paper sale is pending settlement and will be retried: {error}")
     ))?;
+    let closed_position = state.portfolio_positions.read().await.iter()
+        .find(|position| position.get("position_id").and_then(serde_json::Value::as_str)
+            == Some(position_id.as_str())
+            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id.as_str()))
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "Closed paper position was not found after settlement.".to_string()))?;
     Ok(Json(json!({
         "status":"sold",
         "position_id":position_id,
         "paper_only":true,
         "execution_mode":"simulated",
         "full_exit":true,
-        "position":pending
+        "position":closed_position
     })))
 }
 
@@ -5058,6 +5064,23 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod scan_progress_state_tests {
     use super::*;
+
+    #[test]
+    fn stale_market_quotes_are_rejected_for_entries_and_exits() {
+        let now = chrono::Utc::now();
+        let fresh = json!({
+            "timestamp_ms": now.timestamp_millis(),
+            "received_at": now.to_rfc3339()
+        });
+        let stale_time = now - chrono::Duration::seconds(45);
+        let stale = json!({
+            "timestamp_ms": stale_time.timestamp_millis(),
+            "received_at": stale_time.to_rfc3339()
+        });
+        assert!(market_quote_is_fresh(&fresh));
+        assert!(!market_quote_is_fresh(&stale));
+        assert!(!market_quote_is_fresh(&json!({"price_sol": 1.0})));
+    }
 
     #[test]
     fn market_updates_reject_older_or_unversioned_slots_after_slot_tracking_starts() {
