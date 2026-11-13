@@ -28,7 +28,7 @@ use nodex_solana::{
 };
 use nodex_trading::{
     main_bot::{
-        capture_position_risk, evaluate_entry, evaluate_position_exit, CreatorReputation,
+        capture_position_risk, evaluate_entry, CreatorReputation,
         LiveMarketActivity, PositionRiskPolicy, SecurityAssessment, TradingBotConfig,
         TradingBotDecision,
     },
