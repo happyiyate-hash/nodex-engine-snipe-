@@ -582,7 +582,10 @@ fn start_terminal_token_cleanup(
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if kind != "token_rejected_cleanup" && kind != "paper_sell_executed" {
+            if kind != "token_rejected_cleanup"
+                && kind != "strategy_rejected_token"
+                && kind != "paper_sell_executed"
+            {
                 continue;
             }
             if kind == "paper_sell_executed"
@@ -619,7 +622,11 @@ fn start_terminal_token_cleanup(
                         == Some(mint.as_str())
                 })
                 .collect::<Vec<_>>();
-            if kind == "token_rejected_cleanup" && !mint_positions.is_empty() {
+            if (kind == "token_rejected_cleanup" || kind == "strategy_rejected_token")
+                && mint_positions.iter().any(|position| {
+                    position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                })
+            {
                 tracing::warn!(mint_address = %mint, "Rejected-token cleanup skipped because paper-position history exists");
                 continue;
             }
@@ -658,7 +665,7 @@ fn start_terminal_token_cleanup(
                         "type":"token_removed",
                         "data":{
                             "mint_address":mint,
-                            "reason":if kind == "paper_sell_executed" { "paper_position_closed" } else { "security_rejected" },
+                            "reason":if kind == "paper_sell_executed" { "paper_position_closed" } else if kind == "strategy_rejected_token" { "strategy_rejected" } else { "security_rejected" },
                             "removed_at":chrono::Utc::now().to_rfc3339()
                         }
                     }));
@@ -1179,7 +1186,7 @@ fn start_token_state_projector(
                 }
                 continue;
             }
-            if kind == "token_rejected_cleanup" {
+            if kind == "token_rejected_cleanup" || kind == "strategy_rejected_token" {
                 trade_observations.remove(mint);
                 last_evaluation_signatures.remove(mint);
                 last_entry_attempts.remove(mint);
