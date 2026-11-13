@@ -3826,14 +3826,14 @@ async fn update_position_risk(
         .maximum_profit_pct
         .unwrap_or(policy.maximum_profit_pct);
 
-    if update.trailing_stop_enabled == Some(true) && !policy.trailing_stop_eligible {
-        return Err((
-            StatusCode::CONFLICT,
-            policy.trailing_stop_eligibility_reason.clone(),
-        ));
-    }
     if let Some(enabled) = update.trailing_stop_enabled {
         policy.trailing_stop_enabled = enabled;
+        // Availability is a user-controlled position setting, not a market-activity gate.
+        if enabled {
+            policy.trailing_stop_eligible = true;
+            policy.trailing_stop_eligibility_reason =
+                "Available: trailing stop can be enabled on any open paper position.".into();
+        }
         if enabled {
             // Start trailing protection immediately from the latest known price
             // (or entry if no valid quote is available). Fixed SL/TP are retained

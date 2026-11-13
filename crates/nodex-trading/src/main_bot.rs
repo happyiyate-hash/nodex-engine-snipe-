@@ -221,7 +221,7 @@ pub fn evaluate_position_exit(
     // Trailing mode is a complete exit-policy switch, not an extra rule layered
     // over the fixed stop-loss/take-profit. It starts protecting from the entry
     // price immediately, then follows the highest observed price.
-    let trailing_mode = policy.trailing_stop_eligible && policy.trailing_stop_enabled;
+    let trailing_mode = policy.trailing_stop_enabled;
     if trailing_mode {
         policy.trailing_stop_active = true;
         policy.highest_price_sol = policy.highest_price_sol.max(policy.entry_price_sol);
