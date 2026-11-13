@@ -2994,12 +2994,19 @@ async fn update_engine_control(
     let mut control = state.control.write().await;
     match request.command.as_str() {
         "start" | "resume" => {
+            // Resume discovery and new entries. Position monitoring is independent
+            // and remains enabled unless explicitly configured otherwise.
             control.paused = false;
             control.token_discovery_enabled = true;
+            control.new_entries_enabled = true;
         }
         "pause" | "stop" => {
+            // Pause only new-token discovery and new paper entries. Do not stop
+            // existing market subscriptions or the open-position exit evaluator.
             control.paused = true;
             control.token_discovery_enabled = false;
+            control.new_entries_enabled = false;
+            control.position_monitoring_enabled = true;
         }
         "configure" => {}
         "set_mode" => match request.mode.as_deref() {
@@ -4078,8 +4085,12 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                     let result = match serde_json::from_str::<ClientCommand>(&text) {
                         Ok(ClientCommand::Pause) => {
                             let mut control = state.control.write().await;
+                            // Stop only the launch/discovery stream and new entries.
+                            // Existing market subscriptions and exit monitoring continue.
                             control.paused = true;
                             control.token_discovery_enabled = false;
+                            control.new_entries_enabled = false;
+                            control.position_monitoring_enabled = true;
                             let snapshot = control.clone();
                             drop(control);
                             state.runtime_enabled.send_replace(false);
@@ -4089,6 +4100,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                             let mut control = state.control.write().await;
                             control.paused = false;
                             control.token_discovery_enabled = true;
+                            control.new_entries_enabled = true;
                             let snapshot = control.clone();
                             drop(control);
                             state.runtime_enabled.send_replace(true);
