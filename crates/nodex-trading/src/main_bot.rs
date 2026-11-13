@@ -95,7 +95,7 @@ fn default_trailing_stop_callback_pct() -> f64 {
     10.0
 }
 fn default_maximum_profit_pct() -> f64 {
-    500.0
+    0.0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,8 +155,8 @@ pub fn capture_position_risk(
         trailing_stop_callback_pct: config.trailing_stop_callback_pct,
         trailing_stop_active: false,
         maximum_profit_pct: default_maximum_profit_pct(),
-        maximum_profit_price_sol: entry_price_sol * 6.0,
-        maximum_profit_price_usd: entry_price_usd * 6.0,
+        maximum_profit_price_sol: 0.0,
+        maximum_profit_price_usd: 0.0,
         trailing_stop_price_sol: 0.0,
         highest_price_sol: entry_price_sol,
         captured_at: chrono::Utc::now().to_rfc3339(),
