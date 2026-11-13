@@ -971,6 +971,15 @@ pub(super) fn start_launch_processor(
                             &scan_events,
                         )
                         .await;
+                        if let Some(monitor) = monitor {
+                            crate::market_monitoring::schedule_early_monitor_expiry(
+                                monitor,
+                                scan_mint.clone(),
+                                approved_database.clone(),
+                                approved_registry.clone(),
+                                scan_events.clone(),
+                            );
+                        }
                     }
                     inflight_mints_for_scan.lock().await.remove(&scan_mint);
                 });
