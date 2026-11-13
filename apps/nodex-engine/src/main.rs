@@ -1669,10 +1669,12 @@ fn start_token_state_projector(
                                                     {
                                                         None
                                                     } else {
-                                                        if let Some(object) = position.as_object_mut()
+                                                        if let Some(object) =
+                                                            position.as_object_mut()
                                                         {
                                                             object.insert(
-                                                                "settlement_failure_notified".into(),
+                                                                "settlement_failure_notified"
+                                                                    .into(),
                                                                 json!(true),
                                                             );
                                                         }
