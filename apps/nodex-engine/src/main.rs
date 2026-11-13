@@ -1649,26 +1649,53 @@ fn start_token_state_projector(
                                         tracing::error!(%error, position_id, "Paper exit settlement failed; position remains flagged for retry");
                                         let failed_snapshot = {
                                             let mut positions = portfolio_positions.write().await;
-                                            positions.iter_mut().find(|position| {
-                                                position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id)
-                                                    || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id)
-                                            }).and_then(|position| {
-                                                if position.get("settlement_failure_notified").and_then(serde_json::Value::as_bool) == Some(true) {
-                                                    None
-                                                } else {
-                                                    if let Some(object) = position.as_object_mut() {
-                                                        object.insert("settlement_failure_notified".into(), json!(true));
+                                            positions
+                                                .iter_mut()
+                                                .find(|position| {
+                                                    position
+                                                        .get("position_id")
+                                                        .and_then(serde_json::Value::as_str)
+                                                        == Some(position_id)
+                                                        || position
+                                                            .get("id")
+                                                            .and_then(serde_json::Value::as_str)
+                                                            == Some(position_id)
+                                                })
+                                                .and_then(|position| {
+                                                    if position
+                                                        .get("settlement_failure_notified")
+                                                        .and_then(serde_json::Value::as_bool)
+                                                        == Some(true)
+                                                    {
+                                                        None
+                                                    } else {
+                                                        if let Some(object) = position.as_object_mut()
+                                                        {
+                                                            object.insert(
+                                                                "settlement_failure_notified".into(),
+                                                                json!(true),
+                                                            );
+                                                        }
+                                                        Some(position.clone())
                                                     }
-                                                    Some(position.clone())
-                                                }
-                                            })
+                                                })
                                         };
                                         if let Some(failed) = failed_snapshot {
-                                            let mint = failed.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
+                                            let mint = failed
+                                                .get("mint_address")
+                                                .and_then(serde_json::Value::as_str)
+                                                .unwrap_or_default();
                                             if !mint.is_empty() {
-                                                if let Err(persist_error) = nodex_persistence::save_portfolio_position(
-                                                    &database, position_id, mint, "open", &failed
-                                                ).await {
+                                                if let Err(persist_error) =
+                                                    nodex_persistence::save_portfolio_position(
+                                                        &database,
+                                                        position_id,
+                                                        mint,
+                                                        "open",
+                                                        &failed,
+                                                    )
+                                                    .await
+                                                {
                                                     tracing::warn!(%persist_error, position_id, "Could not persist paper exit failure notification marker");
                                                 }
                                             }
@@ -3568,7 +3595,8 @@ async fn update_position_risk(
                 .and_then(serde_json::Value::as_f64)
                 .filter(|price| price.is_finite() && *price > 0.0)
                 .unwrap_or(policy.entry_price_sol);
-            policy.highest_price_sol = policy.highest_price_sol
+            policy.highest_price_sol = policy
+                .highest_price_sol
                 .max(policy.entry_price_sol)
                 .max(latest_price);
             policy.trailing_stop_active = true;
