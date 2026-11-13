@@ -665,7 +665,7 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert!(result.reasons.iter().any(|reason| reason.contains("sells")));
+        assert!(result.reasons.iter().any(|reason| reason.contains("buy/sell ratio")));
     }
 
     #[test]
@@ -793,9 +793,9 @@ mod tests {
             0,
         );
         assert_eq!(waiting.decision, TradingBotDecision::Wait);
-        assert_eq!(waiting.minimum_distinct_buyers, 5);
+        assert_eq!(waiting.minimum_distinct_buyers, 10);
 
-        live.distinct_buyers_5m = 5;
+        live.distinct_buyers_5m = 10;
         let eligible = evaluate_entry(
             &TradingBotConfig::default(),
             &unknown_creator,
