@@ -806,5 +806,4 @@ mod tests {
         assert!(policy.trailing_stop_active);
         assert!((policy.trailing_stop_price_sol - 0.8).abs() < 1e-9);
     }
-
 }
