@@ -84,13 +84,28 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         .filter(|trade| now_ms.saturating_sub(trade.timestamp_ms) <= 300_000)
         .collect::<Vec<_>>();
     let mut buyers = HashSet::new();
+    let mut buyers_30s = HashSet::new();
     let mut buy_volume_sol = 0.0;
     let mut total_volume_sol = 0.0;
+    let mut buy_volume_30s_sol = 0.0;
+    let mut total_volume_30s_sol = 0.0;
     let mut buy_count = 0_u64;
     let mut sell_count_5m = 0_u64;
+    let mut buy_count_30s = 0_u64;
+    let mut sell_count_30s = 0_u64;
     for trade in &recent_trades {
         let amount_sol = trade.sol_amount_lamports as f64 / LAMPORTS_PER_SOL as f64;
         total_volume_sol += amount_sol;
+        if now_ms.saturating_sub(trade.timestamp_ms) <= 30_000 {
+            total_volume_30s_sol += amount_sol;
+            if trade.is_buy {
+                buy_volume_30s_sol += amount_sol;
+                buy_count_30s = buy_count_30s.saturating_add(1);
+                buyers_30s.insert(trade.trader.as_str());
+            } else {
+                sell_count_30s = sell_count_30s.saturating_add(1);
+            }
+        }
         if trade.is_buy {
             buy_volume_sol += amount_sol;
             buy_count = buy_count.saturating_add(1);
@@ -137,6 +152,16 @@ pub(super) async fn evaluate_and_execute_paper_entry(
     } else {
         0.0
     };
+    let buy_volume_30s_usd = if sol_quote_valid {
+        buy_volume_30s_sol * sol_quote.price_usd
+    } else {
+        0.0
+    };
+    let total_volume_30s_usd = if sol_quote_valid {
+        total_volume_30s_sol * sol_quote.price_usd
+    } else {
+        0.0
+    };
     let estimated_slippage_pct = reserve_sol
         .filter(|_| config.position_size_sol.is_finite() && config.position_size_sol > 0.0)
         .map(|reserve| {
@@ -177,6 +202,9 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         && rugcheck_available
         && rugcheck_score.is_some_and(|score| score.is_finite() && (0.0..=20.0).contains(&score));
     let holder_distribution = security.and_then(|value| value.get("holder_distribution"));
+    let observed_holder_count = holder_distribution
+        .and_then(|value| json_u64(value.get("resolved_accounts")))
+        .and_then(|value| usize::try_from(value).ok());
     let top10_concentration_pct = holder_distribution
         .filter(|value| {
             json_u64(value.get("resolved_accounts")).unwrap_or(0) >= 10
@@ -260,6 +288,27 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         known_rug_creator,
         preferred_owner,
     };
+    let identity = token_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.data.get("identity"));
+    let supply_raw = identity
+        .and_then(|value| value.get("total_supply_raw"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|raw| raw.parse::<f64>().ok())
+                .or_else(|| value.as_f64())
+        })
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let decimals = identity
+        .and_then(|value| value.get("decimals"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .min(18) as i32;
+    let market_cap_usd = price_usd
+        .zip(supply_raw)
+        .map(|(price, raw_supply)| price * (raw_supply / 10_f64.powi(decimals)))
+        .filter(|value| value.is_finite() && *value > 0.0);
     let market_assessment = LiveMarketActivity {
         price_usd,
         liquidity_usd,
@@ -278,6 +327,13 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         confirmed_trade_events: recent_trades.len() as u64,
         buy_pressure_pct: (total_volume_5m_usd > 0.0)
             .then_some(buy_volume_5m_usd / total_volume_5m_usd * 100.0),
+        distinct_buyers_30s: buyers_30s.len(),
+        buy_count_30s,
+        sell_count_30s,
+        buy_pressure_30s_pct: (total_volume_30s_usd > 0.0)
+            .then_some(buy_volume_30s_usd / total_volume_30s_usd * 100.0),
+        market_cap_usd,
+        observed_holder_count,
     };
 
     let open_positions = portfolio_positions.read().await;
@@ -343,7 +399,7 @@ pub(super) async fn evaluate_and_execute_paper_entry(
     }
     if last_entry_attempts
         .get(mint)
-        .is_some_and(|last_attempt| last_attempt.elapsed() < Duration::from_secs(30))
+        .is_some_and(|last_attempt| last_attempt.elapsed() < Duration::from_millis(750))
     {
         return;
     }
