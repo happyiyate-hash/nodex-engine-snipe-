@@ -112,6 +112,9 @@ struct TradingSettings {
     max_slippage_pct: f64,
     stop_loss_pct: f64,
     take_profit_pct: f64,
+    /// Optional hard profit cap for trailing-stop positions; 0 disables it.
+    #[serde(default)]
+    maximum_profit_pct: f64,
     min_5m_buy_volume_usd: f64,
     max_top10_holder_concentration_pct: f64,
     auto_buy_enabled: bool,
@@ -164,6 +167,7 @@ impl Default for TradingSettings {
             max_slippage_pct: 10.0,
             stop_loss_pct: 15.0,
             take_profit_pct: 100.0,
+            maximum_profit_pct: 0.0,
             min_5m_buy_volume_usd: 1_000.0,
             max_top10_holder_concentration_pct: 20.0,
             auto_buy_enabled: true,
@@ -238,6 +242,7 @@ impl TradingSettings {
             ("max_slippage_pct", self.max_slippage_pct),
             ("stop_loss_pct", self.stop_loss_pct),
             ("take_profit_pct", self.take_profit_pct),
+            ("maximum_profit_pct", self.maximum_profit_pct),
             ("min_5m_buy_volume_usd", self.min_5m_buy_volume_usd),
             (
                 "max_top10_holder_concentration_pct",
@@ -279,6 +284,11 @@ impl TradingSettings {
         }
         if self.take_profit_pct > 1_000.0 {
             return Err("take_profit_pct must not exceed 1000.".into());
+        }
+        if self.maximum_profit_pct > 0.0
+            && !(100.0..=100_000.0).contains(&self.maximum_profit_pct)
+        {
+            return Err("maximum_profit_pct must be 0 (disabled) or between 100 and 100000.".into());
         }
         if self.minimum_30s_buy_pressure_pct > 100.0
             || self.minimum_30s_buy_sell_ratio > 100.0
@@ -330,6 +340,7 @@ fn main_bot_config_from_settings(
         position_size_usd,
         stop_loss_pct: settings.stop_loss_pct,
         take_profit_pct: settings.take_profit_pct,
+        maximum_profit_pct: settings.maximum_profit_pct,
         trailing_stop_enabled: settings.trailing_stop_enabled,
         trailing_stop_callback_pct: settings.trailing_stop_callback_pct,
         trailing_activation_profit_pct: settings.trailing_activation_profit_pct,
@@ -5510,6 +5521,7 @@ mod main_bot_config_tests {
             max_slippage_pct: 10.0,
             stop_loss_pct: 15.0,
             take_profit_pct: 100.0,
+            maximum_profit_pct: 0.0,
             min_5m_buy_volume_usd: 1_000.0,
             max_top10_holder_concentration_pct: 20.0,
             auto_buy_enabled: true,
