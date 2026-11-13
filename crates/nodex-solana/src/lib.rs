@@ -744,8 +744,7 @@ impl SolanaRpc {
                 .await,
             )
         };
-        let (rugcheck, holder_result) =
-            tokio::join!(self.get_rugcheck_summary(mint), holder_scan);
+        let (rugcheck, holder_result) = tokio::join!(self.get_rugcheck_summary(mint), holder_scan);
         report.rugcheck = rugcheck;
         if let Some(holder_result) = holder_result {
             match holder_result {
