@@ -55,7 +55,8 @@ pub(super) fn start_price_projector(
                 }
                 current.clone()
             };
-            if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await {
+            if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await
+            {
                 tracing::error!(%error, "Could not persist profile after SOL price update");
             }
             event_publisher::publish_profile_and_summary(&events, profile_snapshot, portfolio);
