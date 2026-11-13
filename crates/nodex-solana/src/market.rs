@@ -678,7 +678,24 @@ async fn connect_market_stream(
                 let request_id = next_request_id;
                 next_request_id = next_request_id.saturating_add(1);
                 send_account_subscribe(&mut sink, request_id, &subscription.account).await?;
-                pending.insert(request_id, subscription);
+                pending.insert(request_id, subscription.clone());
+                info!(
+                    mint_address = %subscription.mint,
+                    desired_accounts = desired.len(),
+                    pending_subscriptions = pending.len(),
+                    "Queued market account subscription"
+                );
+                let _ = events.send(json!({
+                    "type":"market_monitor_status",
+                    "data":{
+                        "connected":true,
+                        "desired_accounts":desired.len(),
+                        "pending_subscriptions":pending.len(),
+                        "active_subscriptions":active.len(),
+                        "provider":"solana_account_subscribe",
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
+                }));
             }
             message = stream.next() => {
                 let Some(message) = message else {
@@ -700,6 +717,12 @@ async fn connect_market_stream(
                             if let Some(subscription) = pending.remove(&request_id) {
                                 if let Some(subscription_id) = value.get("result").and_then(Value::as_u64) {
                                     active.insert(subscription_id, subscription.clone());
+                                    info!(
+                                        mint_address = %subscription.mint,
+                                        account_address = %subscription.account,
+                                        active_subscriptions = active.len(),
+                                        "Market account subscription acknowledged"
+                                    );
                                     let _ = events.send(json!({
                                         "type":"market_subscription_subscribed",
                                         "data":{
@@ -712,9 +735,26 @@ async fn connect_market_stream(
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }
                                     }));
+                                    let _ = events.send(json!({
+                                        "type":"market_monitor_status",
+                                        "data":{
+                                            "connected":true,
+                                            "desired_accounts":desired.len(),
+                                            "pending_subscriptions":pending.len(),
+                                            "active_subscriptions":active.len(),
+                                            "provider":"solana_account_subscribe",
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }
+                                    }));
                                 } else {
                                     let error = value.get("error").cloned().unwrap_or(Value::Null);
                                     let reason = format!("Solana provider rejected the market account subscription: {error}");
+                                    warn!(
+                                        mint_address = %subscription.mint,
+                                        account_address = %subscription.account,
+                                        provider_error = %error,
+                                        "Market account subscription rejected"
+                                    );
                                     let _ = events.send(json!({
                                         "type":"market_subscription_failed",
                                         "data":{
@@ -725,6 +765,17 @@ async fn connect_market_stream(
                                             "reason":reason,
                                             "message":reason,
                                             "provider_error":error,
+                                            "received_at":chrono::Utc::now().to_rfc3339()
+                                        }
+                                    }));
+                                    let _ = events.send(json!({
+                                        "type":"market_monitor_status",
+                                        "data":{
+                                            "connected":true,
+                                            "desired_accounts":desired.len(),
+                                            "pending_subscriptions":pending.len(),
+                                            "active_subscriptions":active.len(),
+                                            "provider":"solana_account_subscribe",
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }
                                     }));
