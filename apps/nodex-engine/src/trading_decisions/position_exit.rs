@@ -3,6 +3,33 @@
 use nodex_trading::main_bot::{evaluate_position_exit, PositionRiskPolicy};
 use serde_json::{json, Value};
 
+/// Classify whether a position has the measured, orderly market behaviour
+/// needed for an optional trailing stop. Missing evidence fails closed.
+pub(crate) fn assess_trailing_stop_eligibility(evidence: &Value) -> (bool, String) {
+    let liquidity = evidence.get("liquidity_usd").and_then(Value::as_f64);
+    if !liquidity.is_some_and(|value| value.is_finite() && value >= 3_000.0) {
+        return (false, "Trailing stop unavailable: confirmed liquidity is below $3,000 or unavailable.".into());
+    }
+    let pressure = evidence.get("buy_pressure_pct").and_then(Value::as_f64);
+    if !pressure.is_some_and(|value| value.is_finite() && value >= 55.0) {
+        return (false, "Trailing stop unavailable: confirmed buy pressure is below 55% or unavailable.".into());
+    }
+    let buys = evidence.get("buy_count_5m").and_then(Value::as_u64).unwrap_or(0);
+    let sells = evidence.get("sell_count_5m").and_then(Value::as_u64).unwrap_or(0);
+    if buys < 2 || buys < sells {
+        return (false, "Trailing stop unavailable: recent confirmed buys do not sufficiently outweigh sells.".into());
+    }
+    let change_1m = evidence.get("price_change_1m_pct").and_then(Value::as_f64);
+    if !change_1m.is_some_and(|value| value.is_finite() && (-20.0..=12.0).contains(&value)) {
+        return (false, "Trailing stop unavailable: one-minute price behaviour is missing or too volatile.".into());
+    }
+    let change_5m = evidence.get("price_change_5m_pct").and_then(Value::as_f64);
+    if !change_5m.is_some_and(|value| value.is_finite() && (-40.0..=35.0).contains(&value)) {
+        return (false, "Trailing stop unavailable: five-minute price behaviour is missing or too volatile.".into());
+    }
+    (true, "Eligible: liquidity, confirmed buy pressure and recent price movement meet the orderly-trend criteria.".into())
+}
+
 /// Evaluate an open paper position using its already-computed P&L and risk policy.
 /// Returns true only when this evaluation creates a new exit request.
 pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
@@ -32,6 +59,16 @@ pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
         "risk_policy".into(),
         serde_json::to_value(&policy).unwrap_or(Value::Null),
     );
+    object.insert("trailing_stop_eligible".into(), json!(policy.trailing_stop_eligible));
+    object.insert("trailing_stop_eligibility_reason".into(), json!(policy.trailing_stop_eligibility_reason));
+    object.insert("trailing_stop_enabled".into(), json!(policy.trailing_stop_enabled));
+    object.insert("trailing_activation_profit_pct".into(), json!(policy.trailing_activation_profit_pct));
+    object.insert("trailing_stop_callback_pct".into(), json!(policy.trailing_stop_callback_pct));
+    object.insert("trailing_stop_active".into(), json!(policy.trailing_stop_active));
+    object.insert("trailing_stop_price_sol".into(), json!(policy.trailing_stop_price_sol));
+    object.insert("maximum_profit_pct".into(), json!(policy.maximum_profit_pct));
+    object.insert("maximum_profit_price_sol".into(), json!(policy.maximum_profit_price_sol));
+    object.insert("highest_price_sol".into(), json!(policy.highest_price_sol));
     let Some(trigger) = trigger else {
         return false;
     };
@@ -58,6 +95,34 @@ pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trailing_stop_eligibility_requires_confirmed_orderly_market_evidence() {
+        let evidence = json!({
+            "liquidity_usd": 8000.0,
+            "buy_pressure_pct": 62.0,
+            "buy_count_5m": 8,
+            "sell_count_5m": 3,
+            "price_change_1m_pct": 4.0,
+            "price_change_5m_pct": 18.0
+        });
+        assert!(assess_trailing_stop_eligibility(&evidence).0);
+    }
+
+    #[test]
+    fn explosive_or_incomplete_market_evidence_is_not_trailing_eligible() {
+        let explosive = json!({
+            "liquidity_usd": 8000.0,
+            "buy_pressure_pct": 80.0,
+            "buy_count_5m": 9,
+            "sell_count_5m": 1,
+            "price_change_1m_pct": 18.0,
+            "price_change_5m_pct": 30.0
+        });
+        let incomplete = json!({"liquidity_usd":8000.0});
+        assert!(!assess_trailing_stop_eligibility(&explosive).0);
+        assert!(!assess_trailing_stop_eligibility(&incomplete).0);
+    }
 
     #[test]
     fn exit_decision_requires_a_fresh_portfolio_valuation() {
