@@ -54,6 +54,75 @@ pub(super) async fn request_pump_fun_subscription(
     }
 }
 
+/// Keep an untraded launch under close observation for five minutes. If it
+/// becomes an open paper position, retain its subscription until the position
+/// closes; otherwise release the account subscription and mark monitoring expired.
+pub(super) fn schedule_early_monitor_expiry(
+    monitor: MarketMonitor,
+    mint: String,
+    database: sqlx::SqlitePool,
+    token_registry: TokenRegistry,
+    events: crate::event_broadcaster::EventBroadcaster,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        loop {
+            let open_positions = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ? AND status = 'open'",
+            )
+            .bind(&mint)
+            .fetch_one(&database)
+            .await;
+            match open_positions {
+                Ok(count) if count > 0 => {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, mint_address = %mint, "Could not determine whether early token monitoring can expire");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+            }
+
+            if let Err(error) = monitor.unsubscribe_mint(&mint).await {
+                tracing::warn!(%error, mint_address = %mint, "Could not release expired token market subscription");
+                return;
+            }
+            if let Ok(snapshot) = token_registry.upsert_patch(
+                &mint,
+                json!({
+                    "market": {
+                        "status": "expired",
+                        "message": "Five-minute early-entry observation window ended; no open paper position requires continued monitoring."
+                    },
+                    "activity": {
+                        "status": "monitoring_expired",
+                        "stage": "complete",
+                        "message": "Early-entry monitoring ended after five minutes."
+                    }
+                }),
+            ) {
+                if let Err(error) = nodex_persistence::save_token_state(&database, &snapshot).await {
+                    tracing::warn!(%error, mint_address = %mint, "Could not persist expired market-monitoring state");
+                }
+                let _ = events.publish(json!({
+                    "type": "market_monitoring_expired",
+                    "data": {
+                        "mint_address": mint,
+                        "reason": "early_entry_window_expired",
+                        "observation_seconds": 300,
+                        "received_at": chrono::Utc::now().to_rfc3339()
+                    }
+                }));
+                let _ = events.publish(json!({"type":"token_state_updated","data":snapshot}));
+            }
+            break;
+        }
+    });
+}
+
 use nodex_solana::start_market_monitor;
 use serde_json::json;
 
