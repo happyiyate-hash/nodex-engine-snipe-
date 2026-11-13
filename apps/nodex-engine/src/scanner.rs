@@ -1132,10 +1132,12 @@ pub(super) fn start_launch_processor(
                 .get("logs")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|logs| {
-                    logs.iter().filter_map(serde_json::Value::as_str).any(|line| {
-                        line.contains("Instruction: Create")
-                            || line.contains("Instruction: CreateV2")
-                    })
+                    logs.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|line| {
+                            line.contains("Instruction: Create")
+                                || line.contains("Instruction: CreateV2")
+                        })
                 });
             if !has_create_instruction {
                 continue;
