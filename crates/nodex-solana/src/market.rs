@@ -786,12 +786,12 @@ async fn connect_market_stream(
                                             "active_subscriptions":active.len(),
                                             "provider":"solana_account_subscribe",
                                             "received_at":chrono::Utc::now().to_rfc3339()
-                                            fill_waiting_market_subscriptions(
+                                        }
+                                    }));
+                                    fill_waiting_market_subscriptions(
                                         &mut sink, &mut next_request_id, desired, &mut pending, waiting,
                                         cancelled_pending.len()
                                     ).await?;
-                                }
-                                    }));
                                 } else {
                                     let error = value.get("error").cloned().unwrap_or(Value::Null);
                                     desired.remove(&subscription.account);
