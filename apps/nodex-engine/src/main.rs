@@ -3520,7 +3520,21 @@ async fn update_position_risk(
     }
     if let Some(enabled) = update.trailing_stop_enabled {
         policy.trailing_stop_enabled = enabled;
-        if !enabled {
+        if enabled {
+            // Start trailing protection immediately from the latest known price
+            // (or entry if no valid quote is available). Fixed SL/TP are retained
+            // as saved settings but are inactive while trailing mode is enabled.
+            let latest_price = updated
+                .get("current_price_sol")
+                .or_else(|| updated.get("price_sol"))
+                .and_then(serde_json::Value::as_f64)
+                .filter(|price| price.is_finite() && *price > 0.0)
+                .unwrap_or(policy.entry_price_sol);
+            policy.highest_price_sol = policy.highest_price_sol
+                .max(policy.entry_price_sol)
+                .max(latest_price);
+            policy.trailing_stop_active = true;
+        } else {
             policy.trailing_stop_active = false;
         }
     }
