@@ -87,3 +87,22 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("command_rejected")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paper_exit_lifecycle_events_are_forwarded_to_the_frontend() {
+        for event_type in [
+            "paper_exit_triggered",
+            "paper_sell_executed",
+            "paper_sell_failed",
+        ] {
+            assert!(
+                is_frontend_event(&serde_json::json!({"type":event_type,"data":{}})),
+                "{event_type} must be forwarded"
+            );
+        }
+    }
+}
