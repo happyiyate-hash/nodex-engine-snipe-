@@ -740,6 +740,22 @@ pub(super) fn start_launch_processor(
                                 "verification_gate_passed":verification_gate_passed,
                                 "received_at":chrono::Utc::now().to_rfc3339()
                             }}));
+                            // A definitive rejection or terminal unverified result is
+                            // isolated and removed from monitoring/storage. Temporary
+                            // scanning states are never cleaned by this event.
+                            if decision.eq_ignore_ascii_case("REJECTED")
+                                || decision.eq_ignore_ascii_case("UNVERIFIED")
+                            {
+                                let _ = scan_events.publish(json!({
+                                    "type":"token_rejected_cleanup",
+                                    "data":{
+                                        "mint_address":scan_mint,
+                                        "decision":decision,
+                                        "reason":report.decision_reason,
+                                        "received_at":chrono::Utc::now().to_rfc3339()
+                                    }
+                                }));
+                            }
                             // Record a durable terminal/intermediate scan state independently of
                             // the security verdict. A completed diagnostic scan is cached briefly,
                             // never promoted to verified; rate limits receive a shorter retry window.
@@ -1108,6 +1124,23 @@ pub(super) fn start_launch_processor(
             if !value.get("err").is_some_and(serde_json::Value::is_null) {
                 continue;
             }
+            // Pump.fun's logsSubscribe stream includes every buy/sell as well as
+            // launches. Only enqueue transactions whose program logs show a Create
+            // instruction; the worker still performs full transaction decoding and
+            // validates the actual instruction/program before accepting a launch.
+            let has_create_instruction = value
+                .get("logs")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|logs| {
+                    logs.iter().filter_map(serde_json::Value::as_str).any(|line| {
+                        line.contains("Instruction: Create")
+                            || line.contains("Instruction: CreateV2")
+                    })
+                });
+            if !has_create_instruction {
+                continue;
+            }
+
             let Some(signature) = value
                 .get("signature")
                 .and_then(serde_json::Value::as_str)
