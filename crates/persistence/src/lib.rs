@@ -750,7 +750,7 @@ pub async fn delete_inactive_token_history(
     for mint in candidate_mints {
         let has_position: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ?")
-               .bind(mint)
+                .bind(mint)
                 .fetch_one(&mut *transaction)
                 .await?;
         if has_position > 0 {
@@ -787,11 +787,11 @@ pub async fn delete_token_market_history(pool: &SqlitePool, mint: &str) -> Resul
         .execute(&mut *transaction)
         .await?;
     sqlx::query("DELETE FROM token_launches WHERE mint_address = ?")
-         .bind(mint)
+        .bind(mint)
         .execute(&mut *transaction)
         .await?;
     sqlx::query("DELETE FROM chart_candles WHERE mint_address = ?")
-         .bind(mint)
+        .bind(mint)
         .execute(&mut *transaction)
         .await?;
     let pattern = format!("%{}%", mint);
