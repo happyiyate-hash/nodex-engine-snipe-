@@ -60,12 +60,18 @@ pub(super) async fn request_pump_fun_subscription(
 pub(super) fn schedule_early_monitor_expiry(
     monitor: MarketMonitor,
     mint: String,
+    detected_at: chrono::DateTime<chrono::Utc>,
     database: sqlx::SqlitePool,
     token_registry: TokenRegistry,
     events: crate::event_broadcaster::EventBroadcaster,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(300)).await;
+        let elapsed = chrono::Utc::now()
+            .signed_duration_since(detected_at)
+            .num_seconds()
+            .max(0) as u64;
+        let remaining = 300_u64.saturating_sub(elapsed);
+        tokio::time::sleep(Duration::from_secs(remaining)).await;
         loop {
             let open_positions = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ? AND status = 'open'",
