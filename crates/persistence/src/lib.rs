@@ -783,11 +783,13 @@ pub async fn delete_inactive_token_history(
 pub async fn delete_token_market_history(pool: &SqlitePool, mint: &str) -> Result<()> {
     let mut transaction = pool.begin().await?;
     sqlx::query("DELETE FROM token_states WHERE mint_address = ?")
-         .bind(mint)
+        .bind(mint)
         .execute(&mut *transaction)
         .await?;
     sqlx::query("DELETE FROM token_launches WHERE mint_address = ?")
-        .bind(mint).execute(&mut *transaction).await?;
+         .bind(mint)
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query("DELETE FROM chart_candles WHERE mint_address = ?")
         .bind(mint).execute(&mut *transaction).await?;
     let pattern = format!("%{}%", mint);
@@ -796,7 +798,9 @@ pub async fn delete_token_market_history(pool: &SqlitePool, mint: &str) -> Resul
         .execute(&mut *transaction)
         .await?;
     sqlx::query("DELETE FROM engine_activity_logs WHERE activity_json LIKE ?")
-        .bind(&pattern).execute(&mut *transaction).await?;
+         .bind(&pattern)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
     Ok(())
 }
