@@ -391,6 +391,10 @@ pub(super) fn start_launch_processor(
                                 &snapshot,
                             )
                             .await;
+                            let _ = scan_events.publish(json!({
+                                "type": "token_state_updated",
+                                "data": snapshot
+                            }));
                         }
                         inflight_mints_for_scan.lock().await.remove(&scan_mint);
                         return;
