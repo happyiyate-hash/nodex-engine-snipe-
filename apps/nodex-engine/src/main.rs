@@ -743,6 +743,21 @@ fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
     })
 }
 
+fn should_emit_monitoring_transition(
+    previous_activity: Option<&serde_json::Value>,
+    next_activity: Option<&serde_json::Value>,
+) -> bool {
+    let was_monitoring = previous_activity
+        .and_then(|activity| activity.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("monitoring");
+    let becomes_monitoring = next_activity
+        .and_then(|activity| activity.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("monitoring");
+    !was_monitoring && becomes_monitoring
+}
+
 fn market_quote_is_fresh(data: &serde_json::Value) -> bool {
     const MAX_QUOTE_AGE_MS: i64 = 30_000;
     let timestamp_ms = data
@@ -1557,8 +1572,39 @@ fn start_token_state_projector(
             if let Some(activity) = activity_patch {
                 domain_patch["activity"] = activity;
             }
+            // Emit one explicit lifecycle event when the first valid market quote
+            // moves a fully verified token from Verified into Monitoring. The
+            // browser list receives this globally without subscribing to each mint.
+            let monitoring_transition = kind == "market_price_update"
+                && should_emit_monitoring_transition(
+                    current_activity.as_ref(),
+                    domain_patch.get("activity"),
+                );
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
+                    if monitoring_transition {
+                        let activity = snapshot
+                            .data
+                            .get("activity")
+                            .cloned()
+                            .unwrap_or_else(|| json!({
+                                "status":"monitoring",
+                                "label":"Monitoring",
+                                "stage":"market_watch",
+                                "sub_event":"Monitoring market activity"
+                            }));
+                        let _ = events.send(json!({
+                            "type":"token_monitoring_update",
+                            "data":{
+                                "mint_address":mint,
+                                "state_version":snapshot.version,
+                                "updated_at":chrono::Utc::now().to_rfc3339(),
+                                "stage":"market_watch",
+                                "message":"Monitoring market activity",
+                                "activity":activity
+                            }
+                        }));
+                    }
                     // Price ticks are runtime state, not durable history. Persist only
                     // non-price state transitions; Analytics owns chart history separately.
                     if kind != "market_price_update" {
@@ -5283,6 +5329,19 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod scan_progress_state_tests {
     use super::*;
+
+    #[test]
+    fn monitoring_transition_emits_only_when_status_first_becomes_monitoring() {
+        let verified = json!({"status":"verified"});
+        let monitoring = json!({"status":"monitoring"});
+        let stopped = json!({"status":"monitoring_stopped"});
+
+        assert!(should_emit_monitoring_transition(Some(&verified), Some(&monitoring)));
+        assert!(should_emit_monitoring_transition(None, Some(&monitoring)));
+        assert!(!should_emit_monitoring_transition(Some(&monitoring), Some(&monitoring)));
+        assert!(!should_emit_monitoring_transition(Some(&verified), Some(&verified)));
+        assert!(!should_emit_monitoring_transition(Some(&monitoring), Some(&stopped)));
+    }
 
     #[test]
     fn stale_market_quotes_are_rejected_for_entries_and_exits() {
