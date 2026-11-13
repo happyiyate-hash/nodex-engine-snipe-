@@ -765,19 +765,17 @@ mod tests {
         policy.trailing_stop_enabled = true;
         policy.maximum_profit_pct = 0.0;
 
-        // The fixed 15% stop-loss would trigger at 0.84, but trailing mode
-        // protects from its own 10% callback (0.90) instead.
-        let trigger = evaluate_position_exit(&mut policy, 0.89).unwrap();
-        assert_eq!(trigger.reason, PositionExitReason::TrailingStop);
+        // The fixed 15% stop-loss would trigger at 0.84, but the 30%
+        // trailing callback places its own initial stop at 0.70.
+        policy.trailing_stop_callback_pct = 30.0;
+        assert!(evaluate_position_exit(&mut policy, 0.84).is_none());
 
-        // A fresh trailing policy must not use the old fixed +100% take-profit.
-        let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
-        policy.trailing_stop_eligible = true;
-        policy.trailing_stop_enabled = true;
-        policy.maximum_profit_pct = 0.0;
+        // The old fixed +100% take-profit is also ignored in trailing mode.
         assert!(evaluate_position_exit(&mut policy, 2.0).is_none());
         assert!(policy.trailing_stop_active);
-        assert_eq!(policy.trailing_stop_price_sol, 1.8);
+        assert_eq!(policy.trailing_stop_price_sol, 1.4);
+        let trigger = evaluate_position_exit(&mut policy, 1.39).unwrap();
+        assert_eq!(trigger.reason, PositionExitReason::TrailingStop);
     }
 
     #[test]
