@@ -6,6 +6,7 @@ mod scanner;
 mod sol_price;
 mod storage;
 mod token_details;
+mod trading_decisions;
 mod websocket;
 
 use axum::{
@@ -28,7 +29,7 @@ use nodex_solana::{
 };
 use nodex_trading::{
     main_bot::{
-        capture_position_risk, evaluate_entry, CreatorReputation, LiveMarketActivity,
+        capture_position_risk, CreatorReputation, LiveMarketActivity,
         PositionRiskPolicy, SecurityAssessment, TradingBotConfig, TradingBotDecision,
     },
     paper_wallet::{BuyCostBreakdown, PaperWallet, LAMPORTS_PER_SOL},
@@ -1531,12 +1532,15 @@ fn start_token_state_projector(
                                     && position.get("status").and_then(serde_json::Value::as_str)
                                         == Some("open")
                             }) {
-                                let triggered = portfolio::position_valuation::mark_position(
+                                portfolio::position_valuation::mark_position(
                                     position,
                                     price_sol,
                                     &price_snapshot,
                                 );
-                                if triggered {
+                                if trading_decisions::position_exit::evaluate_exit(
+                                    position,
+                                    price_sol,
+                                ) {
                                     triggered_positions.push(position.clone());
                                 }
                                 updated_positions.push(position.clone());
