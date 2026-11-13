@@ -86,6 +86,7 @@ struct PreferredOwner {
 fn default_true() -> bool {
     true
 }
+fn default_trailing_activation_profit_pct() -> f64 { 20.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -108,6 +109,8 @@ struct TradingSettings {
     auto_recover_token_account_rent: bool,
     trailing_stop_enabled: bool,
     trailing_stop_callback_pct: f64,
+    #[serde(default = "default_trailing_activation_profit_pct")]
+    trailing_activation_profit_pct: f64,
     blacklist_creators_with_prior_rugs: bool,
     paper_starting_balance: f64,
     paper_starting_balance_currency: String,
@@ -137,7 +140,8 @@ impl Default for TradingSettings {
             auto_buy_enabled: true,
             auto_recover_token_account_rent: true,
             trailing_stop_enabled: false,
-            trailing_stop_callback_pct: 10.0,
+            trailing_stop_callback_pct: 12.0,
+            trailing_activation_profit_pct: default_trailing_activation_profit_pct(),
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
@@ -205,6 +209,7 @@ impl TradingSettings {
                 "trailing_stop_callback_pct",
                 self.trailing_stop_callback_pct,
             ),
+            ("trailing_activation_profit_pct", self.trailing_activation_profit_pct),
             ("paper_starting_balance", self.paper_starting_balance),
         ];
         for (name, value) in finite_non_negative {
@@ -220,7 +225,10 @@ impl TradingSettings {
         if !matches!(self.paper_starting_balance_currency.as_str(), "USD" | "SOL") {
             return Err("paper_starting_balance_currency must be USD or SOL.".into());
         }
-        if self.stop_loss_pct > 100.0 || self.trailing_stop_callback_pct > 100.0 {
+        if self.stop_loss_pct > 100.0
+            || self.trailing_stop_callback_pct > 100.0
+            || self.trailing_activation_profit_pct > 1_000.0
+        {
             return Err(
                 "Stop-loss and trailing-stop percentages must be between 0 and 100.".into(),
             );
@@ -269,6 +277,7 @@ fn main_bot_config_from_settings(
         take_profit_pct: settings.take_profit_pct,
         trailing_stop_enabled: settings.trailing_stop_enabled,
         trailing_stop_callback_pct: settings.trailing_stop_callback_pct,
+        trailing_activation_profit_pct: settings.trailing_activation_profit_pct,
         maximum_slippage_pct: settings.max_slippage_pct,
         minimum_5m_buy_volume_usd: settings.min_5m_buy_volume_usd,
         maximum_top10_concentration_pct: settings.max_top10_holder_concentration_pct,
@@ -5443,7 +5452,8 @@ mod main_bot_config_tests {
             auto_buy_enabled: true,
             auto_recover_token_account_rent: true,
             trailing_stop_enabled: false,
-            trailing_stop_callback_pct: 10.0,
+            trailing_stop_callback_pct: 12.0,
+            trailing_activation_profit_pct: default_trailing_activation_profit_pct(),
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
