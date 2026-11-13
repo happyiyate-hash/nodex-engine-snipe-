@@ -408,8 +408,11 @@ pub fn evaluate_entry(
         None => wait!("Waiting for verified holder-distribution data."),
     }
     match market.market_cap_usd {
-        Some(value) if value.is_finite() && value > 0.0 && value <= MAX_EARLY_ENTRY_MARKET_CAP_USD => {}
-        Some(value) if value.is_finite() && value > MAX_EARLY_ENTRY_MARKET_CAP_USD => wait!("Market cap is already above the early-entry ceiling; avoiding a late entry."),
+        Some(value)
+            if value.is_finite() && value > 0.0 && value <= MAX_EARLY_ENTRY_MARKET_CAP_USD => {}
+        Some(value) if value.is_finite() && value > MAX_EARLY_ENTRY_MARKET_CAP_USD => {
+            wait!("Market cap is already above the early-entry ceiling; avoiding a late entry.")
+        }
         _ => wait!("Waiting for a reliable market-cap estimate from token supply and live price."),
     }
     if market.seconds_since_launch < MIN_OBSERVATION_SECONDS {
@@ -476,8 +479,12 @@ pub fn evaluate_entry(
     }
     match market.buy_pressure_30s_pct {
         Some(value) if value.is_finite() && value >= MIN_30S_BUY_PRESSURE_PCT => {}
-        Some(_) => wait!("Thirty-second buy pressure is below 65%; avoiding weak or sell-dominated flow."),
-        None => wait!("Waiting for enough confirmed 30-second buy/sell volume to calculate buy pressure."),
+        Some(_) => {
+            wait!("Thirty-second buy pressure is below 65%; avoiding weak or sell-dominated flow.")
+        }
+        None => wait!(
+            "Waiting for enough confirmed 30-second buy/sell volume to calculate buy pressure."
+        ),
     }
     if market.confirmed_trade_events == 0 || market.buy_count_5m == 0 {
         wait!("Waiting for confirmed on-chain buy activity; price movement alone is not a trade signal.");
@@ -647,7 +654,10 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert!(result.reasons.iter().any(|reason| reason.contains("Market cap")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Market cap")));
     }
 
     #[test]
@@ -662,7 +672,10 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert!(result.reasons.iter().any(|reason| reason.contains("holder-distribution")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("holder-distribution")));
     }
 
     #[test]
@@ -677,7 +690,10 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Reject);
-        assert!(result.reasons.iter().any(|reason| reason.contains("five-minute")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("five-minute")));
     }
 
     #[test]
