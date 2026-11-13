@@ -312,7 +312,8 @@ impl TradingSettings {
         if self.take_profit_pct > 1_000.0 {
             return Err("take_profit_pct must not exceed 1000.".into());
         }
-        if self.maximum_profit_pct > 0.0 && !(100.0..=100_000.0).contains(&self.maximum_profit_pct) {
+        if self.maximum_profit_pct > 0.0 && !(100.0..=100_000.0).contains(&self.maximum_profit_pct)
+        {
             return Err(
                 "maximum_profit_pct must be 0 (disabled) or between 100 and 100000.".into(),
             );
