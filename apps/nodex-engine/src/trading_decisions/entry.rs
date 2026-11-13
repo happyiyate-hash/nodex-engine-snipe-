@@ -74,7 +74,10 @@ mod tests {
         enforce_entry_quote_requirements(&mut evaluation, Some(1.0), None);
         assert_eq!(evaluation.decision, TradingBotDecision::Wait);
         assert_eq!(evaluation.entry_speed, "blocked");
-        assert!(evaluation.reasons.iter().any(|reason| reason.contains("USD-denominated")));
+        assert!(evaluation
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("USD-denominated")));
     }
 
     #[test]
@@ -88,6 +91,9 @@ mod tests {
         };
         enforce_entry_quote_requirements(&mut evaluation, Some(f64::NAN), Some(100.0));
         assert_eq!(evaluation.decision, TradingBotDecision::Wait);
-        assert!(evaluation.reasons.iter().any(|reason| reason.contains("SOL-denominated")));
+        assert!(evaluation
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("SOL-denominated")));
     }
 }
