@@ -287,48 +287,22 @@ pub(super) async fn evaluate_and_execute_paper_entry(
             position.get("status").and_then(serde_json::Value::as_str) == Some("open")
         })
         .count();
-    let mut evaluation = if gate_reasons.is_empty() && sol_quote_valid {
-        evaluate_entry(
-            &config,
-            &creator_assessment,
-            &security_assessment,
-            &market_assessment,
-            open_positions_count,
-        )
-    } else {
-        gate_reasons.push(if !sol_quote_valid {
-            "A live SOL/USD quote is required before a paper order can be sized.".to_owned()
-        } else {
-            "Paper entry gates are disabled.".to_owned()
-        });
-        nodex_trading::main_bot::TradingBotEvaluation {
-            decision: TradingBotDecision::Wait,
-            entry_speed: "blocked".into(),
-            creator_score,
-            minimum_distinct_buyers: config.minimum_distinct_buyers_other,
-            reasons: gate_reasons,
-        }
-    };
+    let mut evaluation = trading_decisions::entry::evaluate_entry_decision(
+        &config,
+        &creator_assessment,
+        &security_assessment,
+        &market_assessment,
+        open_positions_count,
+        gate_reasons,
+        sol_quote_valid,
+    );
     drop(open_positions);
 
-    // A strategy pass is not executable without a valid token quote in both
-    // denominations. Report it as waiting instead of leaving the card stuck
-    // at "Evaluating entry" after a silent early return.
-    if evaluation.decision == TradingBotDecision::EvaluatePaperEntry {
-        if !price_sol.is_some_and(|value| value.is_finite() && value > 0.0) {
-            evaluation.decision = TradingBotDecision::Wait;
-            evaluation.entry_speed = "blocked".into();
-            evaluation
-                .reasons
-                .push("A valid SOL-denominated token price is not available yet.".into());
-        } else if !price_usd.is_some_and(|value| value.is_finite() && value > 0.0) {
-            evaluation.decision = TradingBotDecision::Wait;
-            evaluation.entry_speed = "blocked".into();
-            evaluation
-                .reasons
-                .push("A valid USD-denominated token price is not available yet.".into());
-        }
-    }
+    trading_decisions::entry::enforce_entry_quote_requirements(
+        &mut evaluation,
+        price_sol,
+        price_usd,
+    );
 
     let decision_name = match evaluation.decision {
         TradingBotDecision::Reject => "reject",
