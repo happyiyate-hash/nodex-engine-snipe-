@@ -1665,31 +1665,51 @@ async fn settle_triggered_paper_exit(
 ) -> Result<(), String> {
     let mut wallet_guard = wallet.write().await;
     let mut positions_guard = positions.write().await;
-    let index = positions_guard.iter().position(|position| {
-        position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id)
-            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id)
-    }).ok_or_else(|| "Triggered paper position no longer exists.".to_string())?;
+    let index = positions_guard
+        .iter()
+        .position(|position| {
+            position
+                .get("position_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(position_id)
+                || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id)
+        })
+        .ok_or_else(|| "Triggered paper position no longer exists.".to_string())?;
     let current = positions_guard[index].clone();
     if current.get("status").and_then(serde_json::Value::as_str) != Some("open")
-        || current.get("exit_requested").and_then(serde_json::Value::as_bool) != Some(true)
+        || current
+            .get("exit_requested")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
     {
         return Ok(());
     }
 
-    let mint = current.get("mint_address").and_then(serde_json::Value::as_str)
+    let mint = current
+        .get("mint_address")
+        .and_then(serde_json::Value::as_str)
         .or_else(|| current.get("mint").and_then(serde_json::Value::as_str))
         .ok_or_else(|| "Triggered paper position has no mint address.".to_string())?
         .to_string();
-    let exit_price_sol = current.get("exit_trigger_price_sol")
+    let exit_price_sol = current
+        .get("exit_trigger_price_sol")
         .and_then(serde_json::Value::as_f64)
-        .or_else(|| current.get("current_price_sol").and_then(serde_json::Value::as_f64))
+        .or_else(|| {
+            current
+                .get("current_price_sol")
+                .and_then(serde_json::Value::as_f64)
+        })
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| "Triggered paper exit has no valid market price.".to_string())?;
-    let quantity = current.get("token_quantity").or_else(|| current.get("quantity"))
+    let quantity = current
+        .get("token_quantity")
+        .or_else(|| current.get("quantity"))
         .and_then(serde_json::Value::as_f64)
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| "Triggered paper exit has no remaining token quantity.".to_string())?;
-    let cost_basis_sol = current.get("cost_basis_sol").or_else(|| current.get("invested_sol"))
+    let cost_basis_sol = current
+        .get("cost_basis_sol")
+        .or_else(|| current.get("invested_sol"))
         .and_then(serde_json::Value::as_f64)
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| "Triggered paper exit has no valid cost basis.".to_string())?;
@@ -1704,20 +1724,32 @@ async fn settle_triggered_paper_exit(
         || invested_lamports_f64 > u64::MAX as f64
         || proceeds_lamports_f64 > u64::MAX as f64
     {
-        return Err("Paper exit proceeds or cost basis exceed the supported settlement range.".into());
+        return Err(
+            "Paper exit proceeds or cost basis exceed the supported settlement range.".into(),
+        );
     }
     let invested_lamports = invested_lamports_f64.round() as u64;
     let proceeds_lamports = proceeds_lamports_f64.round() as u64;
     let mut next_wallet = wallet_guard.clone();
-    let ledger = next_wallet.settle_full_sale(&mint, invested_lamports, proceeds_lamports)
+    let ledger = next_wallet
+        .settle_full_sale(&mint, invested_lamports, proceeds_lamports)
         .map_err(|error| format!("Paper wallet rejected full-sale settlement: {error}"))?;
 
     let quote = sol_price.read().await.clone();
-    let usd_quote_valid = quote.status == "live" && quote.price_usd.is_finite() && quote.price_usd > 0.0;
+    let usd_quote_valid =
+        quote.status == "live" && quote.price_usd.is_finite() && quote.price_usd > 0.0;
     let realized_pnl_sol = proceeds_sol - cost_basis_sol;
     let realized_pnl_pct = realized_pnl_sol / cost_basis_sol * 100.0;
-    let realized_pnl_usd = if usd_quote_valid { realized_pnl_sol * quote.price_usd } else { 0.0 };
-    let exit_price_usd = if usd_quote_valid { exit_price_sol * quote.price_usd } else { 0.0 };
+    let realized_pnl_usd = if usd_quote_valid {
+        realized_pnl_sol * quote.price_usd
+    } else {
+        0.0
+    };
+    let exit_price_usd = if usd_quote_valid {
+        exit_price_sol * quote.price_usd
+    } else {
+        0.0
+    };
     let mut closed = current.clone();
     if let Some(object) = closed.as_object_mut() {
         object.insert("status".into(), json!("closed"));
@@ -1741,7 +1773,13 @@ async fn settle_triggered_paper_exit(
         object.insert("exit_proceeds_sol".into(), json!(proceeds_sol));
         object.insert("exit_proceeds_lamports".into(), json!(proceeds_lamports));
         object.insert("closed_at".into(), json!(chrono::Utc::now().to_rfc3339()));
-        object.insert("exit_reason".into(), current.get("exit_trigger_reason").cloned().unwrap_or_else(|| json!("risk_policy")));
+        object.insert(
+            "exit_reason".into(),
+            current
+                .get("exit_trigger_reason")
+                .cloned()
+                .unwrap_or_else(|| json!("risk_policy")),
+        );
         object.insert("paper_only".into(), json!(true));
     }
     nodex_persistence::commit_paper_sell(
@@ -1751,7 +1789,9 @@ async fn settle_triggered_paper_exit(
         position_id,
         &mint,
         &closed,
-    ).await.map_err(|error| format!("Atomic paper sell persistence failed: {error}"))?;
+    )
+    .await
+    .map_err(|error| format!("Atomic paper sell persistence failed: {error}"))?;
 
     *wallet_guard = next_wallet.clone();
     positions_guard[index] = closed.clone();
@@ -3297,10 +3337,20 @@ async fn get_position_risk(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_operator_key(&state, &headers)?;
     let positions = state.portfolio_positions.read().await;
-    let position = positions.iter().find(|position| {
-        position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id.as_str())
-            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id.as_str())
-    }).ok_or((StatusCode::NOT_FOUND, "Paper position was not found.".to_string()))?;
+    let position = positions
+        .iter()
+        .find(|position| {
+            position
+                .get("position_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(position_id.as_str())
+                || position.get("id").and_then(serde_json::Value::as_str)
+                    == Some(position_id.as_str())
+        })
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Paper position was not found.".to_string(),
+        ))?;
     Ok(Json(json!({
         "status":"ok",
         "position_id":position_id,
@@ -3323,41 +3373,85 @@ async fn update_position_risk(
     for (name, value, max) in [
         ("stop_loss_pct", update.stop_loss_pct, 100.0),
         ("take_profit_pct", update.take_profit_pct, 1_000.0),
-        ("trailing_activation_profit_pct", update.trailing_activation_profit_pct, 5_000.0),
-        ("trailing_stop_callback_pct", update.trailing_stop_callback_pct, 100.0),
+        (
+            "trailing_activation_profit_pct",
+            update.trailing_activation_profit_pct,
+            5_000.0,
+        ),
+        (
+            "trailing_stop_callback_pct",
+            update.trailing_stop_callback_pct,
+            100.0,
+        ),
         ("maximum_profit_pct", update.maximum_profit_pct, 5_000.0),
     ] {
         if value.is_some_and(|number| !number.is_finite() || number < 0.0 || number > max) {
-            return Err((StatusCode::BAD_REQUEST, format!("{name} must be between 0 and {max}.")));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{name} must be between 0 and {max}."),
+            ));
         }
     }
 
     let mut positions = state.portfolio_positions.write().await;
-    let index = positions.iter().position(|position| {
-        position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id.as_str())
-            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id.as_str())
-    }).ok_or((StatusCode::NOT_FOUND, "Paper position was not found.".to_string()))?;
+    let index = positions
+        .iter()
+        .position(|position| {
+            position
+                .get("position_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(position_id.as_str())
+                || position.get("id").and_then(serde_json::Value::as_str)
+                    == Some(position_id.as_str())
+        })
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Paper position was not found.".to_string(),
+        ))?;
 
     let mut updated = positions[index].clone();
-    if !updated.get("status").and_then(serde_json::Value::as_str).unwrap_or_default().eq_ignore_ascii_case("open") {
-        return Err((StatusCode::CONFLICT, "Risk settings can only be changed for an open position.".into()));
+    if !updated
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("open")
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Risk settings can only be changed for an open position.".into(),
+        ));
     }
-    if updated.get("exit_requested").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Err((StatusCode::CONFLICT, "An exit has already been triggered for this position.".into()));
+    if updated
+        .get("exit_requested")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "An exit has already been triggered for this position.".into(),
+        ));
     }
 
     let mut policy: PositionRiskPolicy = if let Some(value) = updated.get("risk_policy").cloned() {
-        serde_json::from_value(value).map_err(|error| (
-            StatusCode::CONFLICT,
-            format!("Saved position risk policy is invalid: {error}"),
-        ))?
+        serde_json::from_value(value).map_err(|error| {
+            (
+                StatusCode::CONFLICT,
+                format!("Saved position risk policy is invalid: {error}"),
+            )
+        })?
     } else {
-        let entry_sol = updated.get("entry_price_sol")
+        let entry_sol = updated
+            .get("entry_price_sol")
             .and_then(serde_json::Value::as_f64)
-            .or_else(|| updated.get("average_entry_price_sol").and_then(serde_json::Value::as_f64))
+            .or_else(|| {
+                updated
+                    .get("average_entry_price_sol")
+                    .and_then(serde_json::Value::as_f64)
+            })
             .unwrap_or(0.0);
         let sol_usd = state.sol_price.read().await.price_usd;
-        let entry_usd = updated.get("entry_price_usd")
+        let entry_usd = updated
+            .get("entry_price_usd")
             .and_then(serde_json::Value::as_f64)
             .filter(|value| *value > 0.0)
             .unwrap_or(entry_sol * sol_usd);
@@ -3371,12 +3465,21 @@ async fn update_position_risk(
 
     policy.stop_loss_pct = update.stop_loss_pct.unwrap_or(policy.stop_loss_pct);
     policy.take_profit_pct = update.take_profit_pct.unwrap_or(policy.take_profit_pct);
-    policy.trailing_activation_profit_pct = update.trailing_activation_profit_pct.unwrap_or(policy.trailing_activation_profit_pct);
-    policy.trailing_stop_callback_pct = update.trailing_stop_callback_pct.unwrap_or(policy.trailing_stop_callback_pct);
-    policy.maximum_profit_pct = update.maximum_profit_pct.unwrap_or(policy.maximum_profit_pct);
+    policy.trailing_activation_profit_pct = update
+        .trailing_activation_profit_pct
+        .unwrap_or(policy.trailing_activation_profit_pct);
+    policy.trailing_stop_callback_pct = update
+        .trailing_stop_callback_pct
+        .unwrap_or(policy.trailing_stop_callback_pct);
+    policy.maximum_profit_pct = update
+        .maximum_profit_pct
+        .unwrap_or(policy.maximum_profit_pct);
 
     if update.trailing_stop_enabled == Some(true) && !policy.trailing_stop_eligible {
-        return Err((StatusCode::CONFLICT, policy.trailing_stop_eligibility_reason.clone()));
+        return Err((
+            StatusCode::CONFLICT,
+            policy.trailing_stop_eligibility_reason.clone(),
+        ));
     }
     if let Some(enabled) = update.trailing_stop_enabled {
         policy.trailing_stop_enabled = enabled;
@@ -3387,33 +3490,50 @@ async fn update_position_risk(
 
     policy.stop_loss_price_sol = if policy.stop_loss_pct > 0.0 {
         policy.entry_price_sol * (1.0 - policy.stop_loss_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.take_profit_price_sol = if policy.take_profit_pct > 0.0 {
         policy.entry_price_sol * (1.0 + policy.take_profit_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.stop_loss_price_usd = if policy.stop_loss_pct > 0.0 {
         policy.entry_price_usd * (1.0 - policy.stop_loss_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.take_profit_price_usd = if policy.take_profit_pct > 0.0 {
         policy.entry_price_usd * (1.0 + policy.take_profit_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.maximum_profit_price_sol = if policy.maximum_profit_pct > 0.0 {
         policy.entry_price_sol * (1.0 + policy.maximum_profit_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.maximum_profit_price_usd = if policy.maximum_profit_pct > 0.0 {
         policy.entry_price_usd * (1.0 + policy.maximum_profit_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.trailing_stop_price_sol = if policy.trailing_stop_enabled && policy.trailing_stop_active {
         policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     policy.captured_at = chrono::Utc::now().to_rfc3339();
 
     let object = updated.as_object_mut().ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         "Stored paper position is not a JSON object.".to_string(),
     ))?;
-    object.insert("risk_policy".into(), serde_json::to_value(&policy)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?);
+    object.insert(
+        "risk_policy".into(),
+        serde_json::to_value(&policy)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
     for (key, value) in [
         ("stop_loss_pct", json!(policy.stop_loss_pct)),
         ("take_profit_pct", json!(policy.take_profit_pct)),
@@ -3421,34 +3541,78 @@ async fn update_position_risk(
         ("take_profit_price_sol", json!(policy.take_profit_price_sol)),
         ("stop_loss_price_usd", json!(policy.stop_loss_price_usd)),
         ("take_profit_price_usd", json!(policy.take_profit_price_usd)),
-        ("trailing_stop_eligible", json!(policy.trailing_stop_eligible)),
-        ("trailing_stop_eligibility_reason", json!(policy.trailing_stop_eligibility_reason)),
+        (
+            "trailing_stop_eligible",
+            json!(policy.trailing_stop_eligible),
+        ),
+        (
+            "trailing_stop_eligibility_reason",
+            json!(policy.trailing_stop_eligibility_reason),
+        ),
         ("trailing_stop_enabled", json!(policy.trailing_stop_enabled)),
-        ("trailing_activation_profit_pct", json!(policy.trailing_activation_profit_pct)),
-        ("trailing_stop_callback_pct", json!(policy.trailing_stop_callback_pct)),
+        (
+            "trailing_activation_profit_pct",
+            json!(policy.trailing_activation_profit_pct),
+        ),
+        (
+            "trailing_stop_callback_pct",
+            json!(policy.trailing_stop_callback_pct),
+        ),
         ("trailing_stop_active", json!(policy.trailing_stop_active)),
-        ("trailing_stop_price_sol", json!(policy.trailing_stop_price_sol)),
+        (
+            "trailing_stop_price_sol",
+            json!(policy.trailing_stop_price_sol),
+        ),
         ("maximum_profit_pct", json!(policy.maximum_profit_pct)),
-        ("maximum_profit_price_sol", json!(policy.maximum_profit_price_sol)),
-        ("maximum_profit_price_usd", json!(policy.maximum_profit_price_usd)),
+        (
+            "maximum_profit_price_sol",
+            json!(policy.maximum_profit_price_sol),
+        ),
+        (
+            "maximum_profit_price_usd",
+            json!(policy.maximum_profit_price_usd),
+        ),
         ("highest_price_sol", json!(policy.highest_price_sol)),
     ] {
         object.insert(key.into(), value);
     }
 
-    let mint = updated.get("mint_address").and_then(serde_json::Value::as_str)
+    let mint = updated
+        .get("mint_address")
+        .and_then(serde_json::Value::as_str)
         .or_else(|| updated.get("mint").and_then(serde_json::Value::as_str))
-        .ok_or((StatusCode::CONFLICT, "Position is missing its mint address.".to_string()))?
+        .ok_or((
+            StatusCode::CONFLICT,
+            "Position is missing its mint address.".to_string(),
+        ))?
         .to_string();
-    nodex_persistence::save_portfolio_position(&state.database, &position_id, &mint, "open", &updated)
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist position risk update: {error}")))?;
+    nodex_persistence::save_portfolio_position(
+        &state.database,
+        &position_id,
+        &mint,
+        "open",
+        &updated,
+    )
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not persist position risk update: {error}"),
+        )
+    })?;
 
     positions[index] = updated.clone();
     drop(positions);
-    let _ = state.events.send(json!({"type":"position_updated","data":updated.clone()}));
-    let _ = state.database_changes.send(json!({"type":"position_risk_updated","data":updated.clone()})).await;
-    Ok(Json(json!({"status":"ok","position":updated,"risk_policy":policy})))
+    let _ = state
+        .events
+        .send(json!({"type":"position_updated","data":updated.clone()}));
+    let _ = state
+        .database_changes
+        .send(json!({"type":"position_risk_updated","data":updated.clone()}))
+        .await;
+    Ok(Json(
+        json!({"status":"ok","position":updated,"risk_policy":policy}),
+    ))
 }
 
 async fn get_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
