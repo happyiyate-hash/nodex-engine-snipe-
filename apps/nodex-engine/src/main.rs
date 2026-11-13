@@ -584,7 +584,6 @@ fn start_terminal_token_cleanup(
                 .unwrap_or_default();
             if kind != "token_rejected_cleanup"
                 && kind != "strategy_rejected_token"
-                && kind != "paper_entry_evaluation"
                 && kind != "paper_sell_executed"
             {
                 continue;
@@ -598,12 +597,6 @@ fn start_terminal_token_cleanup(
                 continue;
             }
             let data = event.get("data").cloned().unwrap_or_else(|| json!({}));
-            if kind == "paper_entry_evaluation"
-                && !data.get("decision").and_then(serde_json::Value::as_str)
-                    .is_some_and(|decision| decision.eq_ignore_ascii_case("reject"))
-            {
-                continue;
-            }
             let Some(mint) = data
                 .get("mint_address")
                 .and_then(serde_json::Value::as_str)
@@ -1033,6 +1026,21 @@ fn start_token_state_projector(
             let Some(data) = event.get("data").cloned() else {
                 continue;
             };
+            if kind == "paper_entry_evaluation"
+                && data.get("decision").and_then(serde_json::Value::as_str)
+                    .is_some_and(|decision| decision.eq_ignore_ascii_case("reject"))
+            {
+                let _ = events.send(json!({
+                    "type":"token_rejected_cleanup",
+                    "data":{
+                        "mint_address":data.get("mint_address").cloned().unwrap_or(serde_json::Value::Null),
+                        "decision":"REJECTED_BY_STRATEGY",
+                        "reason":data.get("reasons").cloned().unwrap_or_else(|| json!([])),
+                        "received_at":chrono::Utc::now().to_rfc3339()
+                    }
+                }));
+                continue;
+            }
             if kind == "tokens_removed_inactive" {
                 if let Some(mints) = data
                     .get("mint_addresses")
