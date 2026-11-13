@@ -671,7 +671,10 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert!(result.reasons.iter().any(|reason| reason.contains("buy/sell ratio")));
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("buy/sell ratio")));
     }
 
     #[test]
