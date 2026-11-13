@@ -15,6 +15,7 @@ use tracing::{info, warn};
 // Bound account subscriptions to the upper end of the workstation's 100–500 token target.
 const MAX_MARKET_SUBSCRIPTIONS: usize = 500;
 const MARKET_COMMAND_CAPACITY: usize = 512;
+const MAX_WAITING_MARKET_SUBSCRIPTIONS: usize = 5_000;
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
@@ -101,6 +102,7 @@ async fn run_market_monitor(
     mut commands: mpsc::Receiver<MarketCommand>,
 ) {
     let mut desired = HashMap::<String, MarketSubscription>::new();
+    let mut waiting = std::collections::VecDeque::<MarketSubscription>::new();
     let mut reconnect_count = 0_u64;
     let mut next_endpoint = 0usize;
     if ws_urls.is_empty() {
@@ -108,7 +110,7 @@ async fn run_market_monitor(
     }
     loop {
         let active_url = ws_urls[next_endpoint % ws_urls.len()].clone();
-        match connect_market_stream(&active_url, &events, &mut commands, &mut desired).await {
+        match connect_market_stream(&active_url, &events, &mut commands, &mut desired, &mut waiting).await {
             // A disconnect or provider rejection rotates to the next configured provider endpoint.
             Ok(()) => {
                 reconnect_count = reconnect_count.saturating_add(1);
@@ -567,11 +569,38 @@ fn percentage_change(
     Some(((current / baseline.price_sol) - 1.0) * 100.0)
 }
 
+async fn fill_waiting_market_subscriptions<S>(
+    sink: &mut S,
+    next_request_id: &mut u64,
+    desired: &mut HashMap<String, MarketSubscription>,
+    pending: &mut HashMap<u64, MarketSubscription>,
+    waiting: &mut std::collections::VecDeque<MarketSubscription>,
+    cancelled_pending_count: usize,
+) -> Result<()>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    while desired.len().saturating_add(cancelled_pending_count) < MAX_MARKET_SUBSCRIPTIONS {
+        let Some(subscription) = waiting.pop_front() else { break; };
+        if desired.contains_key(&subscription.account) {
+            continue;
+        }
+        desired.insert(subscription.account.clone(), subscription.clone());
+        let request_id = *next_request_id;
+        *next_request_id = next_request_id.saturating_add(1);
+        send_account_subscribe(sink, request_id, &subscription.account).await?;
+        pending.insert(request_id, subscription);
+    }
+    Ok(())
+}
+
 async fn connect_market_stream(
     ws_url: &str,
     events: &broadcast::Sender<Value>,
     commands: &mut mpsc::Receiver<MarketCommand>,
     desired: &mut HashMap<String, MarketSubscription>,
+    waiting: &mut std::collections::VecDeque<MarketSubscription>,
 ) -> Result<()> {
     let (socket, _) = connect_async(ws_url)
         .await
@@ -585,14 +614,15 @@ async fn connect_market_stream(
     let mut pumpswap_states = HashMap::<String, PumpSwapLiveState>::new();
 
     for subscription in desired.values() {
-        if pending.len() >= MAX_MARKET_SUBSCRIPTIONS {
-            break;
-        }
+        if pending.len() >= MAX_MARKET_SUBSCRIPTIONS { break; }
         let request_id = next_request_id;
         next_request_id = next_request_id.saturating_add(1);
         send_account_subscribe(&mut sink, request_id, &subscription.account).await?;
         pending.insert(request_id, subscription.clone());
     }
+    fill_waiting_market_subscriptions(
+        &mut sink, &mut next_request_id, desired, &mut pending, waiting, 0
+    ).await?;
 
     let _ = events.send(json!({
         "type":"market_monitor_status",
@@ -631,6 +661,10 @@ async fn connect_market_stream(
                             next_request_id = next_request_id.saturating_add(1);
                             send_account_unsubscribe(&mut sink, request_id, subscription_id).await?;
                         }
+                        fill_waiting_market_subscriptions(
+                            &mut sink, &mut next_request_id, desired, &mut pending, waiting,
+                            cancelled_pending.len()
+                        ).await?;
                         price_history.remove(&mint);
                         pumpswap_states.remove(&mint);
                         let _ = events.send(json!({
@@ -647,7 +681,18 @@ async fn connect_market_stream(
                 if desired.contains_key(&subscription.account) {
                     continue;
                 }
-                if desired.len() >= MAX_MARKET_SUBSCRIPTIONS {
+                if desired.len().saturating_add(cancelled_pending.len()) >= MAX_MARKET_SUBSCRIPTIONS {
+                    if waiting.len() >= MAX_WAITING_MARKET_SUBSCRIPTIONS {
+                        let _ = events.send(json!({"type":"market_subscription_failed","data":{
+                            "mint_address":subscription.mint,"account_address":subscription.account,
+                            "venue":subscription.venue,"status":"failed",
+                            "reason":"Market subscription backlog is full; request was rejected.",
+                            "queue_capacity":MAX_WAITING_MARKET_SUBSCRIPTIONS,
+                            "received_at":chrono::Utc::now().to_rfc3339()
+                        }}));
+                        continue;
+                    }
+                    waiting.push_back(subscription.clone());
                     let _ = events.send(json!({
                         "type":"market_subscription_waiting",
                         "data":{
@@ -655,20 +700,10 @@ async fn connect_market_stream(
                             "venue":subscription.venue,
                             "status":"waiting_for_capacity",
                             "required_additional_accounts":1,
-                            "remaining_capacity":MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len()),
+                            "remaining_capacity":0,
                             "desired_accounts":desired.len(),
+                            "pending_queue":waiting.len(),
                             "account_capacity":MAX_MARKET_SUBSCRIPTIONS,
-                            "received_at":chrono::Utc::now().to_rfc3339()
-                        }
-                    }));
-                    let _ = events.send(json!({
-                        "type":"diagnostic",
-                        "data":{
-                            "severity":"warning",
-                            "component":"market_monitor",
-                            "message":"Market account subscription capacity reached; new account was not subscribed.",
-                            "mint_address":subscription.mint,
-                            "limit":MAX_MARKET_SUBSCRIPTIONS,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }
                     }));
@@ -712,6 +747,10 @@ async fn connect_market_stream(
                                     next_request_id = next_request_id.saturating_add(1);
                                     send_account_unsubscribe(&mut sink, unsubscribe_request_id, subscription_id).await?;
                                 }
+                                fill_waiting_market_subscriptions(
+                                    &mut sink, &mut next_request_id, desired, &mut pending, waiting,
+                                    cancelled_pending.len()
+                                ).await?;
                                 continue;
                             }
                             if let Some(subscription) = pending.remove(&request_id) {
@@ -744,10 +783,15 @@ async fn connect_market_stream(
                                             "active_subscriptions":active.len(),
                                             "provider":"solana_account_subscribe",
                                             "received_at":chrono::Utc::now().to_rfc3339()
-                                        }
+                                            fill_waiting_market_subscriptions(
+                                        &mut sink, &mut next_request_id, desired, &mut pending, waiting,
+                                        cancelled_pending.len()
+                                    ).await?;
+                                }
                                     }));
                                 } else {
                                     let error = value.get("error").cloned().unwrap_or(Value::Null);
+                                    desired.remove(&subscription.account);
                                     let reason = format!("Solana provider rejected the market account subscription: {error}");
                                     warn!(
                                         mint_address = %subscription.mint,
