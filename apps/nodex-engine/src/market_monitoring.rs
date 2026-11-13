@@ -61,6 +61,7 @@ pub(super) fn schedule_early_monitor_expiry(
     monitor: MarketMonitor,
     mint: String,
     detected_at: chrono::DateTime<chrono::Utc>,
+    observation_window_seconds: u64,
     database: sqlx::SqlitePool,
     token_registry: TokenRegistry,
     events: crate::event_broadcaster::EventBroadcaster,
@@ -70,7 +71,7 @@ pub(super) fn schedule_early_monitor_expiry(
             .signed_duration_since(detected_at)
             .num_seconds()
             .max(0) as u64;
-        let remaining = 300_u64.saturating_sub(elapsed);
+        let remaining = observation_window_seconds.saturating_sub(elapsed);
         tokio::time::sleep(Duration::from_secs(remaining)).await;
         loop {
             let open_positions = sqlx::query_scalar::<_, i64>(
@@ -118,7 +119,7 @@ pub(super) fn schedule_early_monitor_expiry(
                     "data": {
                         "mint_address": mint,
                         "reason": "early_entry_window_expired",
-                        "observation_seconds": 300,
+                        "observation_seconds": observation_window_seconds,
                         "received_at": chrono::Utc::now().to_rfc3339()
                     }
                 }));
