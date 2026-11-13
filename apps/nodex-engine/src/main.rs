@@ -3518,7 +3518,8 @@ async fn update_position_risk(
     } else {
         0.0
     };
-    policy.trailing_stop_price_sol = if policy.trailing_stop_enabled && policy.trailing_stop_active {
+    policy.trailing_stop_price_sol = if policy.trailing_stop_enabled && policy.trailing_stop_active
+    {
         policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0)
     } else {
         0.0
