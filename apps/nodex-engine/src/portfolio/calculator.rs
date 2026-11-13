@@ -56,6 +56,21 @@ pub(crate) fn calculate_portfolio_snapshot(
         })
         .filter(|value| value.is_finite())
         .sum();
+    let realized_pnl_usd: f64 = positions
+        .iter()
+        .filter_map(|position| {
+            position
+                .get("realized_pnl_usd")
+                .and_then(serde_json::Value::as_f64)
+                .or_else(|| {
+                    position
+                        .get("realized_pnl_sol")
+                        .and_then(serde_json::Value::as_f64)
+                        .map(|value| value * sol_price_usd)
+                })
+        })
+        .filter(|value| value.is_finite())
+        .sum();
     let available_sol = wallet.available_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let invested_sol = wallet.invested_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
     let locked_rent_sol = wallet.locked_rent_lamports as f64 / LAMPORTS_PER_SOL as f64;
@@ -92,7 +107,7 @@ pub(crate) fn calculate_portfolio_snapshot(
         "starting_balance_sol": starting_balance_sol, "starting_sol_price_usd": starting_sol_price_usd,
         "unrealized_pnl_usd": unrealized_pnl_usd, "sol_unrealized_pnl_usd": sol_unrealized_pnl_usd,
         "token_unrealized_pnl_usd": token_unrealized_pnl_usd, "unrealized_pnl_sol": unrealized_pnl_sol,
-        "unrealized_pnl_pct": unrealized_pnl_pct, "realized_pnl_usd": realized_pnl_sol * sol_price_usd,
+        "unrealized_pnl_pct": unrealized_pnl_pct, "realized_pnl_usd": realized_pnl_usd,
         "realized_pnl_sol": realized_pnl_sol, "total_pnl_usd": total_pnl_usd,
         "total_pnl_sol": if sol_price_usd > 0.0 { total_pnl_usd / sol_price_usd } else { 0.0 }, "total_pnl_pct": total_pnl_pct,
         "positions_value_usd": positions_value_sol * sol_price_usd, "positions_value_sol": positions_value_sol,
