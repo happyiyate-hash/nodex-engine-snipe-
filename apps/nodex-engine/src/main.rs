@@ -1027,7 +1027,9 @@ fn start_token_state_projector(
                 continue;
             };
             if kind == "paper_entry_evaluation"
-                && data.get("decision").and_then(serde_json::Value::as_str)
+                && data
+                    .get("decision")
+                    .and_then(serde_json::Value::as_str)
                     .is_some_and(|decision| decision.eq_ignore_ascii_case("reject"))
             {
                 let _ = events.send(json!({
