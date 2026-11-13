@@ -312,9 +312,7 @@ impl TradingSettings {
         if self.take_profit_pct > 1_000.0 {
             return Err("take_profit_pct must not exceed 1000.".into());
         }
-        if self.maximum_profit_pct > 0.0
-            && !(100.0..=100_000.0).contains(&self.maximum_profit_pct)
-        {
+        if self.maximum_profit_pct > 0.0 && !(100.0..=100_000.0).contains(&self.maximum_profit_pct) {
             return Err(
                 "maximum_profit_pct must be 0 (disabled) or between 100 and 100000.".into(),
             );
@@ -1583,16 +1581,15 @@ fn start_token_state_projector(
             match registry.upsert_patch(mint, domain_patch) {
                 Ok(snapshot) => {
                     if monitoring_transition {
-                        let activity = snapshot
-                            .data
-                            .get("activity")
-                            .cloned()
-                            .unwrap_or_else(|| json!({
-                                "status":"monitoring",
-                                "label":"Monitoring",
-                                "stage":"market_watch",
-                                "sub_event":"Monitoring market activity"
-                            }));
+                        let activity =
+                            snapshot.data.get("activity").cloned().unwrap_or_else(|| {
+                                json!({
+                                    "status":"monitoring",
+                                    "label":"Monitoring",
+                                    "stage":"market_watch",
+                                    "sub_event":"Monitoring market activity"
+                                })
+                            });
                         let _ = events.send(json!({
                             "type":"token_monitoring_update",
                             "data":{
@@ -5336,11 +5333,23 @@ mod scan_progress_state_tests {
         let monitoring = json!({"status":"monitoring"});
         let stopped = json!({"status":"monitoring_stopped"});
 
-        assert!(should_emit_monitoring_transition(Some(&verified), Some(&monitoring)));
+        assert!(should_emit_monitoring_transition(
+            Some(&verified),
+            Some(&monitoring)
+        ));
         assert!(should_emit_monitoring_transition(None, Some(&monitoring)));
-        assert!(!should_emit_monitoring_transition(Some(&monitoring), Some(&monitoring)));
-        assert!(!should_emit_monitoring_transition(Some(&verified), Some(&verified)));
-        assert!(!should_emit_monitoring_transition(Some(&monitoring), Some(&stopped)));
+        assert!(!should_emit_monitoring_transition(
+            Some(&monitoring),
+            Some(&monitoring)
+        ));
+        assert!(!should_emit_monitoring_transition(
+            Some(&verified),
+            Some(&verified)
+        ));
+        assert!(!should_emit_monitoring_transition(
+            Some(&monitoring),
+            Some(&stopped)
+        ));
     }
 
     #[test]
