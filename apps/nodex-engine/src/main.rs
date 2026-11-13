@@ -1153,6 +1153,19 @@ fn start_token_state_projector(
                 continue;
             }
             if kind == "token_rejected_cleanup" {
+                trade_observations.remove(mint);
+                last_evaluation_signatures.remove(mint);
+                last_entry_attempts.remove(mint);
+                last_market_slots.remove(mint);
+                last_activity_persisted.remove(mint);
+                let stale_pools = pool_to_mint
+                    .iter()
+                    .filter_map(|(pool, token_mint)| (token_mint == mint).then_some(pool.clone()))
+                    .collect::<Vec<_>>();
+                for pool in stale_pools {
+                    pool_to_mint.remove(&pool);
+                    pool_quote_is_sol.remove(&pool);
+                }
                 // The dedicated terminal cleanup worker owns subscription and storage removal.
                 continue;
             }
