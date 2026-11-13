@@ -533,7 +533,7 @@ mod tests {
             buy_count_5m: 8,
             sell_count_5m: 1,
             estimated_slippage_pct: Some(2.0),
-            seconds_since_launch: 60,
+            seconds_since_launch: 90,
             confirmed_trade_events: 9,
             buy_pressure_pct: Some(80.0),
             distinct_buyers_30s: 3,
@@ -618,6 +618,66 @@ mod tests {
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
         assert_eq!(result.entry_speed, "fast");
         assert_eq!(result.minimum_distinct_buyers, 2);
+    }
+
+    #[test]
+    fn strategy_waits_when_recent_sell_flow_matches_or_exceeds_buys() {
+        let mut live = market();
+        live.sell_count_30s = live.buy_count_30s;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert!(result.reasons.iter().any(|reason| reason.contains("sells")));
+    }
+
+    #[test]
+    fn strategy_waits_when_market_cap_is_above_early_entry_ceiling() {
+        let mut live = market();
+        live.market_cap_usd = Some(200_000.0);
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert!(result.reasons.iter().any(|reason| reason.contains("Market cap")));
+    }
+
+    #[test]
+    fn strategy_waits_when_holder_sample_is_unavailable() {
+        let mut live = market();
+        live.observed_holder_count = None;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert!(result.reasons.iter().any(|reason| reason.contains("holder-distribution")));
+    }
+
+    #[test]
+    fn strategy_rejects_tokens_outside_the_five_minute_early_entry_window() {
+        let mut live = market();
+        live.seconds_since_launch = 301;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Reject);
+        assert!(result.reasons.iter().any(|reason| reason.contains("five-minute")));
     }
 
     #[test]
