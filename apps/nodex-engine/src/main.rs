@@ -1736,16 +1736,33 @@ async fn settle_triggered_paper_exit(
         .map_err(|error| format!("Paper wallet rejected full-sale settlement: {error}"))?;
 
     let quote = sol_price.read().await.clone();
-    let usd_quote_valid =
-        quote.status == "live" && quote.price_usd.is_finite() && quote.price_usd > 0.0;
+    let usd_quote_available = quote.price_usd.is_finite() && quote.price_usd > 0.0;
     let realized_pnl_sol = proceeds_sol - cost_basis_sol;
     let realized_pnl_pct = realized_pnl_sol / cost_basis_sol * 100.0;
-    let realized_pnl_usd = if usd_quote_valid {
-        realized_pnl_sol * quote.price_usd
+    let initial_investment_usd = current
+        .get("initial_investment_usd")
+        .or_else(|| current.get("cost_basis_usd"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .or_else(|| {
+            current
+                .get("entry_sol_price_usd")
+                .and_then(serde_json::Value::as_f64)
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|entry_sol_usd| cost_basis_sol * entry_sol_usd)
+        })
+        .unwrap_or(0.0);
+    let exit_proceeds_usd = if usd_quote_available {
+        proceeds_sol * quote.price_usd
     } else {
         0.0
     };
-    let exit_price_usd = if usd_quote_valid {
+    let realized_pnl_usd = if usd_quote_available {
+        exit_proceeds_usd - initial_investment_usd
+    } else {
+        0.0
+    };
+    let exit_price_usd = if usd_quote_available {
         exit_price_sol * quote.price_usd
     } else {
         0.0
@@ -1771,6 +1788,7 @@ async fn settle_triggered_paper_exit(
         object.insert("exit_price_sol".into(), json!(exit_price_sol));
         object.insert("exit_price_usd".into(), json!(exit_price_usd));
         object.insert("exit_proceeds_sol".into(), json!(proceeds_sol));
+        object.insert("exit_proceeds_usd".into(), json!(exit_proceeds_usd));
         object.insert("exit_proceeds_lamports".into(), json!(proceeds_lamports));
         object.insert("closed_at".into(), json!(chrono::Utc::now().to_rfc3339()));
         object.insert(
