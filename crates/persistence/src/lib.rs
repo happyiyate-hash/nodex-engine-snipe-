@@ -1214,6 +1214,48 @@ mod paper_buy_transaction_tests {
     use nodex_trading::paper_wallet::{BuyCostBreakdown, PaperWallet, LAMPORTS_PER_SOL};
 
     #[tokio::test]
+    async fn paper_sell_atomically_closes_position_and_settles_wallet() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        let mut wallet = PaperWallet::new_with_price(100_000_000, 200.0);
+        let costs = BuyCostBreakdown {
+            token_input_lamports: 10_000_000,
+            network_fee_lamports: 0,
+            priority_fee_lamports: 0,
+            swap_fee_lamports: 0,
+            rent_reserve_lamports: 0,
+        };
+        let buy_ledger = wallet.reserve_buy_for_token("mint-sell", &costs).unwrap();
+        let open = serde_json::json!({
+            "position_id":"paper-position-sell",
+            "mint_address":"mint-sell",
+            "status":"open",
+            "cost_basis_sol":0.01
+        });
+        commit_paper_buy(&pool, &wallet, &buy_ledger, "paper-position-sell", "mint-sell", &open)
+            .await.unwrap();
+
+        let sell_ledger = wallet.settle_full_sale("mint-sell", 10_000_000, 15_000_000).unwrap();
+        let closed = serde_json::json!({
+            "position_id":"paper-position-sell",
+            "mint_address":"mint-sell",
+            "status":"closed",
+            "realized_pnl_sol":0.005
+        });
+        commit_paper_sell(&pool, &wallet, &sell_ledger, "paper-position-sell", "mint-sell", &closed)
+            .await.unwrap();
+
+        let restored_wallet = load_paper_wallet(&pool).await.unwrap().unwrap();
+        let positions = load_portfolio_positions(&pool).await.unwrap();
+        let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(restored_wallet.available_balance_lamports, 105_000_000);
+        assert_eq!(restored_wallet.invested_balance_lamports, 0);
+        assert_eq!(positions[0]["status"], "closed");
+        assert_eq!(positions[0]["realized_pnl_sol"], 0.005);
+        assert_eq!(ledger_count, 2);
+    }
+
+    #[tokio::test]
     async fn paper_buy_commits_wallet_ledger_and_position_together() {
         let pool = connect("sqlite::memory:").await.unwrap();
         let mut wallet = PaperWallet::new_with_price(100_000_000, 200.0);
