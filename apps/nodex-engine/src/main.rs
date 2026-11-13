@@ -1752,9 +1752,6 @@ fn start_token_state_projector(
     });
 }
 
-/// Complete one triggered full-position paper sale. Wallet, ledger and
-/// closed-position state are committed in one SQLite transaction before the
-/// in-memory state and browser events are updated.
 /// Retry persisted exit requests independently of market ticks. This closes
 /// the restart gap and ensures a failed settlement can complete even if the
 /// token's next price update is delayed.
@@ -1771,18 +1768,37 @@ fn start_pending_exit_recovery(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let pending_ids: Vec<String> = positions.read().await.iter()
+            let pending_ids: Vec<String> = positions
+                .read()
+                .await
+                .iter()
                 .filter(|position| {
                     position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-                        && position.get("exit_requested").and_then(serde_json::Value::as_bool) == Some(true)
+                        && position
+                            .get("exit_requested")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
                 })
-                .filter_map(|position| position.get("position_id").or_else(|| position.get("id"))
-                    .and_then(serde_json::Value::as_str).map(str::to_owned))
+                .filter_map(|position| {
+                    position
+                        .get("position_id")
+                        .or_else(|| position.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
                 .collect();
             for position_id in pending_ids {
                 if let Err(error) = settle_triggered_paper_exit(
-                    &database, &wallet, &sol_price, &positions, &profile, &events, &position_id
-                ).await {
+                    &database,
+                    &wallet,
+                    &sol_price,
+                    &positions,
+                    &profile,
+                    &events,
+                    &position_id,
+                )
+                .await
+                {
                     tracing::warn!(%error, %position_id, "Pending paper exit recovery will retry");
                 }
             }
@@ -1790,6 +1806,9 @@ fn start_pending_exit_recovery(
     });
 }
 
+/// Complete one triggered full-position paper sale. Wallet, ledger and
+/// closed-position state are committed in one SQLite transaction before the
+/// in-memory state and browser events are updated.
 async fn settle_triggered_paper_exit(
     database: &sqlx::SqlitePool,
     wallet: &Arc<RwLock<PaperWallet>>,
@@ -3490,8 +3509,7 @@ struct PositionRiskUpdate {
     maximum_profit_pct: Option<f64>,
 }
 
-/// Return the authoritative risk policy and trailing eligibility for one position.
-/// Manually close one complete open paper position using its latest fresh market mark.
+/// Manually close one complete open paper position using its latest market mark.
 async fn manual_paper_sell(
     State(state): State<AppState>,
     Path(position_id): Path<String>,
@@ -3503,21 +3521,39 @@ async fn manual_paper_sell(
         let position = positions
             .iter_mut()
             .find(|position| {
-                position.get("position_id").and_then(serde_json::Value::as_str)
+                position
+                    .get("position_id")
+                    .and_then(serde_json::Value::as_str)
                     == Some(position_id.as_str())
-                    || position.get("id").and_then(serde_json::Value::as_str)
+                    || position
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
                         == Some(position_id.as_str())
             })
-            .ok_or((StatusCode::NOT_FOUND, "Paper position was not found.".to_string()))?;
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "Paper position was not found.".to_string(),
+            ))?;
         if position.get("status").and_then(serde_json::Value::as_str) != Some("open") {
-            return Err((StatusCode::CONFLICT, "Only an open paper position can be sold.".into()));
+            return Err((
+                StatusCode::CONFLICT,
+                "Only an open paper position can be sold.".into(),
+            ));
         }
-        let price = position.get("current_price_sol")
+        let price = position
+            .get("current_price_sol")
             .or_else(|| position.get("price_sol"))
             .and_then(serde_json::Value::as_f64)
             .filter(|price| price.is_finite() && *price > 0.0)
-            .ok_or((StatusCode::CONFLICT, "No valid market price is available for this paper position.".into()))?;
-        if position.get("exit_requested").and_then(serde_json::Value::as_bool) != Some(true) {
+            .ok_or((
+                StatusCode::CONFLICT,
+                "No valid market price is available for this paper position.".into(),
+            ))?;
+        if position
+            .get("exit_requested")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
             let object = position.as_object_mut().ok_or((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Stored paper position is invalid.".to_string(),
@@ -3525,22 +3561,39 @@ async fn manual_paper_sell(
             object.insert("exit_requested".into(), json!(true));
             object.insert("exit_trigger_reason".into(), json!("manual"));
             object.insert("exit_trigger_price_sol".into(), json!(price));
-            object.insert("exit_requested_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+            object.insert(
+                "exit_requested_at".into(),
+                json!(chrono::Utc::now().to_rfc3339()),
+            );
         }
         let snapshot = position.clone();
-        let mint = snapshot.get("mint_address").or_else(|| snapshot.get("mint"))
-            .and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        let mint = snapshot
+            .get("mint_address")
+            .or_else(|| snapshot.get("mint"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         if mint.is_empty() {
-            return Err((StatusCode::CONFLICT, "Paper position is missing its token mint.".into()));
+            return Err((
+                StatusCode::CONFLICT,
+                "Paper position is missing its token mint.".into(),
+            ));
         }
         nodex_persistence::save_portfolio_position(
-            &state.database, &position_id, &mint, "open", &snapshot
-        ).await.map_err(|error| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Could not persist the manual paper exit request: {error}")
-        ))?;
-        snapshot
-    };
+            &state.database,
+            &position_id,
+            &mint,
+            "open",
+            &snapshot,
+        )
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not persist the manual paper exit request: {error}"),
+            )
+        })?;
+    }
     settle_triggered_paper_exit(
         &state.database,
         &state.wallet,
@@ -3549,16 +3602,34 @@ async fn manual_paper_sell(
         &state.profile,
         &state.events,
         &position_id,
-    ).await.map_err(|error| (
-        StatusCode::SERVICE_UNAVAILABLE,
-        format!("Paper sale is pending settlement and will be retried: {error}")
-    ))?;
-    let closed_position = state.portfolio_positions.read().await.iter()
-        .find(|position| position.get("position_id").and_then(serde_json::Value::as_str)
-            == Some(position_id.as_str())
-            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id.as_str()))
+    )
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Paper sale is pending settlement and will be retried: {error}"),
+        )
+    })?;
+    let closed_position = state
+        .portfolio_positions
+        .read()
+        .await
+        .iter()
+        .find(|position| {
+            position
+                .get("position_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(position_id.as_str())
+                || position
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(position_id.as_str())
+        })
         .cloned()
-        .ok_or((StatusCode::NOT_FOUND, "Closed paper position was not found after settlement.".to_string()))?;
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Closed paper position was not found after settlement.".to_string(),
+        ))?;
     Ok(Json(json!({
         "status":"sold",
         "position_id":position_id,
