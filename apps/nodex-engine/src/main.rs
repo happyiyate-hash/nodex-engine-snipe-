@@ -555,6 +555,96 @@ fn start_inactive_token_cleanup(
     });
 }
 
+/// Release market subscriptions and remove token-only history after a definitive rejection
+/// or after the final open paper position for a mint has been sold. Paper accounting
+/// (closed positions, wallet, ledger and portfolio snapshots) is never deleted.
+fn start_terminal_token_cleanup(
+    mut receiver: broadcast::Receiver<serde_json::Value>,
+    database: sqlx::SqlitePool,
+    registry: TokenRegistry,
+    market_monitor: Arc<RwLock<Option<MarketMonitor>>>,
+    events: broadcast::Sender<serde_json::Value>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(dropped_events = count, "Terminal token cleanup worker lagged");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let kind = event.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if kind != "token_rejected_cleanup" && kind != "paper_sell_executed" {
+                continue;
+            }
+            if kind == "paper_sell_executed"
+                && event.pointer("/data/full_exit").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                continue;
+            }
+            let data = event.get("data").cloned().unwrap_or_else(|| json!({}));
+            let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str)
+                .filter(|mint| !mint.trim().is_empty()).map(str::to_owned) else {
+                continue;
+            };
+            let positions = match nodex_persistence::load_portfolio_positions(&database).await {
+                Ok(positions) => positions,
+                Err(error) => {
+                    tracing::error!(%error, mint_address = %mint, "Could not verify paper positions before terminal token cleanup");
+                    continue;
+                }
+            };
+            let mint_positions = positions.iter().filter(|position| {
+                position.get("mint_address").or_else(|| position.get("mint"))
+                    .and_then(serde_json::Value::as_str) == Some(mint.as_str())
+            }).collect::<Vec<_>>();
+            if kind == "token_rejected_cleanup" && !mint_positions.is_empty() {
+                tracing::warn!(mint_address = %mint, "Rejected-token cleanup skipped because paper-position history exists");
+                continue;
+            }
+            if kind == "paper_sell_executed" && mint_positions.iter().any(|position| {
+                position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+            }) {
+                continue;
+            }
+
+            if let Some(monitor) = market_monitor.read().await.clone() {
+                let mut unsubscribed = false;
+                for attempt in 0..3 {
+                    match monitor.unsubscribe_mint(&mint).await {
+                        Ok(()) => { unsubscribed = true; break; }
+                        Err(error) => {
+                            tracing::warn!(%error, mint_address = %mint, attempt = attempt + 1, "Could not queue terminal market unsubscribe");
+                            tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+                        }
+                    }
+                }
+                if !unsubscribed {
+                    continue;
+                }
+            }
+
+            match nodex_persistence::delete_token_market_history(&database, &mint).await {
+                Ok(()) => {
+                    registry.remove(&mint);
+                    let _ = events.send(json!({
+                        "type":"token_removed",
+                        "data":{
+                            "mint_address":mint,
+                            "reason":if kind == "paper_sell_executed" { "paper_position_closed" } else { "security_rejected" },
+                            "removed_at":chrono::Utc::now().to_rfc3339()
+                        }
+                    }));
+                    tracing::info!(mint_address = %mint, cleanup_reason = kind, "Terminal token market history removed; paper accounting preserved");
+                }
+                Err(error) => tracing::error!(%error, mint_address = %mint, "Terminal token market history deletion failed"),
+            }
+        }
+    });
+}
+
 /// Convert only useful operator activity into durable event history.
 /// Successful low-level RPC request/response cards stay out of the UI and DB;
 /// provider errors and meaningful engine lifecycle events remain observable.
@@ -1063,12 +1153,7 @@ fn start_token_state_projector(
                 continue;
             }
             if kind == "token_rejected_cleanup" {
-                // Legacy cleanup events must never erase a token's scan evidence.
-                // Rejected and unverified launches are retained for operator debugging.
-                tracing::warn!(
-                    mint_address = mint,
-                    "Ignoring legacy token cleanup request; token state and launch history are retained"
-                );
+                // The dedicated terminal cleanup worker owns subscription and storage removal.
                 continue;
             }
             if kind == "token_diagnostic" {
@@ -3359,6 +3444,13 @@ async fn clear_token_and_event_history(
             deleted_mints.insert(snapshot.mint_address);
         }
     }
+    if let Some(monitor) = state.market_monitor.read().await.clone() {
+        for mint in &deleted_mints {
+            if let Err(error) = monitor.unsubscribe_mint(mint).await {
+                tracing::warn!(%error, mint_address = %mint, "Could not unsubscribe token during maintenance cleanup");
+            }
+        }
+    }
     for mint in &deleted_mints {
         let _ = state.events.send(json!({
             "type": "token_removed",
@@ -5142,6 +5234,13 @@ async fn main() -> anyhow::Result<()> {
     // Keep launch detection and market monitoring on separate subscriptions.
     // The market monitor multiplexes all watched bonding curves over one WebSocket.
     let market_monitor = Arc::new(RwLock::new(None));
+    start_terminal_token_cleanup(
+        event_broadcaster.subscribe(),
+        db.clone(),
+        token_registry.clone(),
+        market_monitor.clone(),
+        events.clone(),
+    );
     start_inactive_token_cleanup(
         db.clone(),
         token_registry.clone(),
