@@ -295,6 +295,14 @@ pub struct LiveMarketActivity {
     /// Set only from confirmed, decoded on-chain trade events; never from price ticks.
     pub confirmed_trade_events: u64,
     pub buy_pressure_pct: Option<f64>,
+    pub distinct_buyers_30s: usize,
+    pub buy_count_30s: u64,
+    pub sell_count_30s: u64,
+    pub buy_pressure_30s_pct: Option<f64>,
+    pub market_cap_usd: Option<f64>,
+    /// Number of distinct holder accounts actually resolved in the current sample,
+    /// not a claim about the token's total holder count.
+    pub observed_holder_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,6 +347,10 @@ pub fn evaluate_entry(
         0
     });
     let entry_speed = if high_score { "fast" } else { "confirmation" };
+    const MIN_OBSERVATION_SECONDS: u64 = 90;
+    const MAX_EARLY_ENTRY_AGE_SECONDS: u64 = 300;
+    const MAX_EARLY_ENTRY_MARKET_CAP_USD: f64 = 150_000.0;
+    const MIN_30S_BUY_PRESSURE_PCT: f64 = 65.0;
     let mut reasons = Vec::new();
     let mut rejected = false;
     let mut waiting = false;
@@ -388,9 +400,23 @@ pub fn evaluate_entry(
     match security.top10_concentration_pct {
         Some(value) if value.is_finite() && value <= config.maximum_top10_concentration_pct => {}
         Some(_) => reject!("Top-10 holder concentration exceeds the configured maximum, including the partial-sample safety buffer."),
-        None => reasons.push(
-            "Top-10 holder concentration could not be sampled; requiring two additional distinct buyers.".into(),
-        ),
+        None => wait!("Waiting for a holder-distribution sample with at least ten resolved accounts; holder concentration cannot be assumed safe."),
+    }
+    match market.observed_holder_count {
+        Some(count) if count >= 10 => {}
+        Some(_) => wait!("Holder-distribution sample is too small to assess concentration safely."),
+        None => wait!("Waiting for verified holder-distribution data."),
+    }
+    match market.market_cap_usd {
+        Some(value) if value.is_finite() && value > 0.0 && value <= MAX_EARLY_ENTRY_MARKET_CAP_USD => {}
+        Some(value) if value.is_finite() && value > MAX_EARLY_ENTRY_MARKET_CAP_USD => wait!("Market cap is already above the early-entry ceiling; avoiding a late entry."),
+        _ => wait!("Waiting for a reliable market-cap estimate from token supply and live price."),
+    }
+    if market.seconds_since_launch < MIN_OBSERVATION_SECONDS {
+        wait!("Collecting at least 90 seconds of confirmed market behaviour before entry.");
+    }
+    if market.seconds_since_launch > MAX_EARLY_ENTRY_AGE_SECONDS {
+        reject!("The five-minute early-entry observation window has expired; skipping this token rather than chasing it late.");
     }
     match market.liquidity_usd {
         Some(value) if value.is_finite() && value >= config.minimum_liquidity_usd => {}
@@ -440,6 +466,18 @@ pub fn evaluate_entry(
     }
     if market.distinct_buyers_5m < minimum_buyers {
         wait!("Not enough distinct buying wallets have participated yet.");
+    }
+    let minimum_recent_buyers = if high_score { 2 } else { 3 };
+    if market.distinct_buyers_30s < minimum_recent_buyers {
+        wait!("Not enough distinct wallets have bought in the last 30 seconds to confirm fresh demand.");
+    }
+    if market.buy_count_30s == 0 || market.sell_count_30s >= market.buy_count_30s {
+        wait!("Recent confirmed sells are matching or exceeding buys; waiting for buyers to regain control.");
+    }
+    match market.buy_pressure_30s_pct {
+        Some(value) if value.is_finite() && value >= MIN_30S_BUY_PRESSURE_PCT => {}
+        Some(_) => wait!("Thirty-second buy pressure is below 65%; avoiding weak or sell-dominated flow."),
+        None => wait!("Waiting for enough confirmed 30-second buy/sell volume to calculate buy pressure."),
     }
     if market.confirmed_trade_events == 0 || market.buy_count_5m == 0 {
         wait!("Waiting for confirmed on-chain buy activity; price movement alone is not a trade signal.");
@@ -498,6 +536,12 @@ mod tests {
             seconds_since_launch: 60,
             confirmed_trade_events: 9,
             buy_pressure_pct: Some(80.0),
+            distinct_buyers_30s: 3,
+            buy_count_30s: 5,
+            sell_count_30s: 1,
+            buy_pressure_30s_pct: Some(80.0),
+            market_cap_usd: Some(50_000.0),
+            observed_holder_count: Some(12),
         }
     }
 
