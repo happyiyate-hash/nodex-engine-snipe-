@@ -1647,6 +1647,44 @@ fn start_token_state_projector(
                                     .await
                                     {
                                         tracing::error!(%error, position_id, "Paper exit settlement failed; position remains flagged for retry");
+                                        let failed_snapshot = {
+                                            let mut positions = portfolio_positions.write().await;
+                                            positions.iter_mut().find(|position| {
+                                                position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id)
+                                                    || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id)
+                                            }).and_then(|position| {
+                                                if position.get("settlement_failure_notified").and_then(serde_json::Value::as_bool) == Some(true) {
+                                                    None
+                                                } else {
+                                                    if let Some(object) = position.as_object_mut() {
+                                                        object.insert("settlement_failure_notified".into(), json!(true));
+                                                    }
+                                                    Some(position.clone())
+                                                }
+                                            })
+                                        };
+                                        if let Some(failed) = failed_snapshot {
+                                            let mint = failed.get("mint_address").and_then(serde_json::Value::as_str).unwrap_or_default();
+                                            if !mint.is_empty() {
+                                                if let Err(persist_error) = nodex_persistence::save_portfolio_position(
+                                                    &database, position_id, mint, "open", &failed
+                                                ).await {
+                                                    tracing::warn!(%persist_error, position_id, "Could not persist paper exit failure notification marker");
+                                                }
+                                            }
+                                            let _ = events.send(json!({
+                                                "type": "paper_sell_failed",
+                                                "data": {
+                                                    "position": failed,
+                                                    "position_id": position_id,
+                                                    "mint_address": failed.get("mint_address").or_else(|| failed.get("mint")).cloned().unwrap_or(serde_json::Value::Null),
+                                                    "reason": error,
+                                                    "retrying": true,
+                                                    "paper_only": true,
+                                                    "execution_mode": "simulated"
+                                                }
+                                            }));
+                                        }
                                     }
                                 }
                             }
