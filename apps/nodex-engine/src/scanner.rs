@@ -90,6 +90,12 @@ pub(super) fn start_launch_processor(
                     seen_signatures.lock().await.remove(&signature);
                     continue;
                 };
+                // A launch transaction may already be queued when the operator
+                // pauses. Drop it before metadata discovery or token creation.
+                if control.read().await.paused {
+                    seen_signatures.lock().await.remove(&signature);
+                    continue;
+                }
                 let decoded = match decode_pump_fun_create(&transaction, &signature, &program_id) {
                     Ok(Some(decoded)) => decoded,
                     Ok(None) => continue,
@@ -224,6 +230,13 @@ pub(super) fn start_launch_processor(
                         partial
                     }
                 };
+
+                // Pause may have arrived while metadata RPC was in flight.
+                // Do not create a new token record after discovery has been paused.
+                if control.read().await.paused {
+                    inflight_mints.lock().await.remove(&mint_address);
+                    continue;
+                }
 
                 let creator_address = launch.creator_address.clone();
                 let mut identity = serde_json::Map::new();
