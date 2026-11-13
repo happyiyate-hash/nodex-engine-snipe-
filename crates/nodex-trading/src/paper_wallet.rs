@@ -64,6 +64,8 @@ pub enum PaperWalletError {
     InvalidRentRefund,
     #[error("rent is already tracked for this token account")]
     RentAccountAlreadyTracked,
+    #[error("paper sale settlement exceeds the invested balance")]
+    InvalidSaleSettlement,
 }
 
 impl Default for PaperWallet {
@@ -192,6 +194,33 @@ impl PaperWallet {
         }))
     }
 
+    /// Settle a complete simulated token sale. The token cost basis is removed
+    /// from invested capital and the sale proceeds are credited to available SOL.
+    /// This changes only the in-memory paper ledger; persistence commits it atomically.
+    pub fn settle_full_sale(
+        &mut self,
+        mint: &str,
+        invested_lamports: u64,
+        proceeds_lamports: u64,
+    ) -> Result<LedgerEntry, PaperWalletError> {
+        if invested_lamports == 0 || invested_lamports > self.invested_balance_lamports {
+            return Err(PaperWalletError::InvalidSaleSettlement);
+        }
+        let available = self
+            .available_balance_lamports
+            .checked_add(proceeds_lamports)
+            .ok_or(PaperWalletError::ArithmeticOverflow)?;
+        self.invested_balance_lamports -= invested_lamports;
+        self.available_balance_lamports = available;
+        Ok(LedgerEntry {
+            id: Uuid::new_v4(),
+            kind: "paper_sell_settlement".into(),
+            amount_lamports: proceeds_lamports,
+            available_after_lamports: available,
+            reference: Some(mint.to_owned()),
+        })
+    }
+
     pub fn refund_rent(&mut self, amount_lamports: u64) -> Result<LedgerEntry, PaperWalletError> {
         if amount_lamports > self.locked_rent_lamports {
             return Err(PaperWalletError::InvalidRentRefund);
@@ -304,6 +333,27 @@ mod tests {
         assert_eq!(
             wallet.reserve_buy_for_token("mint-1", &costs()),
             Err(PaperWalletError::RentAccountAlreadyTracked)
+        );
+    }
+
+    #[test]
+    fn full_sale_returns_proceeds_and_releases_invested_capital() {
+        let mut wallet = PaperWallet::default();
+        wallet.reserve_buy(&costs()).unwrap();
+        let available_before = wallet.available_balance_lamports;
+        let ledger = wallet.settle_full_sale("mint-a", 10_000_000, 15_000_000).unwrap();
+        assert_eq!(wallet.invested_balance_lamports, 0);
+        assert_eq!(wallet.available_balance_lamports, available_before + 15_000_000);
+        assert_eq!(ledger.kind, "paper_sell_settlement");
+        assert_eq!(ledger.reference.as_deref(), Some("mint-a"));
+    }
+
+    #[test]
+    fn full_sale_rejects_cost_basis_larger_than_invested_capital() {
+        let mut wallet = PaperWallet::default();
+        assert_eq!(
+            wallet.settle_full_sale("mint-a", 1, 1),
+            Err(PaperWalletError::InvalidSaleSettlement)
         );
     }
 
