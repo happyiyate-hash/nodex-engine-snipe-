@@ -367,7 +367,34 @@ pub(super) fn start_launch_processor(
                 let approved_database = database.clone();
                 let inflight_mints_for_scan = inflight_mints.clone();
                 let trading_settings_for_scan = trading_settings.clone();
+                let scan_control = control.clone();
                 tokio::spawn(async move {
+                    if scan_control.read().await.paused {
+                        let retry_after = (chrono::Utc::now() + chrono::Duration::seconds(5))
+                            .to_rfc3339();
+                        if let Ok(snapshot) = approved_registry.upsert_patch(
+                            &scan_mint,
+                            json!({
+                                "security": {
+                                    "status": "paused",
+                                    "decision": "PENDING",
+                                    "scan_cache": {
+                                        "status": "retry_wait",
+                                        "retry_after": retry_after,
+                                        "last_error": "Security validation was deferred because the engine is paused."
+                                    }
+                                }
+                            }),
+                        ) {
+                            let _ = nodex_persistence::save_token_state(
+                                &approved_database,
+                                &snapshot,
+                            )
+                            .await;
+                        }
+                        inflight_mints_for_scan.lock().await.remove(&scan_mint);
+                        return;
+                    }
                     let scan_settings = trading_settings_for_scan.read().await.clone();
                     let progress_events = scan_events.clone();
                     let progress_mint = scan_mint.clone();
