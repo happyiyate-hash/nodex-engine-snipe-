@@ -721,37 +721,47 @@ impl SolanaRpc {
         };
         report.provider_responses.push(account_evidence);
         on_progress("authorities", 32, "Checking mint and freeze authorities");
-        // Holder sampling is deliberately not part of the fast launch-verification
-        // gate. It is optional enrichment and must not hold a launch in diagnostics.
+        // RugCheck and top-holder sampling are independent provider reads. Run them
+        // concurrently so optional holder enrichment does not add its latency to the
+        // external risk-report request. Neither result can bypass the final entry gates.
         on_progress("rugcheck", 70, "Checking RugCheck risk report");
-        report.rugcheck = self.get_rugcheck_summary(mint).await;
-        if !diagnostic_mode {
-            if let Some(supply_raw) = report.supply_raw.as_deref() {
-                on_progress(
-                    "holder_distribution",
-                    82,
-                    "Sampling the largest token holders",
-                );
-                match tokio::time::timeout(
+        let supply_raw = report.supply_raw.clone();
+        let holder_scan = async {
+            if diagnostic_mode {
+                return None;
+            }
+            let supply_raw = supply_raw.as_deref()?;
+            on_progress(
+                "holder_distribution",
+                82,
+                "Sampling the largest token holders",
+            );
+            Some(
+                tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     self.sample_holder_distribution(mint, supply_raw),
                 )
-                .await
-                {
-                    Ok(Ok(distribution)) => report.holder_distribution = Some(distribution),
-                    Ok(Err(error)) => report.checks.push(SecurityCheck {
-                        name: "holder_distribution".into(),
-                        status: "unverified".into(),
-                        severity: "warning".into(),
-                        detail: format!("Top-holder sampling was unavailable; paper strategy will require stronger market confirmation: {error}"),
-                    }),
-                    Err(_) => report.checks.push(SecurityCheck {
-                        name: "holder_distribution".into(),
-                        status: "unverified".into(),
-                        severity: "warning".into(),
-                        detail: "Top-holder sampling exceeded its 5-second optional-enrichment budget; paper strategy will require stronger market confirmation.".into(),
-                    }),
-                }
+                .await,
+            )
+        };
+        let (rugcheck, holder_result) =
+            tokio::join!(self.get_rugcheck_summary(mint), holder_scan);
+        report.rugcheck = rugcheck;
+        if let Some(holder_result) = holder_result {
+            match holder_result {
+                Ok(Ok(distribution)) => report.holder_distribution = Some(distribution),
+                Ok(Err(error)) => report.checks.push(SecurityCheck {
+                    name: "holder_distribution".into(),
+                    status: "unverified".into(),
+                    severity: "warning".into(),
+                    detail: format!("Top-holder sampling was unavailable; paper strategy will require stronger market confirmation: {error}"),
+                }),
+                Err(_) => report.checks.push(SecurityCheck {
+                    name: "holder_distribution".into(),
+                    status: "unverified".into(),
+                    severity: "warning".into(),
+                    detail: "Top-holder sampling exceeded its 5-second optional-enrichment budget; paper strategy will require stronger market confirmation.".into(),
+                }),
             }
         }
         let blocking_rugcheck_risks = report
