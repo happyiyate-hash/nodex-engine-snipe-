@@ -84,8 +84,6 @@ pub(crate) fn mark_position(
         }
         object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
     }
-
-
 }
 
 #[cfg(test)]
