@@ -574,6 +574,7 @@ fn activity_log_from_event(event: &serde_json::Value) -> Option<serde_json::Valu
             | "market_subscription_subscribed"
             | "market_subscription_waiting"
             | "market_subscription_failed"
+            | "market_monitor_status"
             | "provider_status"
             | "connection_status"
             | "engine_state"
