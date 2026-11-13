@@ -550,6 +550,8 @@ mod tests {
             ..TradingBotConfig::default()
         };
         let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = true;
         assert!(evaluate_position_exit(&mut policy, 1.5).is_none());
         let trigger = evaluate_position_exit(&mut policy, 1.34).unwrap();
         assert_eq!(trigger.reason, PositionExitReason::TrailingStop);
