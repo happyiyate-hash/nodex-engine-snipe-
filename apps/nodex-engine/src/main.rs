@@ -631,6 +631,27 @@ fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
     })
 }
 
+fn market_quote_is_fresh(data: &serde_json::Value) -> bool {
+    const MAX_QUOTE_AGE_MS: i64 = 30_000;
+    let timestamp_ms = data
+        .get("timestamp_ms")
+        .or_else(|| data.get("block_time_ms"))
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            data.get("received_at")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.timestamp_millis())
+        });
+    let Some(timestamp_ms) = timestamp_ms else {
+        return false;
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    timestamp_ms > 0
+        && timestamp_ms <= now_ms.saturating_add(60_000)
+        && now_ms.saturating_sub(timestamp_ms) <= MAX_QUOTE_AGE_MS
+}
+
 fn timestamp_ms_from_value(value: Option<&serde_json::Value>) -> Option<i64> {
     let value = value?;
     if let Some(number) = value.as_i64() {
@@ -1474,24 +1495,26 @@ fn start_token_state_projector(
                                 .is_some_and(|pool| pool_quote_is_sol.contains(pool)),
                             _ => false,
                         };
-                        paper_trading::evaluate_and_execute_paper_entry(
-                            mint,
-                            &data,
-                            observations,
-                            quote_is_sol,
-                            &registry,
-                            &database,
-                            &profile,
-                            &portfolio_positions,
-                            &wallet,
-                            &sol_price,
-                            &control,
-                            &trading_settings,
-                            &events,
-                            &mut last_evaluation_signatures,
-                            &mut last_entry_attempts,
-                        )
-                        .await;
+                        if market_quote_is_fresh(&data) {
+                            paper_trading::evaluate_and_execute_paper_entry(
+                                mint,
+                                &data,
+                                observations,
+                                quote_is_sol,
+                                &registry,
+                                &database,
+                                &profile,
+                                &portfolio_positions,
+                                &wallet,
+                                &sol_price,
+                                &control,
+                                &trading_settings,
+                                &events,
+                                &mut last_evaluation_signatures,
+                                &mut last_entry_attempts,
+                            )
+                            .await;
+                        }
                         let event_timestamp_ms = data
                             .get("timestamp_ms")
                             .or_else(|| data.get("block_time_ms"))
@@ -1514,6 +1537,7 @@ fn start_token_state_projector(
                     }
                     if kind == "market_price_update"
                         && control.read().await.position_monitoring_enabled
+                        && market_quote_is_fresh(&data)
                     {
                         if let Some(price_sol) =
                             data.get("price_sol").and_then(serde_json::Value::as_f64)
@@ -1731,6 +1755,41 @@ fn start_token_state_projector(
 /// Complete one triggered full-position paper sale. Wallet, ledger and
 /// closed-position state are committed in one SQLite transaction before the
 /// in-memory state and browser events are updated.
+/// Retry persisted exit requests independently of market ticks. This closes
+/// the restart gap and ensures a failed settlement can complete even if the
+/// token's next price update is delayed.
+fn start_pending_exit_recovery(
+    database: sqlx::SqlitePool,
+    wallet: Arc<RwLock<PaperWallet>>,
+    sol_price: Arc<RwLock<SolPriceSnapshot>>,
+    positions: Arc<RwLock<Vec<serde_json::Value>>>,
+    profile: Arc<RwLock<serde_json::Value>>,
+    events: broadcast::Sender<serde_json::Value>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let pending_ids: Vec<String> = positions.read().await.iter()
+                .filter(|position| {
+                    position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                        && position.get("exit_requested").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+                .filter_map(|position| position.get("position_id").or_else(|| position.get("id"))
+                    .and_then(serde_json::Value::as_str).map(str::to_owned))
+                .collect();
+            for position_id in pending_ids {
+                if let Err(error) = settle_triggered_paper_exit(
+                    &database, &wallet, &sol_price, &positions, &profile, &events, &position_id
+                ).await {
+                    tracing::warn!(%error, %position_id, "Pending paper exit recovery will retry");
+                }
+            }
+        }
+    });
+}
+
 async fn settle_triggered_paper_exit(
     database: &sqlx::SqlitePool,
     wallet: &Arc<RwLock<PaperWallet>>,
@@ -3432,6 +3491,78 @@ struct PositionRiskUpdate {
 }
 
 /// Return the authoritative risk policy and trailing eligibility for one position.
+/// Manually close one complete open paper position using its latest fresh market mark.
+async fn manual_paper_sell(
+    State(state): State<AppState>,
+    Path(position_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let pending = {
+        let mut positions = state.portfolio_positions.write().await;
+        let position = positions
+            .iter_mut()
+            .find(|position| {
+                position.get("position_id").and_then(serde_json::Value::as_str)
+                    == Some(position_id.as_str())
+                    || position.get("id").and_then(serde_json::Value::as_str)
+                        == Some(position_id.as_str())
+            })
+            .ok_or((StatusCode::NOT_FOUND, "Paper position was not found.".to_string()))?;
+        if position.get("status").and_then(serde_json::Value::as_str) != Some("open") {
+            return Err((StatusCode::CONFLICT, "Only an open paper position can be sold.".into()));
+        }
+        let price = position.get("current_price_sol")
+            .or_else(|| position.get("price_sol"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|price| price.is_finite() && *price > 0.0)
+            .ok_or((StatusCode::CONFLICT, "No valid market price is available for this paper position.".into()))?;
+        if position.get("exit_requested").and_then(serde_json::Value::as_bool) != Some(true) {
+            let object = position.as_object_mut().ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Stored paper position is invalid.".to_string(),
+            ))?;
+            object.insert("exit_requested".into(), json!(true));
+            object.insert("exit_trigger_reason".into(), json!("manual"));
+            object.insert("exit_trigger_price_sol".into(), json!(price));
+            object.insert("exit_requested_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+        }
+        let snapshot = position.clone();
+        let mint = snapshot.get("mint_address").or_else(|| snapshot.get("mint"))
+            .and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        if mint.is_empty() {
+            return Err((StatusCode::CONFLICT, "Paper position is missing its token mint.".into()));
+        }
+        nodex_persistence::save_portfolio_position(
+            &state.database, &position_id, &mint, "open", &snapshot
+        ).await.map_err(|error| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not persist the manual paper exit request: {error}")
+        ))?;
+        snapshot
+    };
+    settle_triggered_paper_exit(
+        &state.database,
+        &state.wallet,
+        &state.sol_price,
+        &state.portfolio_positions,
+        &state.profile,
+        &state.events,
+        &position_id,
+    ).await.map_err(|error| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("Paper sale is pending settlement and will be retried: {error}")
+    ))?;
+    Ok(Json(json!({
+        "status":"sold",
+        "position_id":position_id,
+        "paper_only":true,
+        "execution_mode":"simulated",
+        "full_exit":true,
+        "position":pending
+    })))
+}
+
 async fn get_position_risk(
     State(state): State<AppState>,
     Path(position_id): Path<String>,
@@ -4845,6 +4976,14 @@ async fn main() -> anyhow::Result<()> {
         profile: profile_state,
         portfolio_positions,
     };
+    start_pending_exit_recovery(
+        state.database.clone(),
+        state.wallet.clone(),
+        state.sol_price.clone(),
+        state.portfolio_positions.clone(),
+        state.profile.clone(),
+        state.events.clone(),
+    );
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/engine/status", get(engine_status))
@@ -4870,6 +5009,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/portfolio/positions/:position_id/risk",
             get(get_position_risk).put(update_position_risk),
+        )
+        .route(
+            "/api/v1/portfolio/positions/:position_id/sell",
+            post(manual_paper_sell),
         )
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
