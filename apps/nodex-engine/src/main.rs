@@ -86,7 +86,9 @@ struct PreferredOwner {
 fn default_true() -> bool {
     true
 }
-fn default_trailing_activation_profit_pct() -> f64 { 20.0 }
+fn default_trailing_activation_profit_pct() -> f64 {
+    20.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -209,7 +211,10 @@ impl TradingSettings {
                 "trailing_stop_callback_pct",
                 self.trailing_stop_callback_pct,
             ),
-            ("trailing_activation_profit_pct", self.trailing_activation_profit_pct),
+            (
+                "trailing_activation_profit_pct",
+                self.trailing_activation_profit_pct,
+            ),
             ("paper_starting_balance", self.paper_starting_balance),
         ];
         for (name, value) in finite_non_negative {
