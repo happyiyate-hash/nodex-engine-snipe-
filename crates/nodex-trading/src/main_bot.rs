@@ -218,34 +218,40 @@ pub fn evaluate_position_exit(
     }
     policy.highest_price_sol = policy.highest_price_sol.max(current_price_sol);
     let pnl_pct = (current_price_sol / policy.entry_price_sol - 1.0) * 100.0;
-    if policy.trailing_stop_eligible
-        && policy.trailing_stop_enabled
-        && !policy.trailing_stop_active
-        && pnl_pct >= policy.trailing_activation_profit_pct
-    {
+    // Trailing mode is a complete exit-policy switch, not an extra rule layered
+    // over the fixed stop-loss/take-profit. It starts protecting from the entry
+    // price immediately, then follows the highest observed price.
+    let trailing_mode = policy.trailing_stop_eligible && policy.trailing_stop_enabled;
+    if trailing_mode {
         policy.trailing_stop_active = true;
-    }
-    policy.trailing_stop_price_sol = if policy.trailing_stop_active {
-        policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0)
+        policy.highest_price_sol = policy.highest_price_sol.max(policy.entry_price_sol);
+        policy.trailing_stop_price_sol =
+            policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0);
     } else {
-        0.0
-    };
+        policy.trailing_stop_active = false;
+        policy.trailing_stop_price_sol = 0.0;
+    }
 
-    // The hard maximum-profit cap is evaluated first and is an immediate full exit,
-    // even while price is still rising. A zero target disables the corresponding
-    // optional threshold; the +500% maximum is the default.
-    let trigger = if policy.maximum_profit_pct > 0.0 && pnl_pct >= policy.maximum_profit_pct {
-        Some(PositionExitReason::MaximumProfit)
-    } else if policy.stop_loss_pct > 0.0 && current_price_sol <= policy.stop_loss_price_sol {
-        Some(PositionExitReason::StopLoss)
-    } else if policy.take_profit_pct > 0.0 && current_price_sol >= policy.take_profit_price_sol {
-        Some(PositionExitReason::TakeProfit)
-    } else if policy.trailing_stop_eligible
-        && policy.trailing_stop_enabled
-        && policy.trailing_stop_active
-        && current_price_sol <= policy.trailing_stop_price_sol
+    // The optional maximum-profit ceiling belongs only to eligible, enabled
+    // trailing mode. A zero target disables it. Fixed SL/TP are ignored while
+    // trailing mode is active and remain unchanged in normal mode.
+    let trigger = if trailing_mode
+        && policy.maximum_profit_pct > 0.0
+        && pnl_pct >= policy.maximum_profit_pct
     {
+        Some(PositionExitReason::MaximumProfit)
+    } else if trailing_mode && current_price_sol <= policy.trailing_stop_price_sol {
         Some(PositionExitReason::TrailingStop)
+    } else if !trailing_mode
+        && policy.stop_loss_pct > 0.0
+        && current_price_sol <= policy.stop_loss_price_sol
+    {
+        Some(PositionExitReason::StopLoss)
+    } else if !trailing_mode
+        && policy.take_profit_pct > 0.0
+        && current_price_sol >= policy.take_profit_price_sol
+    {
+        Some(PositionExitReason::TakeProfit)
     } else {
         None
     }?;
