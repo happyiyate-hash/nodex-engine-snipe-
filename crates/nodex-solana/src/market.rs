@@ -626,7 +626,7 @@ async fn connect_market_stream(
     events: &broadcast::Sender<Value>,
     commands: &mut mpsc::Receiver<MarketCommand>,
     desired: &mut HashMap<String, MarketSubscription>,
-    waiting: &mut std::collections::VecDeque<MarketSubscription>,
+    waiting: &mut std::collections::VecDeque<Vec<MarketSubscription>>,
 ) -> Result<()> {
     let (socket, _) = connect_async(ws_url)
         .await
