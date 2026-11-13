@@ -1544,14 +1544,15 @@ fn start_token_state_projector(
                                 }
                                 updated_positions.push(position.clone());
                             }
+                            let position_snapshot = positions.clone();
+                            drop(positions);
                             let wallet_snapshot = wallet.read().await.clone();
                             let portfolio_snapshot =
                                 portfolio::calculator::calculate_portfolio_snapshot(
                                     &wallet_snapshot,
                                     &price_snapshot,
-                                    &positions,
+                                    &position_snapshot,
                                 );
-                            drop(positions);
 
                             for triggered in &triggered_positions {
                                 portfolio::event_publisher::publish_exit_triggered(
