@@ -3411,7 +3411,6 @@ async fn update_position_risk(
             update.trailing_stop_callback_pct,
             100.0,
         ),
-        ("maximum_profit_pct", update.maximum_profit_pct, 5_000.0),
     ] {
         if value.is_some_and(|number| !number.is_finite() || number < 0.0 || number > max) {
             return Err((
@@ -3419,6 +3418,13 @@ async fn update_position_risk(
                 format!("{name} must be between 0 and {max}."),
             ));
         }
+    }
+
+    if update.maximum_profit_pct.is_some_and(|number| !number.is_finite() || number < 0.0) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "maximum_profit_pct must be a finite non-negative percentage.".into(),
+        ));
     }
 
     let mut positions = state.portfolio_positions.write().await;
