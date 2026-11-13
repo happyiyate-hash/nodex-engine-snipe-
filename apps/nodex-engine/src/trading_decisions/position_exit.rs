@@ -8,26 +8,54 @@ use serde_json::{json, Value};
 pub(crate) fn assess_trailing_stop_eligibility(evidence: &Value) -> (bool, String) {
     let liquidity = evidence.get("liquidity_usd").and_then(Value::as_f64);
     if !liquidity.is_some_and(|value| value.is_finite() && value >= 3_000.0) {
-        return (false, "Trailing stop unavailable: confirmed liquidity is below $3,000 or unavailable.".into());
+        return (
+            false,
+            "Trailing stop unavailable: confirmed liquidity is below $3,000 or unavailable.".into(),
+        );
     }
     let pressure = evidence.get("buy_pressure_pct").and_then(Value::as_f64);
     if !pressure.is_some_and(|value| value.is_finite() && value >= 55.0) {
-        return (false, "Trailing stop unavailable: confirmed buy pressure is below 55% or unavailable.".into());
+        return (
+            false,
+            "Trailing stop unavailable: confirmed buy pressure is below 55% or unavailable.".into(),
+        );
     }
-    let buys = evidence.get("buy_count_5m").and_then(Value::as_u64).unwrap_or(0);
-    let sells = evidence.get("sell_count_5m").and_then(Value::as_u64).unwrap_or(0);
+    let buys = evidence
+        .get("buy_count_5m")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let sells = evidence
+        .get("sell_count_5m")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     if buys < 2 || buys < sells {
-        return (false, "Trailing stop unavailable: recent confirmed buys do not sufficiently outweigh sells.".into());
+        return (
+            false,
+            "Trailing stop unavailable: recent confirmed buys do not sufficiently outweigh sells."
+                .into(),
+        );
     }
     let change_1m = evidence.get("price_change_1m_pct").and_then(Value::as_f64);
     if !change_1m.is_some_and(|value| value.is_finite() && (-20.0..=12.0).contains(&value)) {
-        return (false, "Trailing stop unavailable: one-minute price behaviour is missing or too volatile.".into());
+        return (
+            false,
+            "Trailing stop unavailable: one-minute price behaviour is missing or too volatile."
+                .into(),
+        );
     }
     let change_5m = evidence.get("price_change_5m_pct").and_then(Value::as_f64);
     if !change_5m.is_some_and(|value| value.is_finite() && (-40.0..=35.0).contains(&value)) {
-        return (false, "Trailing stop unavailable: five-minute price behaviour is missing or too volatile.".into());
+        return (
+            false,
+            "Trailing stop unavailable: five-minute price behaviour is missing or too volatile."
+                .into(),
+        );
     }
-    (true, "Eligible: liquidity, confirmed buy pressure and recent price movement meet the orderly-trend criteria.".into())
+    (
+        true,
+        "Eligible: liquidity, confirmed buy pressure and recent price movement meet the orderly-trend criteria."
+            .into(),
+    )
 }
 
 /// Evaluate an open paper position using its already-computed P&L and risk policy.
@@ -59,15 +87,42 @@ pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
         "risk_policy".into(),
         serde_json::to_value(&policy).unwrap_or(Value::Null),
     );
-    object.insert("trailing_stop_eligible".into(), json!(policy.trailing_stop_eligible));
-    object.insert("trailing_stop_eligibility_reason".into(), json!(policy.trailing_stop_eligibility_reason));
-    object.insert("trailing_stop_enabled".into(), json!(policy.trailing_stop_enabled));
-    object.insert("trailing_activation_profit_pct".into(), json!(policy.trailing_activation_profit_pct));
-    object.insert("trailing_stop_callback_pct".into(), json!(policy.trailing_stop_callback_pct));
-    object.insert("trailing_stop_active".into(), json!(policy.trailing_stop_active));
-    object.insert("trailing_stop_price_sol".into(), json!(policy.trailing_stop_price_sol));
-    object.insert("maximum_profit_pct".into(), json!(policy.maximum_profit_pct));
-    object.insert("maximum_profit_price_sol".into(), json!(policy.maximum_profit_price_sol));
+    object.insert(
+        "trailing_stop_eligible".into(),
+        json!(policy.trailing_stop_eligible),
+    );
+    object.insert(
+        "trailing_stop_eligibility_reason".into(),
+        json!(policy.trailing_stop_eligibility_reason),
+    );
+    object.insert(
+        "trailing_stop_enabled".into(),
+        json!(policy.trailing_stop_enabled),
+    );
+    object.insert(
+        "trailing_activation_profit_pct".into(),
+        json!(policy.trailing_activation_profit_pct),
+    );
+    object.insert(
+        "trailing_stop_callback_pct".into(),
+        json!(policy.trailing_stop_callback_pct),
+    );
+    object.insert(
+        "trailing_stop_active".into(),
+        json!(policy.trailing_stop_active),
+    );
+    object.insert(
+        "trailing_stop_price_sol".into(),
+        json!(policy.trailing_stop_price_sol),
+    );
+    object.insert(
+        "maximum_profit_pct".into(),
+        json!(policy.maximum_profit_pct),
+    );
+    object.insert(
+        "maximum_profit_price_sol".into(),
+        json!(policy.maximum_profit_price_sol),
+    );
     object.insert("highest_price_sol".into(), json!(policy.highest_price_sol));
     let Some(trigger) = trigger else {
         return false;
@@ -127,7 +182,8 @@ mod tests {
     #[test]
     fn hard_maximum_profit_exits_at_five_hundred_percent_while_price_is_rising() {
         let config = nodex_trading::main_bot::TradingBotConfig::default();
-        let mut policy = nodex_trading::main_bot::capture_position_risk(&config, 1.0, 100.0).unwrap();
+        let mut policy =
+            nodex_trading::main_bot::capture_position_risk(&config, 1.0, 100.0).unwrap();
         policy.take_profit_pct = 0.0;
         policy.take_profit_price_sol = 0.0;
         policy.maximum_profit_pct = 500.0;
@@ -136,14 +192,18 @@ mod tests {
         policy.trailing_stop_enabled = true;
         policy.trailing_activation_profit_pct = 50.0;
         let trigger = nodex_trading::main_bot::evaluate_position_exit(&mut policy, 6.0).unwrap();
-        assert_eq!(trigger.reason, nodex_trading::main_bot::PositionExitReason::MaximumProfit);
+        assert_eq!(
+            trigger.reason,
+            nodex_trading::main_bot::PositionExitReason::MaximumProfit
+        );
         assert_eq!(trigger.pnl_pct, 500.0);
     }
 
     #[test]
     fn trailing_stop_activates_at_profit_threshold_and_tracks_high_water_mark() {
         let config = nodex_trading::main_bot::TradingBotConfig::default();
-        let mut policy = nodex_trading::main_bot::capture_position_risk(&config, 1.0, 100.0).unwrap();
+        let mut policy =
+            nodex_trading::main_bot::capture_position_risk(&config, 1.0, 100.0).unwrap();
         policy.take_profit_pct = 0.0;
         policy.take_profit_price_sol = 0.0;
         policy.maximum_profit_pct = 500.0;
@@ -155,7 +215,10 @@ mod tests {
         assert!(policy.trailing_stop_active);
         assert!((policy.trailing_stop_price_sol - 1.35).abs() < 1e-9);
         let trigger = nodex_trading::main_bot::evaluate_position_exit(&mut policy, 1.34).unwrap();
-        assert_eq!(trigger.reason, nodex_trading::main_bot::PositionExitReason::TrailingStop);
+        assert_eq!(
+            trigger.reason,
+            nodex_trading::main_bot::PositionExitReason::TrailingStop
+        );
     }
 
     #[test]
