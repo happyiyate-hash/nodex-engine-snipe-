@@ -392,6 +392,13 @@ pub(super) async fn evaluate_and_execute_paper_entry(
 
     let mut wallet_guard = wallet.write().await;
     let mut positions_guard = portfolio_positions.write().await;
+    // Re-check after acquiring the settlement locks. Pause can arrive while
+    // market/security evaluation is running; no new position may slip through.
+    let latest_control = control.read().await;
+    if latest_control.paused || !latest_control.new_entries_enabled {
+        return;
+    }
+    drop(latest_control);
     if positions_guard.iter().any(|position| {
         position
             .get("mint_address")
