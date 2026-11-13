@@ -975,6 +975,7 @@ pub(super) fn start_launch_processor(
                             crate::market_monitoring::schedule_early_monitor_expiry(
                                 monitor,
                                 scan_mint.clone(),
+                                launch.detected_at.clone(),
                                 approved_database.clone(),
                                 approved_registry.clone(),
                                 scan_events.clone(),
