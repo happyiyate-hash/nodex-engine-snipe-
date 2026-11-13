@@ -16,7 +16,7 @@ pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
     let pnl_sol = position
         .get("unrealized_pnl_sol")
         .and_then(Value::as_f64);
-    if !pnl_pct.is_some_and(f64::is_finite) || !pnl_sol.is_some_and(f64::is_finite) {
+    if !pnl_sol.is_some_and(f64::is_finite) {
         return false;
     }
 
