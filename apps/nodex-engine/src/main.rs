@@ -5085,6 +5085,10 @@ async fn main() -> anyhow::Result<()> {
         profile: profile_state,
         portfolio_positions,
     };
+    // Restore saved-token market subscriptions on every process start, even when
+    // the engine is paused. Pause disables new discovery and entries, not
+    // monitoring or exits for tokens and positions that already exist.
+    market_monitoring::ensure_market_monitor(&state).await;
     start_pending_exit_recovery(
         state.database.clone(),
         state.wallet.clone(),
