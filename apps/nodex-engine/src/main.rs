@@ -3525,9 +3525,7 @@ async fn manual_paper_sell(
                     .get("position_id")
                     .and_then(serde_json::Value::as_str)
                     == Some(position_id.as_str())
-                    || position
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
+                    || position.get("id").and_then(serde_json::Value::as_str)
                         == Some(position_id.as_str())
             })
             .ok_or((
@@ -3620,9 +3618,7 @@ async fn manual_paper_sell(
                 .get("position_id")
                 .and_then(serde_json::Value::as_str)
                 == Some(position_id.as_str())
-                || position
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
+                || position.get("id").and_then(serde_json::Value::as_str)
                     == Some(position_id.as_str())
         })
         .cloned()
