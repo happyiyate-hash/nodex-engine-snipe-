@@ -20,6 +20,13 @@ pub struct TradingBotConfig {
     pub maximum_open_positions: usize,
     pub minimum_distinct_buyers_high_score: usize,
     pub minimum_distinct_buyers_other: usize,
+    pub minimum_recent_buyers_high_score: usize,
+    pub minimum_recent_buyers_other: usize,
+    pub minimum_30s_buy_pressure_pct: f64,
+    pub minimum_30s_buy_sell_ratio: f64,
+    pub minimum_observation_seconds: u64,
+    pub maximum_early_entry_age_seconds: u64,
+    pub maximum_early_entry_market_cap_usd: f64,
     pub high_creator_score_threshold: f64,
     pub low_score_observation_seconds: u64,
     pub blacklist_known_rug_creators: bool,
@@ -43,8 +50,15 @@ impl Default for TradingBotConfig {
             minimum_5m_buy_volume_usd: 1_000.0,
             maximum_top10_concentration_pct: 20.0,
             maximum_open_positions: 3,
-            minimum_distinct_buyers_high_score: 2,
-            minimum_distinct_buyers_other: 3,
+            minimum_distinct_buyers_high_score: 5,
+            minimum_distinct_buyers_other: 8,
+            minimum_recent_buyers_high_score: 5,
+            minimum_recent_buyers_other: 8,
+            minimum_30s_buy_pressure_pct: 75.0,
+            minimum_30s_buy_sell_ratio: 2.5,
+            minimum_observation_seconds: 90,
+            maximum_early_entry_age_seconds: 300,
+            maximum_early_entry_market_cap_usd: 150_000.0,
             high_creator_score_threshold: 80.0,
             low_score_observation_seconds: 30,
             blacklist_known_rug_creators: true,
@@ -353,10 +367,9 @@ pub fn evaluate_entry(
         0
     });
     let entry_speed = if high_score { "fast" } else { "confirmation" };
-    const MIN_OBSERVATION_SECONDS: u64 = 90;
-    const MAX_EARLY_ENTRY_AGE_SECONDS: u64 = 300;
-    const MAX_EARLY_ENTRY_MARKET_CAP_USD: f64 = 150_000.0;
-    const MIN_30S_BUY_PRESSURE_PCT: f64 = 65.0;
+    let minimum_observation_seconds = config.minimum_observation_seconds;
+    let maximum_early_entry_age_seconds = config.maximum_early_entry_age_seconds;
+    let maximum_early_entry_market_cap_usd = config.maximum_early_entry_market_cap_usd;
     let mut reasons = Vec::new();
     let mut rejected = false;
     let mut waiting = false;
@@ -415,16 +428,16 @@ pub fn evaluate_entry(
     }
     match market.market_cap_usd {
         Some(value)
-            if value.is_finite() && value > 0.0 && value <= MAX_EARLY_ENTRY_MARKET_CAP_USD => {}
-        Some(value) if value.is_finite() && value > MAX_EARLY_ENTRY_MARKET_CAP_USD => {
+            if value.is_finite() && value > 0.0 && value <= maximum_early_entry_market_cap_usd => {}
+        Some(value) if value.is_finite() && value > maximum_early_entry_market_cap_usd => {
             wait!("Market cap is already above the early-entry ceiling; avoiding a late entry.")
         }
         _ => wait!("Waiting for a reliable market-cap estimate from token supply and live price."),
     }
-    if market.seconds_since_launch < MIN_OBSERVATION_SECONDS {
+    if market.seconds_since_launch < minimum_observation_seconds {
         wait!("Collecting at least 90 seconds of confirmed market behaviour before entry.");
     }
-    if market.seconds_since_launch > MAX_EARLY_ENTRY_AGE_SECONDS {
+    if market.seconds_since_launch > maximum_early_entry_age_seconds {
         reject!("The five-minute early-entry observation window has expired; skipping this token rather than chasing it late.");
     }
     match market.liquidity_usd {
@@ -476,17 +489,24 @@ pub fn evaluate_entry(
     if market.distinct_buyers_5m < minimum_buyers {
         wait!("Not enough distinct buying wallets have participated yet.");
     }
-    let minimum_recent_buyers = if high_score { 2 } else { 3 };
+    let minimum_recent_buyers = if high_score {
+        config.minimum_recent_buyers_high_score
+    } else {
+        config.minimum_recent_buyers_other
+    };
     if market.distinct_buyers_30s < minimum_recent_buyers {
         wait!("Not enough distinct wallets have bought in the last 30 seconds to confirm fresh demand.");
     }
-    if market.buy_count_30s == 0 || market.sell_count_30s >= market.buy_count_30s {
-        wait!("Recent confirmed sells are matching or exceeding buys; waiting for buyers to regain control.");
+    if market.buy_count_30s == 0
+        || market.sell_count_30s as f64 * config.minimum_30s_buy_sell_ratio
+            > market.buy_count_30s as f64
+    {
+        wait!("Confirmed 30-second buy count does not meet the configured buy/sell ratio.");
     }
     match market.buy_pressure_30s_pct {
-        Some(value) if value.is_finite() && value >= MIN_30S_BUY_PRESSURE_PCT => {}
+        Some(value) if value.is_finite() && value >= config.minimum_30s_buy_pressure_pct => {}
         Some(_) => {
-            wait!("Thirty-second buy pressure is below 65%; avoiding weak or sell-dominated flow.")
+            wait!("Thirty-second buy pressure is below the configured minimum; avoiding weak or sell-dominated flow.")
         }
         None => wait!(
             "Waiting for enough confirmed 30-second buy/sell volume to calculate buy pressure."
@@ -542,14 +562,14 @@ mod tests {
             price_change_1m_pct: Some(-4.0),
             price_change_5m_pct: Some(12.0),
             buy_volume_5m_usd: 2_000.0,
-            distinct_buyers_5m: 3,
+            distinct_buyers_5m: 8,
             buy_count_5m: 8,
             sell_count_5m: 1,
             estimated_slippage_pct: Some(2.0),
             seconds_since_launch: 90,
             confirmed_trade_events: 9,
             buy_pressure_pct: Some(80.0),
-            distinct_buyers_30s: 3,
+            distinct_buyers_30s: 8,
             buy_count_30s: 5,
             sell_count_30s: 1,
             buy_pressure_30s_pct: Some(80.0),
@@ -630,7 +650,7 @@ mod tests {
         );
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
         assert_eq!(result.entry_speed, "fast");
-        assert_eq!(result.minimum_distinct_buyers, 2);
+        assert_eq!(result.minimum_distinct_buyers, 5);
     }
 
     #[test]
@@ -751,7 +771,7 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::Wait);
-        assert_eq!(result.minimum_distinct_buyers, 3);
+        assert_eq!(result.minimum_distinct_buyers, 8);
     }
 
     #[test]
