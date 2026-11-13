@@ -125,6 +125,40 @@ mod tests {
     }
 
     #[test]
+    fn hard_maximum_profit_exits_at_five_hundred_percent_while_price_is_rising() {
+        let config = nodex_trading::main_bot::TradingBotConfig::default();
+        let mut policy = nodex_trading::main_bot::capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.take_profit_pct = 0.0;
+        policy.take_profit_price_sol = 0.0;
+        policy.maximum_profit_pct = 500.0;
+        policy.maximum_profit_price_sol = 6.0;
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = true;
+        policy.trailing_activation_profit_pct = 50.0;
+        let trigger = nodex_trading::main_bot::evaluate_position_exit(&mut policy, 6.0).unwrap();
+        assert_eq!(trigger.reason, nodex_trading::main_bot::PositionExitReason::MaximumProfit);
+        assert_eq!(trigger.pnl_pct, 500.0);
+    }
+
+    #[test]
+    fn trailing_stop_activates_at_profit_threshold_and_tracks_high_water_mark() {
+        let config = nodex_trading::main_bot::TradingBotConfig::default();
+        let mut policy = nodex_trading::main_bot::capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.take_profit_pct = 0.0;
+        policy.take_profit_price_sol = 0.0;
+        policy.maximum_profit_pct = 500.0;
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = true;
+        policy.trailing_activation_profit_pct = 50.0;
+        policy.trailing_stop_callback_pct = 10.0;
+        assert!(nodex_trading::main_bot::evaluate_position_exit(&mut policy, 1.5).is_none());
+        assert!(policy.trailing_stop_active);
+        assert!((policy.trailing_stop_price_sol - 1.35).abs() < 1e-9);
+        let trigger = nodex_trading::main_bot::evaluate_position_exit(&mut policy, 1.34).unwrap();
+        assert_eq!(trigger.reason, nodex_trading::main_bot::PositionExitReason::TrailingStop);
+    }
+
+    #[test]
     fn exit_decision_requires_a_fresh_portfolio_valuation() {
         let mut position = json!({
             "risk_policy": {},
