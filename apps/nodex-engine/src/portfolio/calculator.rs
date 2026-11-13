@@ -50,7 +50,9 @@ pub(crate) fn calculate_portfolio_snapshot(
     let realized_pnl_sol: f64 = positions
         .iter()
         .filter_map(|position| {
-            position.get("realized_pnl_sol").and_then(serde_json::Value::as_f64)
+            position
+                .get("realized_pnl_sol")
+                .and_then(serde_json::Value::as_f64)
         })
         .filter(|value| value.is_finite())
         .sum();
