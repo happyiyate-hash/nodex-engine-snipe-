@@ -3615,9 +3615,17 @@ async fn manual_paper_sell(
     )
     .await
     {
-        let failed_position = state.portfolio_positions.read().await.iter()
-            .find(|position| position.get("position_id").and_then(serde_json::Value::as_str)
-                == Some(position_id.as_str()))
+        let failed_position = state
+            .portfolio_positions
+            .read()
+            .await
+            .iter()
+            .find(|position| {
+                position
+                    .get("position_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(position_id.as_str())
+            })
             .cloned()
             .unwrap_or_else(|| json!({"position_id":position_id}));
         let _ = state.events.send(json!({
