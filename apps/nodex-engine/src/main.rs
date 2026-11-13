@@ -584,6 +584,7 @@ fn start_terminal_token_cleanup(
                 .unwrap_or_default();
             if kind != "token_rejected_cleanup"
                 && kind != "strategy_rejected_token"
+                && kind != "paper_entry_evaluation"
                 && kind != "paper_sell_executed"
             {
                 continue;
@@ -597,6 +598,12 @@ fn start_terminal_token_cleanup(
                 continue;
             }
             let data = event.get("data").cloned().unwrap_or_else(|| json!({}));
+            if kind == "paper_entry_evaluation"
+                && !data.get("decision").and_then(serde_json::Value::as_str)
+                    .is_some_and(|decision| decision.eq_ignore_ascii_case("reject"))
+            {
+                continue;
+            }
             let Some(mint) = data
                 .get("mint_address")
                 .and_then(serde_json::Value::as_str)
@@ -1186,7 +1193,10 @@ fn start_token_state_projector(
                 }
                 continue;
             }
-            if kind == "token_rejected_cleanup" || kind == "strategy_rejected_token" {
+            if kind == "token_rejected_cleanup"
+                || kind == "strategy_rejected_token"
+                || kind == "paper_entry_evaluation"
+            {
                 trade_observations.remove(mint);
                 last_evaluation_signatures.remove(mint);
                 last_entry_attempts.remove(mint);
