@@ -102,7 +102,7 @@ async fn run_market_monitor(
     mut commands: mpsc::Receiver<MarketCommand>,
 ) {
     let mut desired = HashMap::<String, MarketSubscription>::new();
-    let mut waiting = std::collections::VecDeque::<MarketSubscription>::new();
+    let mut waiting = std::collections::VecDeque::<Vec<MarketSubscription>>::new();
     let mut reconnect_count = 0_u64;
     let mut next_endpoint = 0usize;
     if ws_urls.is_empty() {
@@ -582,25 +582,41 @@ async fn fill_waiting_market_subscriptions<S>(
     next_request_id: &mut u64,
     desired: &mut HashMap<String, MarketSubscription>,
     pending: &mut HashMap<u64, MarketSubscription>,
-    waiting: &mut std::collections::VecDeque<MarketSubscription>,
+    waiting: &mut std::collections::VecDeque<Vec<MarketSubscription>>,
     cancelled_pending_count: usize,
 ) -> Result<()>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    while desired.len().saturating_add(cancelled_pending_count) < MAX_MARKET_SUBSCRIPTIONS {
-        let Some(subscription) = waiting.pop_front() else {
+    loop {
+        let available = MAX_MARKET_SUBSCRIPTIONS
+            .saturating_sub(desired.len().saturating_add(cancelled_pending_count));
+        let Some(group) = waiting.front() else {
             break;
         };
-        if desired.contains_key(&subscription.account) {
+        let missing = group
+            .iter()
+            .filter(|subscription| !desired.contains_key(&subscription.account))
+            .count();
+        if missing == 0 {
+            waiting.pop_front();
             continue;
         }
-        desired.insert(subscription.account.clone(), subscription.clone());
-        let request_id = *next_request_id;
-        *next_request_id = next_request_id.saturating_add(1);
-        send_account_subscribe(sink, request_id, &subscription.account).await?;
-        pending.insert(request_id, subscription);
+        // Keep PumpSwap's pool/base-vault/quote-vault set atomic: never activate
+        // only part of a token's account group when the remaining slots are insufficient.
+        if missing > available {
+            break;
+        }
+        let group = waiting.pop_front().expect("front group was present");
+        let children = reserve_desired_subscriptions(group, desired)
+            .expect("capacity was checked before reserving the subscription group");
+        for subscription in children {
+            let request_id = *next_request_id;
+            *next_request_id = next_request_id.saturating_add(1);
+            send_account_subscribe(sink, request_id, &subscription.account).await?;
+            pending.insert(request_id, subscription);
+        }
     }
     Ok(())
 }
@@ -669,7 +685,7 @@ async fn connect_market_stream(
                         let (pending_ids, active_ids) = remove_mint_subscriptions(
                             &mint, desired, &mut pending, &mut active,
                         );
-                        waiting.retain(|subscription| subscription.mint != mint);
+                        waiting.retain(|group| !group.iter().any(|subscription| subscription.mint == mint));
                         let cancelled_count = pending_ids.len();
                         for request_id in pending_ids {
                             cancelled_pending.insert(request_id);
@@ -698,7 +714,7 @@ async fn connect_market_stream(
                     MarketCommand::Subscribe(subscription) => subscription,
                 };
                 if desired.contains_key(&subscription.account)
-                    || waiting.iter().any(|queued| queued.account == subscription.account)
+                    || waiting.iter().flatten().any(|queued| queued.account == subscription.account)
                 {
                     continue;
                 }
@@ -713,7 +729,7 @@ async fn connect_market_stream(
                         }}));
                         continue;
                     }
-                    waiting.push_back(subscription.clone());
+                    waiting.push_back(vec![subscription.clone()]);
                     let _ = events.send(json!({
                         "type":"market_subscription_waiting",
                         "data":{
@@ -991,7 +1007,7 @@ async fn connect_market_stream(
                             let remaining_capacity =
                                 MAX_MARKET_SUBSCRIPTIONS.saturating_sub(desired.len());
                             if let Some(children) =
-                                reserve_desired_subscriptions(required, desired)
+                                reserve_desired_subscriptions(required.clone(), desired)
                             {
                                 // All child intents are now durable across reconnects.
                                 // A failed write drops this connection, and the next one
@@ -1008,6 +1024,14 @@ async fn connect_market_stream(
                                     pending.insert(request_id, child);
                                 }
                             } else {
+                                let already_queued = waiting.iter().any(|group| {
+                                    group.iter().any(|queued| {
+                                        required.iter().any(|item| item.account == queued.account)
+                                    })
+                                });
+                                if !already_queued && waiting.len() < MAX_WAITING_MARKET_SUBSCRIPTIONS {
+                                    waiting.push_back(required.clone());
+                                }
                                 let _ = events.send(json!({"type":"market_subscription_waiting","data":{
                                     "mint_address":subscription.mint,
                                     "venue":"pump_swap",
