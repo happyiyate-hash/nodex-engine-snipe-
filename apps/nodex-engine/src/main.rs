@@ -3538,6 +3538,18 @@ async fn manual_paper_sell(
                 "Only an open paper position can be sold.".into(),
             ));
         }
+        let marked_at_ms = timestamp_ms_from_value(position.get("marked_at"));
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if !marked_at_ms.is_some_and(|timestamp| {
+            timestamp > 0
+                && timestamp <= now_ms.saturating_add(60_000)
+                && now_ms.saturating_sub(timestamp) <= 30_000
+        }) {
+            return Err((
+                StatusCode::CONFLICT,
+                "The latest position price is stale. Wait for a fresh market update before manually selling.".into(),
+            ));
+        }
         let price = position
             .get("current_price_sol")
             .or_else(|| position.get("price_sol"))
@@ -3592,7 +3604,7 @@ async fn manual_paper_sell(
             )
         })?;
     }
-    settle_triggered_paper_exit(
+    if let Err(error) = settle_triggered_paper_exit(
         &state.database,
         &state.wallet,
         &state.sol_price,
@@ -3602,12 +3614,28 @@ async fn manual_paper_sell(
         &position_id,
     )
     .await
-    .map_err(|error| {
-        (
+    {
+        let failed_position = state.portfolio_positions.read().await.iter()
+            .find(|position| position.get("position_id").and_then(serde_json::Value::as_str)
+                == Some(position_id.as_str()))
+            .cloned()
+            .unwrap_or_else(|| json!({"position_id":position_id}));
+        let _ = state.events.send(json!({
+            "type":"paper_sell_failed",
+            "data":{
+                "position":failed_position,
+                "position_id":position_id,
+                "reason":error,
+                "retrying":true,
+                "paper_only":true,
+                "execution_mode":"simulated"
+            }
+        }));
+        return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Paper sale is pending settlement and will be retried: {error}"),
-        )
-    })?;
+        ));
+    }
     let closed_position = state
         .portfolio_positions
         .read()
