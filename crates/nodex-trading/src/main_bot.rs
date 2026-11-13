@@ -758,4 +758,56 @@ mod tests {
         );
         assert_eq!(result.decision, TradingBotDecision::Reject);
     }
+    #[test]
+    fn trailing_mode_ignores_fixed_stop_loss_and_take_profit() {
+        let config = TradingBotConfig::default();
+        let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = true;
+        policy.maximum_profit_pct = 0.0;
+
+        // The fixed 15% stop-loss would trigger at 0.84, but trailing mode
+        // protects from its own 10% callback (0.90) instead.
+        let trigger = evaluate_position_exit(&mut policy, 0.89).unwrap();
+        assert_eq!(trigger.reason, PositionExitReason::TrailingStop);
+
+        // A fresh trailing policy must not use the old fixed +100% take-profit.
+        let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = true;
+        policy.maximum_profit_pct = 0.0;
+        assert!(evaluate_position_exit(&mut policy, 2.0).is_none());
+        assert!(policy.trailing_stop_active);
+        assert_eq!(policy.trailing_stop_price_sol, 1.8);
+    }
+
+    #[test]
+    fn normal_mode_ignores_optional_maximum_profit_ceiling() {
+        let config = TradingBotConfig::default();
+        let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.maximum_profit_pct = 10.0;
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = false;
+
+        // Normal take-profit remains the only applicable profit exit.
+        assert!(evaluate_position_exit(&mut policy, 1.5).is_none());
+        let trigger = evaluate_position_exit(&mut policy, 2.0).unwrap();
+        assert_eq!(trigger.reason, PositionExitReason::TakeProfit);
+    }
+
+    #[test]
+    fn trailing_protection_starts_at_entry_without_waiting_for_profit_activation() {
+        let config = TradingBotConfig::default();
+        let mut policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        policy.trailing_stop_eligible = true;
+        policy.trailing_stop_enabled = true;
+        policy.trailing_activation_profit_pct = 500.0;
+        policy.trailing_stop_callback_pct = 20.0;
+
+        let trigger = evaluate_position_exit(&mut policy, 0.79).unwrap();
+        assert_eq!(trigger.reason, PositionExitReason::TrailingStop);
+        assert!(policy.trailing_stop_active);
+        assert!((policy.trailing_stop_price_sol - 0.8).abs() < 1e-9);
+    }
+
 }
