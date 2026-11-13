@@ -16,8 +16,7 @@ pub(crate) fn mark_position(
     }
 
     let sol_usd = price_snapshot.price_usd;
-    let usd_quote_valid =
-        price_snapshot.status == "live" && sol_usd.is_finite() && sol_usd > 0.0;
+    let usd_quote_valid = price_snapshot.status == "live" && sol_usd.is_finite() && sol_usd > 0.0;
     let quantity = position
         .get("token_quantity")
         .or_else(|| position.get("quantity"))
@@ -70,13 +69,19 @@ pub(crate) fn mark_position(
             object.insert("current_price_usd".into(), json!(current_price_usd));
             object.insert("entry_price_usd".into(), json!(entry_price_usd));
             object.insert("initial_investment_usd".into(), json!(invested_usd));
-            object.insert("current_position_value_usd".into(), json!(current_value_usd));
+            object.insert(
+                "current_position_value_usd".into(),
+                json!(current_value_usd),
+            );
             object.insert("pnl_usd".into(), json!(pnl_usd));
             object.insert("unrealized_pnl_usd".into(), json!(pnl_usd));
             object.insert("pnl_pct".into(), json!(pnl_pct));
             object.insert("unrealized_pnl_pct".into(), json!(pnl_pct));
             object.insert("sol_price_usd_at_mark".into(), json!(sol_usd));
-            object.insert("sol_price_source_at_mark".into(), json!(price_snapshot.source.clone()));
+            object.insert(
+                "sol_price_source_at_mark".into(),
+                json!(price_snapshot.source.clone()),
+            );
         }
         object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
     }
@@ -93,14 +98,22 @@ pub(crate) fn mark_position(
                     serde_json::to_value(&policy).unwrap_or(serde_json::Value::Null),
                 );
                 if let Some(trigger) = trigger {
-                    if object.get("exit_requested").and_then(serde_json::Value::as_bool)
+                    if object
+                        .get("exit_requested")
+                        .and_then(serde_json::Value::as_bool)
                         != Some(true)
                     {
                         object.insert("exit_requested".into(), json!(true));
                         object.insert("exit_trigger_reason".into(), json!(trigger.reason));
-                        object.insert("exit_trigger_price_sol".into(), json!(trigger.trigger_price_sol));
+                        object.insert(
+                            "exit_trigger_price_sol".into(),
+                            json!(trigger.trigger_price_sol),
+                        );
                         object.insert("exit_trigger_pnl_pct".into(), json!(trigger.pnl_pct));
-                        object.insert("exit_triggered_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+                        object.insert(
+                            "exit_triggered_at".into(),
+                            json!(chrono::Utc::now().to_rfc3339()),
+                        );
                         exit_was_triggered = true;
                     }
                 }
