@@ -134,7 +134,7 @@ impl Default for TradingSettings {
             take_profit_pct: 100.0,
             min_5m_buy_volume_usd: 1_000.0,
             max_top10_holder_concentration_pct: 20.0,
-            auto_buy_enabled: false,
+            auto_buy_enabled: true,
             auto_recover_token_account_rent: true,
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 10.0,
@@ -143,7 +143,7 @@ impl Default for TradingSettings {
             paper_starting_balance_currency: "USD".into(),
             diagnostic_mode: false,
             block_unverified_trades: false,
-            execution_enabled: false,
+            execution_enabled: true,
             whitelist_only_mode: false,
             preferred_owners: Vec::new(),
         }
@@ -2546,8 +2546,16 @@ async fn patch_runtime_config(
         .validate()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     if candidate.execution_enabled {
-        return Err((StatusCode::CONFLICT,
-            "Execution is not available yet. Keep execution_enabled=false until the paper execution module is connected. Real execution is unavailable in this build.".into()));
+        let control = state.control.read().await;
+        if control.mode != "paper"
+            || !control.available_modes.paper
+            || control.real_trading_available
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "Automatic execution can only be enabled for paper simulation. Live trading is unavailable.".into(),
+            ));
+        }
     }
 
     let balance_changed = candidate.paper_starting_balance != current.paper_starting_balance
@@ -3889,6 +3897,33 @@ async fn main() -> anyhow::Result<()> {
         .execute(&db)
         .await?;
     }
+    // One-time opt-in requested for automatic PAPER execution. This updates the
+    // existing persisted configuration once; later operator changes remain authoritative.
+    let paper_auto_execution_migrated: Option<String> = sqlx::query_scalar(
+        "SELECT config_json FROM nodex_runtime_config WHERE config_key = 'paper_auto_execution_defaults_v1'",
+    )
+    .fetch_optional(&db)
+    .await?;
+    if paper_auto_execution_migrated.is_none() {
+        trading_settings.auto_buy_enabled = true;
+        trading_settings.execution_enabled = true;
+        trading_settings.validate().map_err(anyhow::Error::msg)?;
+        let migrated = serde_json::to_string(&trading_settings)?;
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at",
+        )
+        .bind(migrated)
+        .bind(&updated_at)
+        .execute(&db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('paper_auto_execution_defaults_v1', 'enabled', ?)",
+        )
+        .bind(updated_at)
+        .execute(&db)
+        .await?;
+    }
     let trading_settings_json = serde_json::to_string(&trading_settings)?;
     sqlx::query(
         "INSERT INTO nodex_runtime_config (config_key, config_json, updated_at) VALUES ('trading', ?, ?) ON CONFLICT(config_key) DO NOTHING"
@@ -4201,7 +4236,7 @@ async fn main() -> anyhow::Result<()> {
         },
         real_trading_available: false,
         token_discovery_enabled: false,
-        new_entries_enabled: false,
+        new_entries_enabled: true,
         position_monitoring_enabled: true,
     }));
 
@@ -4693,6 +4728,16 @@ mod main_bot_config_tests {
         assert_eq!(config.take_profit_pct, 100.0);
         assert_eq!(config.maximum_open_positions, 3);
         assert_eq!(config.maximum_top10_concentration_pct, 20.0);
+    }
+
+    #[test]
+    fn paper_auto_buy_and_simulated_execution_are_enabled_by_default() {
+        let settings = TradingSettings::default();
+        assert!(settings.auto_buy_enabled);
+        assert!(settings.execution_enabled);
+        assert!(!settings.trailing_stop_enabled);
+        assert_eq!(settings.stop_loss_pct, 15.0);
+        assert_eq!(settings.take_profit_pct, 100.0);
     }
 
     #[test]
