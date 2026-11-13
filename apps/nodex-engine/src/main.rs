@@ -89,6 +89,15 @@ fn default_true() -> bool {
 fn default_trailing_activation_profit_pct() -> f64 {
     20.0
 }
+fn default_minimum_distinct_buyers_high_score() -> usize { 5 }
+fn default_minimum_distinct_buyers_other() -> usize { 8 }
+fn default_minimum_recent_buyers_high_score() -> usize { 5 }
+fn default_minimum_recent_buyers_other() -> usize { 8 }
+fn default_minimum_30s_buy_pressure_pct() -> f64 { 75.0 }
+fn default_minimum_30s_buy_sell_ratio() -> f64 { 2.5 }
+fn default_minimum_observation_seconds() -> u64 { 90 }
+fn default_maximum_early_entry_age_seconds() -> u64 { 300 }
+fn default_maximum_early_entry_market_cap_usd() -> f64 { 150_000.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -113,6 +122,24 @@ struct TradingSettings {
     trailing_stop_callback_pct: f64,
     #[serde(default = "default_trailing_activation_profit_pct")]
     trailing_activation_profit_pct: f64,
+    #[serde(default = "default_minimum_distinct_buyers_high_score")]
+    minimum_distinct_buyers_high_score: usize,
+    #[serde(default = "default_minimum_distinct_buyers_other")]
+    minimum_distinct_buyers_other: usize,
+    #[serde(default = "default_minimum_recent_buyers_high_score")]
+    minimum_recent_buyers_high_score: usize,
+    #[serde(default = "default_minimum_recent_buyers_other")]
+    minimum_recent_buyers_other: usize,
+    #[serde(default = "default_minimum_30s_buy_pressure_pct")]
+    minimum_30s_buy_pressure_pct: f64,
+    #[serde(default = "default_minimum_30s_buy_sell_ratio")]
+    minimum_30s_buy_sell_ratio: f64,
+    #[serde(default = "default_minimum_observation_seconds")]
+    minimum_observation_seconds: u64,
+    #[serde(default = "default_maximum_early_entry_age_seconds")]
+    maximum_early_entry_age_seconds: u64,
+    #[serde(default = "default_maximum_early_entry_market_cap_usd")]
+    maximum_early_entry_market_cap_usd: f64,
     blacklist_creators_with_prior_rugs: bool,
     paper_starting_balance: f64,
     paper_starting_balance_currency: String,
@@ -144,6 +171,15 @@ impl Default for TradingSettings {
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 12.0,
             trailing_activation_profit_pct: default_trailing_activation_profit_pct(),
+            minimum_distinct_buyers_high_score: default_minimum_distinct_buyers_high_score(),
+            minimum_distinct_buyers_other: default_minimum_distinct_buyers_other(),
+            minimum_recent_buyers_high_score: default_minimum_recent_buyers_high_score(),
+            minimum_recent_buyers_other: default_minimum_recent_buyers_other(),
+            minimum_30s_buy_pressure_pct: default_minimum_30s_buy_pressure_pct(),
+            minimum_30s_buy_sell_ratio: default_minimum_30s_buy_sell_ratio(),
+            minimum_observation_seconds: default_minimum_observation_seconds(),
+            maximum_early_entry_age_seconds: default_maximum_early_entry_age_seconds(),
+            maximum_early_entry_market_cap_usd: default_maximum_early_entry_market_cap_usd(),
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
@@ -215,6 +251,9 @@ impl TradingSettings {
                 "trailing_activation_profit_pct",
                 self.trailing_activation_profit_pct,
             ),
+            ("minimum_30s_buy_pressure_pct", self.minimum_30s_buy_pressure_pct),
+            ("minimum_30s_buy_sell_ratio", self.minimum_30s_buy_sell_ratio),
+            ("maximum_early_entry_market_cap_usd", self.maximum_early_entry_market_cap_usd),
             ("paper_starting_balance", self.paper_starting_balance),
         ];
         for (name, value) in finite_non_negative {
@@ -240,6 +279,17 @@ impl TradingSettings {
         }
         if self.take_profit_pct > 1_000.0 {
             return Err("take_profit_pct must not exceed 1000.".into());
+        }
+        if self.minimum_30s_buy_pressure_pct > 100.0
+            || self.minimum_30s_buy_sell_ratio > 100.0
+            || self.minimum_observation_seconds == 0
+            || self.maximum_early_entry_age_seconds < self.minimum_observation_seconds
+            || self.minimum_distinct_buyers_high_score == 0
+            || self.minimum_distinct_buyers_other == 0
+            || self.minimum_recent_buyers_high_score == 0
+            || self.minimum_recent_buyers_other == 0
+        {
+            return Err("Entry buyer counts, observation window, buy pressure, and buy/sell ratio are invalid.".into());
         }
         if self.max_slippage_pct > 100.0 || self.max_top10_holder_concentration_pct > 100.0 {
             return Err("Slippage and top-10 concentration must be between 0 and 100.".into());
@@ -287,8 +337,15 @@ fn main_bot_config_from_settings(
         minimum_5m_buy_volume_usd: settings.min_5m_buy_volume_usd,
         maximum_top10_concentration_pct: settings.max_top10_holder_concentration_pct,
         maximum_open_positions: settings.max_simultaneous_positions as usize,
-        minimum_distinct_buyers_high_score: 2,
-        minimum_distinct_buyers_other: 3,
+        minimum_distinct_buyers_high_score: settings.minimum_distinct_buyers_high_score,
+        minimum_distinct_buyers_other: settings.minimum_distinct_buyers_other,
+        minimum_recent_buyers_high_score: settings.minimum_recent_buyers_high_score,
+        minimum_recent_buyers_other: settings.minimum_recent_buyers_other,
+        minimum_30s_buy_pressure_pct: settings.minimum_30s_buy_pressure_pct,
+        minimum_30s_buy_sell_ratio: settings.minimum_30s_buy_sell_ratio,
+        minimum_observation_seconds: settings.minimum_observation_seconds,
+        maximum_early_entry_age_seconds: settings.maximum_early_entry_age_seconds,
+        maximum_early_entry_market_cap_usd: settings.maximum_early_entry_market_cap_usd,
         high_creator_score_threshold: 80.0,
         low_score_observation_seconds: 30,
         blacklist_known_rug_creators: settings.blacklist_creators_with_prior_rugs,
@@ -5459,6 +5516,15 @@ mod main_bot_config_tests {
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 12.0,
             trailing_activation_profit_pct: default_trailing_activation_profit_pct(),
+            minimum_distinct_buyers_high_score: default_minimum_distinct_buyers_high_score(),
+            minimum_distinct_buyers_other: default_minimum_distinct_buyers_other(),
+            minimum_recent_buyers_high_score: default_minimum_recent_buyers_high_score(),
+            minimum_recent_buyers_other: default_minimum_recent_buyers_other(),
+            minimum_30s_buy_pressure_pct: default_minimum_30s_buy_pressure_pct(),
+            minimum_30s_buy_sell_ratio: default_minimum_30s_buy_sell_ratio(),
+            minimum_observation_seconds: default_minimum_observation_seconds(),
+            maximum_early_entry_age_seconds: default_maximum_early_entry_age_seconds(),
+            maximum_early_entry_market_cap_usd: default_maximum_early_entry_market_cap_usd(),
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
