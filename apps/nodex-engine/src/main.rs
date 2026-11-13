@@ -89,15 +89,33 @@ fn default_true() -> bool {
 fn default_trailing_activation_profit_pct() -> f64 {
     20.0
 }
-fn default_minimum_distinct_buyers_high_score() -> usize { 5 }
-fn default_minimum_distinct_buyers_other() -> usize { 8 }
-fn default_minimum_recent_buyers_high_score() -> usize { 5 }
-fn default_minimum_recent_buyers_other() -> usize { 8 }
-fn default_minimum_30s_buy_pressure_pct() -> f64 { 75.0 }
-fn default_minimum_30s_buy_sell_ratio() -> f64 { 2.5 }
-fn default_minimum_observation_seconds() -> u64 { 90 }
-fn default_maximum_early_entry_age_seconds() -> u64 { 300 }
-fn default_maximum_early_entry_market_cap_usd() -> f64 { 150_000.0 }
+fn default_minimum_distinct_buyers_high_score() -> usize {
+    5
+}
+fn default_minimum_distinct_buyers_other() -> usize {
+    8
+}
+fn default_minimum_recent_buyers_high_score() -> usize {
+    5
+}
+fn default_minimum_recent_buyers_other() -> usize {
+    8
+}
+fn default_minimum_30s_buy_pressure_pct() -> f64 {
+    75.0
+}
+fn default_minimum_30s_buy_sell_ratio() -> f64 {
+    2.5
+}
+fn default_minimum_observation_seconds() -> u64 {
+    90
+}
+fn default_maximum_early_entry_age_seconds() -> u64 {
+    300
+}
+fn default_maximum_early_entry_market_cap_usd() -> f64 {
+    150_000.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -256,9 +274,18 @@ impl TradingSettings {
                 "trailing_activation_profit_pct",
                 self.trailing_activation_profit_pct,
             ),
-            ("minimum_30s_buy_pressure_pct", self.minimum_30s_buy_pressure_pct),
-            ("minimum_30s_buy_sell_ratio", self.minimum_30s_buy_sell_ratio),
-            ("maximum_early_entry_market_cap_usd", self.maximum_early_entry_market_cap_usd),
+            (
+                "minimum_30s_buy_pressure_pct",
+                self.minimum_30s_buy_pressure_pct,
+            ),
+            (
+                "minimum_30s_buy_sell_ratio",
+                self.minimum_30s_buy_sell_ratio,
+            ),
+            (
+                "maximum_early_entry_market_cap_usd",
+                self.maximum_early_entry_market_cap_usd,
+            ),
             ("paper_starting_balance", self.paper_starting_balance),
         ];
         for (name, value) in finite_non_negative {
@@ -288,7 +315,9 @@ impl TradingSettings {
         if self.maximum_profit_pct > 0.0
             && !(100.0..=100_000.0).contains(&self.maximum_profit_pct)
         {
-            return Err("maximum_profit_pct must be 0 (disabled) or between 100 and 100000.".into());
+            return Err(
+                "maximum_profit_pct must be 0 (disabled) or between 100 and 100000.".into(),
+            );
         }
         if self.minimum_30s_buy_pressure_pct > 100.0
             || self.minimum_30s_buy_sell_ratio > 100.0
