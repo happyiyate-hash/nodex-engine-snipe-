@@ -570,23 +570,36 @@ fn start_terminal_token_cleanup(
             let event = match receiver.recv().await {
                 Ok(event) => event,
                 Err(broadcast::error::RecvError::Lagged(count)) => {
-                    tracing::warn!(dropped_events = count, "Terminal token cleanup worker lagged");
+                    tracing::warn!(
+                        dropped_events = count,
+                        "Terminal token cleanup worker lagged"
+                    );
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
-            let kind = event.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+            let kind = event
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
             if kind != "token_rejected_cleanup" && kind != "paper_sell_executed" {
                 continue;
             }
             if kind == "paper_sell_executed"
-                && event.pointer("/data/full_exit").and_then(serde_json::Value::as_bool) != Some(true)
+                && event
+                    .pointer("/data/full_exit")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
             {
                 continue;
             }
             let data = event.get("data").cloned().unwrap_or_else(|| json!({}));
-            let Some(mint) = data.get("mint_address").and_then(serde_json::Value::as_str)
-                .filter(|mint| !mint.trim().is_empty()).map(str::to_owned) else {
+            let Some(mint) = data
+                .get("mint_address")
+                .and_then(serde_json::Value::as_str)
+                .filter(|mint| !mint.trim().is_empty())
+                .map(str::to_owned)
+            else {
                 continue;
             };
             let positions = match nodex_persistence::load_portfolio_positions(&database).await {
@@ -596,17 +609,25 @@ fn start_terminal_token_cleanup(
                     continue;
                 }
             };
-            let mint_positions = positions.iter().filter(|position| {
-                position.get("mint_address").or_else(|| position.get("mint"))
-                    .and_then(serde_json::Value::as_str) == Some(mint.as_str())
-            }).collect::<Vec<_>>();
+            let mint_positions = positions
+                .iter()
+                .filter(|position| {
+                    position
+                        .get("mint_address")
+                        .or_else(|| position.get("mint"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(mint.as_str())
+                })
+                .collect::<Vec<_>>();
             if kind == "token_rejected_cleanup" && !mint_positions.is_empty() {
                 tracing::warn!(mint_address = %mint, "Rejected-token cleanup skipped because paper-position history exists");
                 continue;
             }
-            if kind == "paper_sell_executed" && mint_positions.iter().any(|position| {
-                position.get("status").and_then(serde_json::Value::as_str) == Some("open")
-            }) {
+            if kind == "paper_sell_executed"
+                && mint_positions.iter().any(|position| {
+                    position.get("status").and_then(serde_json::Value::as_str) == Some("open")
+                })
+            {
                 continue;
             }
 
@@ -614,10 +635,14 @@ fn start_terminal_token_cleanup(
                 let mut unsubscribed = false;
                 for attempt in 0..3 {
                     match monitor.unsubscribe_mint(&mint).await {
-                        Ok(()) => { unsubscribed = true; break; }
+                        Ok(()) => {
+                            unsubscribed = true;
+                            break;
+                        }
                         Err(error) => {
                             tracing::warn!(%error, mint_address = %mint, attempt = attempt + 1, "Could not queue terminal market unsubscribe");
-                            tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+                            tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64))
+                                .await;
                         }
                     }
                 }
@@ -639,7 +664,9 @@ fn start_terminal_token_cleanup(
                     }));
                     tracing::info!(mint_address = %mint, cleanup_reason = kind, "Terminal token market history removed; paper accounting preserved");
                 }
-                Err(error) => tracing::error!(%error, mint_address = %mint, "Terminal token market history deletion failed"),
+                Err(error) => {
+                    tracing::error!(%error, mint_address = %mint, "Terminal token market history deletion failed")
+                },
             }
         }
     });
