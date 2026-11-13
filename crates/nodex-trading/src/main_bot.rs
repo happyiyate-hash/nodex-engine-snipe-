@@ -11,6 +11,8 @@ pub struct TradingBotConfig {
     pub position_size_usd: f64,
     pub stop_loss_pct: f64,
     pub take_profit_pct: f64,
+    /// Optional hard profit cap; zero disables the ceiling.
+    pub maximum_profit_pct: f64,
     pub trailing_stop_enabled: bool,
     pub trailing_stop_callback_pct: f64,
     pub trailing_activation_profit_pct: f64,
@@ -43,6 +45,7 @@ impl Default for TradingBotConfig {
             position_size_usd: 0.0,
             stop_loss_pct: 15.0,
             take_profit_pct: 100.0,
+            maximum_profit_pct: 0.0,
             trailing_stop_enabled: false,
             trailing_stop_callback_pct: 12.0,
             trailing_activation_profit_pct: 20.0,
@@ -146,6 +149,9 @@ pub fn capture_position_risk(
         || !(0.0..=100.0).contains(&config.stop_loss_pct)
         || !config.take_profit_pct.is_finite()
         || !(0.0..=1_000.0).contains(&config.take_profit_pct)
+        || !config.maximum_profit_pct.is_finite()
+        || (config.maximum_profit_pct != 0.0
+            && !(100.0..=100_000.0).contains(&config.maximum_profit_pct))
         || !config.trailing_stop_callback_pct.is_finite()
         || !(0.0..=100.0).contains(&config.trailing_stop_callback_pct)
     {
@@ -170,9 +176,9 @@ pub fn capture_position_risk(
         trailing_activation_profit_pct: config.trailing_activation_profit_pct,
         trailing_stop_callback_pct: config.trailing_stop_callback_pct,
         trailing_stop_active: false,
-        maximum_profit_pct: default_maximum_profit_pct(),
-        maximum_profit_price_sol: 0.0,
-        maximum_profit_price_usd: 0.0,
+        maximum_profit_pct: config.maximum_profit_pct,
+        maximum_profit_price_sol: entry_price_sol * (1.0 + config.maximum_profit_pct / 100.0),
+        maximum_profit_price_usd: entry_price_usd * (1.0 + config.maximum_profit_pct / 100.0),
         trailing_stop_price_sol: 0.0,
         highest_price_sol: entry_price_sol,
         captured_at: chrono::Utc::now().to_rfc3339(),
