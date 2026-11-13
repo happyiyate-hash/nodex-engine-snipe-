@@ -1024,12 +1024,16 @@ async fn connect_market_stream(
                                     pending.insert(request_id, child);
                                 }
                             } else {
-                                let already_queued = waiting.iter().any(|group| {
-                                    group.iter().any(|queued| {
-                                        required.iter().any(|item| item.account == queued.account)
-                                    })
-                                });
-                                if !already_queued && waiting.len() < MAX_WAITING_MARKET_SUBSCRIPTIONS {
+                                if let Some(group) = waiting
+                                    .iter_mut()
+                                    .find(|group| group.iter().any(|queued| queued.mint == subscription.mint))
+                                {
+                                    for item in &required {
+                                        if !group.iter().any(|queued| queued.account == item.account) {
+                                            group.push(item.clone());
+                                        }
+                                    }
+                                } else if waiting.len() < MAX_WAITING_MARKET_SUBSCRIPTIONS {
                                     waiting.push_back(required.clone());
                                 }
                                 let _ = events.send(json!({"type":"market_subscription_waiting","data":{
