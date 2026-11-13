@@ -479,13 +479,17 @@ pub(super) async fn evaluate_and_execute_paper_entry(
             "security_decision":security_decision
         }
     });
-    let Some(mut risk_policy) = capture_position_risk(&config, fill_price_sol, fill_price_usd) else {
+    let Some(mut risk_policy) = capture_position_risk(&config, fill_price_sol, fill_price_usd)
+    else {
         let _ = events.send(json!({"type":"paper_buy_failed","data":{
             "mint_address":mint,"reason":"Could not capture a valid per-position risk policy.","paper_only":true
         }}));
         return;
     };
-    let entry_evidence = position.get("entry_evidence").cloned().unwrap_or_else(|| json!({}));
+    let entry_evidence = position
+        .get("entry_evidence")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let (trailing_eligible, trailing_reason) =
         trading_decisions::position_exit::assess_trailing_stop_eligibility(&entry_evidence);
     risk_policy.trailing_stop_eligible = trailing_eligible;
@@ -498,14 +502,38 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         );
         object.insert("stop_loss_pct".into(), json!(risk_policy.stop_loss_pct));
         object.insert("take_profit_pct".into(), json!(risk_policy.take_profit_pct));
-        object.insert("trailing_stop_eligible".into(), json!(risk_policy.trailing_stop_eligible));
-        object.insert("trailing_stop_eligibility_reason".into(), json!(risk_policy.trailing_stop_eligibility_reason));
-        object.insert("trailing_stop_enabled".into(), json!(risk_policy.trailing_stop_enabled));
-        object.insert("trailing_activation_profit_pct".into(), json!(risk_policy.trailing_activation_profit_pct));
-        object.insert("trailing_stop_callback_pct".into(), json!(risk_policy.trailing_stop_callback_pct));
-        object.insert("trailing_stop_active".into(), json!(risk_policy.trailing_stop_active));
-        object.insert("maximum_profit_pct".into(), json!(risk_policy.maximum_profit_pct));
-        object.insert("maximum_profit_price_sol".into(), json!(risk_policy.maximum_profit_price_sol));
+        object.insert(
+            "trailing_stop_eligible".into(),
+            json!(risk_policy.trailing_stop_eligible),
+        );
+        object.insert(
+            "trailing_stop_eligibility_reason".into(),
+            json!(risk_policy.trailing_stop_eligibility_reason),
+        );
+        object.insert(
+            "trailing_stop_enabled".into(),
+            json!(risk_policy.trailing_stop_enabled),
+        );
+        object.insert(
+            "trailing_activation_profit_pct".into(),
+            json!(risk_policy.trailing_activation_profit_pct),
+        );
+        object.insert(
+            "trailing_stop_callback_pct".into(),
+            json!(risk_policy.trailing_stop_callback_pct),
+        );
+        object.insert(
+            "trailing_stop_active".into(),
+            json!(risk_policy.trailing_stop_active),
+        );
+        object.insert(
+            "maximum_profit_pct".into(),
+            json!(risk_policy.maximum_profit_pct),
+        );
+        object.insert(
+            "maximum_profit_price_sol".into(),
+            json!(risk_policy.maximum_profit_price_sol),
+        );
         object.insert(
             "stop_loss_price_sol".into(),
             json!(risk_policy.stop_loss_price_sol),
