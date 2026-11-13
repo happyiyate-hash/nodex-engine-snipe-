@@ -761,11 +761,11 @@ mod tests {
             &live,
             0,
         );
-        assert_eq!(eligible.decision, TradingBotDecision::EvaluatePaperEntry);
+        assert_eq!(eligible.decision, TradingBotDecision::Wait);
         assert!(eligible
             .reasons
             .iter()
-            .any(|reason| reason.contains("Top-10 holder concentration")));
+            .any(|reason| reason.contains("holder-distribution")));
     }
 
     #[test]
