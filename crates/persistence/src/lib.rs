@@ -748,13 +748,12 @@ pub async fn delete_inactive_token_history(
     let mut transaction = pool.begin().await?;
     let mut deleted = Vec::new();
     for mint in candidate_mints {
-        let has_position: i64 =
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ? AND status = 'open'",
-            )
-                .bind(mint)
-                .fetch_one(&mut *transaction)
-                .await?;
+        let has_position: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ? AND status = 'open'",
+        )
+        .bind(mint)
+        .fetch_one(&mut *transaction)
+        .await?;
         if has_position > 0 {
             continue;
         }
