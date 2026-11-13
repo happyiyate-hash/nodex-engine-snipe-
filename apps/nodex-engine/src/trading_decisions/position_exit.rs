@@ -1,7 +1,7 @@
 //! Exit decisions consume the latest portfolio valuation; they do not calculate P&L.
 
-use serde_json::{json, Value};
 use nodex_trading::main_bot::{evaluate_position_exit, PositionRiskPolicy};
+use serde_json::{json, Value};
 
 /// Evaluate an open paper position using its already-computed P&L and risk policy.
 /// Returns true only when this evaluation creates a new exit request.
@@ -13,9 +13,7 @@ pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
         .get("unrealized_pnl_pct")
         .or_else(|| position.get("pnl_pct"))
         .and_then(Value::as_f64);
-    let pnl_sol = position
-        .get("unrealized_pnl_sol")
-        .and_then(Value::as_f64);
+    let pnl_sol = position.get("unrealized_pnl_sol").and_then(Value::as_f64);
     if !pnl_sol.is_some_and(f64::is_finite) {
         return false;
     }
@@ -43,11 +41,17 @@ pub(crate) fn evaluate_exit(position: &mut Value, price_sol: f64) -> bool {
 
     object.insert("exit_requested".into(), json!(true));
     object.insert("exit_trigger_reason".into(), json!(trigger.reason));
-    object.insert("exit_trigger_price_sol".into(), json!(trigger.trigger_price_sol));
+    object.insert(
+        "exit_trigger_price_sol".into(),
+        json!(trigger.trigger_price_sol),
+    );
     object.insert("exit_trigger_pnl_pct".into(), json!(trigger.pnl_pct));
     object.insert("exit_decision_unrealized_pnl_sol".into(), json!(pnl_sol));
     object.insert("exit_decision_unrealized_pnl_pct".into(), json!(pnl_pct));
-    object.insert("exit_triggered_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+    object.insert(
+        "exit_triggered_at".into(),
+        json!(chrono::Utc::now().to_rfc3339()),
+    );
     true
 }
 
