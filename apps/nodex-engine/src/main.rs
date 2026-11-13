@@ -28,16 +28,15 @@ use nodex_solana::{
 };
 use nodex_trading::{
     main_bot::{
-        capture_position_risk, evaluate_entry, CreatorReputation,
-        LiveMarketActivity, PositionRiskPolicy, SecurityAssessment, TradingBotConfig,
-        TradingBotDecision,
+        capture_position_risk, evaluate_entry, CreatorReputation, LiveMarketActivity,
+        PositionRiskPolicy, SecurityAssessment, TradingBotConfig, TradingBotDecision,
     },
     paper_wallet::{BuyCostBreakdown, PaperWallet, LAMPORTS_PER_SOL},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sol_price::SolPriceSnapshot;
 use portfolio::calculator::calculate_portfolio_snapshot;
+use sol_price::SolPriceSnapshot;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1525,7 +1524,9 @@ fn start_token_state_projector(
                             let mut triggered_positions = Vec::new();
                             let mut updated_positions = Vec::new();
                             for position in positions.iter_mut().filter(|position| {
-                                position.get("mint_address").and_then(serde_json::Value::as_str)
+                                position
+                                    .get("mint_address")
+                                    .and_then(serde_json::Value::as_str)
                                     == Some(mint)
                                     && position.get("status").and_then(serde_json::Value::as_str)
                                         == Some("open")
@@ -1541,48 +1542,75 @@ fn start_token_state_projector(
                                 updated_positions.push(position.clone());
                             }
                             let wallet_snapshot = wallet.read().await.clone();
-                            let portfolio_snapshot = portfolio::calculator::calculate_portfolio_snapshot(
-                                &wallet_snapshot,
-                                &price_snapshot,
-                                &positions,
-                            );
+                            let portfolio_snapshot =
+                                portfolio::calculator::calculate_portfolio_snapshot(
+                                    &wallet_snapshot,
+                                    &price_snapshot,
+                                    &positions,
+                                );
                             drop(positions);
 
                             for triggered in triggered_positions {
-                                portfolio::event_publisher::publish_exit_triggered(&events, &triggered);
-                                let position_id = triggered.get("position_id").and_then(serde_json::Value::as_str);
-                                let triggered_mint = triggered.get("mint_address").and_then(serde_json::Value::as_str);
-                                if let (Some(position_id), Some(triggered_mint)) = (position_id, triggered_mint) {
+                                portfolio::event_publisher::publish_exit_triggered(
+                                    &events, &triggered,
+                                );
+                                let position_id = triggered
+                                    .get("position_id")
+                                    .and_then(serde_json::Value::as_str);
+                                let triggered_mint = triggered
+                                    .get("mint_address")
+                                    .and_then(serde_json::Value::as_str);
+                                if let (Some(position_id), Some(triggered_mint)) =
+                                    (position_id, triggered_mint)
+                                {
                                     if let Err(error) = nodex_persistence::save_portfolio_position(
-                                        &database, position_id, triggered_mint, "open", &triggered,
-                                    ).await {
+                                        &database,
+                                        position_id,
+                                        triggered_mint,
+                                        "open",
+                                        &triggered,
+                                    )
+                                    .await
+                                    {
                                         tracing::error!(%error, position_id, "Could not persist independent paper exit trigger");
                                     }
                                 }
                             }
                             for position in &updated_positions {
-                                portfolio::event_publisher::publish_position_update(&events, position);
+                                portfolio::event_publisher::publish_position_update(
+                                    &events, position,
+                                );
                             }
 
                             if let Err(error) = nodex_persistence::save_portfolio_snapshot(
-                                &database, &portfolio_snapshot,
-                            ).await {
+                                &database,
+                                &portfolio_snapshot,
+                            )
+                            .await
+                            {
                                 tracing::error!(%error, "Could not persist portfolio snapshot after token price update");
                             } else {
                                 let profile_snapshot = {
                                     let mut current_profile = profile.write().await;
                                     if let Some(object) = current_profile.as_object_mut() {
-                                        object.insert("paper_wallet".into(), json!(wallet_snapshot));
+                                        object
+                                            .insert("paper_wallet".into(), json!(wallet_snapshot));
                                         object.insert("sol_price".into(), json!(price_snapshot));
-                                        object.insert("portfolio".into(), portfolio_snapshot.clone());
+                                        object
+                                            .insert("portfolio".into(), portfolio_snapshot.clone());
                                     }
                                     current_profile.clone()
                                 };
-                                if let Err(error) = nodex_persistence::save_profile(&database, &profile_snapshot).await {
+                                if let Err(error) =
+                                    nodex_persistence::save_profile(&database, &profile_snapshot)
+                                        .await
+                                {
                                     tracing::error!(%error, "Could not persist profile after portfolio price update");
                                 }
                                 portfolio::event_publisher::publish_profile_and_summary(
-                                    &events, profile_snapshot, portfolio_snapshot,
+                                    &events,
+                                    profile_snapshot,
+                                    portfolio_snapshot,
                                 );
                             }
                         }
