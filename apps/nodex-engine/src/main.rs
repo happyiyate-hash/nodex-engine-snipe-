@@ -3420,7 +3420,10 @@ async fn update_position_risk(
         }
     }
 
-    if update.maximum_profit_pct.is_some_and(|number| !number.is_finite() || number < 0.0) {
+    if update
+        .maximum_profit_pct
+        .is_some_and(|number| !number.is_finite() || number < 0.0)
+    {
         return Err((
             StatusCode::BAD_REQUEST,
             "maximum_profit_pct must be a finite non-negative percentage.".into(),
