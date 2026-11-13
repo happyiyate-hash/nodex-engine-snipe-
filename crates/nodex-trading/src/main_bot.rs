@@ -63,11 +63,34 @@ pub struct PositionRiskPolicy {
     pub take_profit_price_sol: f64,
     pub stop_loss_price_usd: f64,
     pub take_profit_price_usd: f64,
+    #[serde(default)]
+    pub trailing_stop_eligible: bool,
+    #[serde(default)]
+    pub trailing_stop_eligibility_reason: String,
+    #[serde(default)]
     pub trailing_stop_enabled: bool,
+    #[serde(default = "default_trailing_activation_profit_pct")]
+    pub trailing_activation_profit_pct: f64,
+    #[serde(default = "default_trailing_stop_callback_pct")]
     pub trailing_stop_callback_pct: f64,
+    #[serde(default)]
+    pub trailing_stop_active: bool,
+    #[serde(default = "default_maximum_profit_pct")]
+    pub maximum_profit_pct: f64,
+    #[serde(default)]
+    pub maximum_profit_price_sol: f64,
+    #[serde(default)]
+    pub maximum_profit_price_usd: f64,
+    #[serde(default)]
+    pub trailing_stop_price_sol: f64,
+    #[serde(default)]
     pub highest_price_sol: f64,
     pub captured_at: String,
 }
+
+fn default_trailing_activation_profit_pct() -> f64 { 50.0 }
+fn default_trailing_stop_callback_pct() -> f64 { 10.0 }
+fn default_maximum_profit_pct() -> f64 { 500.0 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +98,7 @@ pub enum PositionExitReason {
     StopLoss,
     TakeProfit,
     TrailingStop,
+    MaximumProfit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,8 +139,18 @@ pub fn capture_position_risk(
         take_profit_price_sol: entry_price_sol * (1.0 + config.take_profit_pct / 100.0),
         stop_loss_price_usd: entry_price_usd * (1.0 - config.stop_loss_pct / 100.0),
         take_profit_price_usd: entry_price_usd * (1.0 + config.take_profit_pct / 100.0),
-        trailing_stop_enabled: config.trailing_stop_enabled,
+        // Trailing is always opt-in per position; the frontend can enable it only
+        // after the backend has assessed the token's behaviour as suitable.
+        trailing_stop_eligible: false,
+        trailing_stop_eligibility_reason: "Waiting for confirmed trade-flow and price-behaviour evidence.".into(),
+        trailing_stop_enabled: false,
+        trailing_activation_profit_pct: default_trailing_activation_profit_pct(),
         trailing_stop_callback_pct: config.trailing_stop_callback_pct,
+        trailing_stop_active: false,
+        maximum_profit_pct: default_maximum_profit_pct(),
+        maximum_profit_price_sol: entry_price_sol * 6.0,
+        maximum_profit_price_usd: entry_price_usd * 6.0,
+        trailing_stop_price_sol: 0.0,
         highest_price_sol: entry_price_sol,
         captured_at: chrono::Utc::now().to_rfc3339(),
     })
@@ -177,14 +211,32 @@ pub fn evaluate_position_exit(
     }
     policy.highest_price_sol = policy.highest_price_sol.max(current_price_sol);
     let pnl_pct = (current_price_sol / policy.entry_price_sol - 1.0) * 100.0;
-    let trigger = if current_price_sol <= policy.stop_loss_price_sol {
+    if policy.trailing_stop_eligible
+        && policy.trailing_stop_enabled
+        && !policy.trailing_stop_active
+        && pnl_pct >= policy.trailing_activation_profit_pct
+    {
+        policy.trailing_stop_active = true;
+    }
+    policy.trailing_stop_price_sol = if policy.trailing_stop_active {
+        policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0)
+    } else {
+        0.0
+    };
+
+    // The hard maximum-profit cap is evaluated first and is an immediate full exit,
+    // even while price is still rising. A zero target disables the corresponding
+    // optional threshold; the +500% maximum is the default.
+    let trigger = if policy.maximum_profit_pct > 0.0 && pnl_pct >= policy.maximum_profit_pct {
+        Some(PositionExitReason::MaximumProfit)
+    } else if policy.stop_loss_pct > 0.0 && current_price_sol <= policy.stop_loss_price_sol {
         Some(PositionExitReason::StopLoss)
-    } else if current_price_sol >= policy.take_profit_price_sol {
+    } else if policy.take_profit_pct > 0.0 && current_price_sol >= policy.take_profit_price_sol {
         Some(PositionExitReason::TakeProfit)
-    } else if policy.trailing_stop_enabled
-        && policy.highest_price_sol > policy.entry_price_sol
-        && current_price_sol
-            <= policy.highest_price_sol * (1.0 - policy.trailing_stop_callback_pct / 100.0)
+    } else if policy.trailing_stop_eligible
+        && policy.trailing_stop_enabled
+        && policy.trailing_stop_active
+        && current_price_sol <= policy.trailing_stop_price_sol
     {
         Some(PositionExitReason::TrailingStop)
     } else {
