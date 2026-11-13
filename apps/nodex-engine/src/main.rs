@@ -1549,6 +1549,7 @@ fn start_token_state_projector(
                             drop(positions);
 
                             for triggered in triggered_positions {
+                                portfolio::event_publisher::publish_exit_triggered(&events, &triggered);
                                 let position_id = triggered.get("position_id").and_then(serde_json::Value::as_str);
                                 let triggered_mint = triggered.get("mint_address").and_then(serde_json::Value::as_str);
                                 if let (Some(position_id), Some(triggered_mint)) = (position_id, triggered_mint) {
