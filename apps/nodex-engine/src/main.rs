@@ -666,7 +666,7 @@ fn start_terminal_token_cleanup(
                 }
                 Err(error) => {
                     tracing::error!(%error, mint_address = %mint, "Terminal token market history deletion failed")
-                },
+                }
             }
         }
     });
