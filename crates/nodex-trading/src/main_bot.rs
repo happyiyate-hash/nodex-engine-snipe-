@@ -222,8 +222,8 @@ pub fn evaluate_position_exit(
     let pnl_pct = (current_price_sol / policy.entry_price_sol - 1.0) * 100.0;
     // The hard stop-loss is unconditional: trailing protection never removes
     // the original downside limit.
-    let hard_stop_hit = policy.stop_loss_pct > 0.0
-        && current_price_sol <= policy.stop_loss_price_sol;
+    let hard_stop_hit =
+        policy.stop_loss_pct > 0.0 && current_price_sol <= policy.stop_loss_price_sol;
 
     // Trailing protection activates only after the configured profit threshold.
     if policy.trailing_stop_enabled && pnl_pct >= policy.trailing_activation_profit_pct {
@@ -240,27 +240,26 @@ pub fn evaluate_position_exit(
 
     // Maximum-profit is an optional cap. Fixed take-profit is used only when
     // trailing mode is disabled, so a trailing position can run.
-    let trigger =
-        if hard_stop_hit {
-            Some(PositionExitReason::StopLoss)
-        } else if policy.trailing_stop_enabled
-            && policy.maximum_profit_pct > 0.0
-            && pnl_pct >= policy.maximum_profit_pct
-        {
-            Some(PositionExitReason::MaximumProfit)
-        } else if policy.trailing_stop_enabled
-            && policy.trailing_stop_active
-            && current_price_sol <= policy.trailing_stop_price_sol
-        {
-            Some(PositionExitReason::TrailingStop)
-        } else if !policy.trailing_stop_enabled
-            && policy.take_profit_pct > 0.0
-            && current_price_sol >= policy.take_profit_price_sol
-        {
-            Some(PositionExitReason::TakeProfit)
-        } else {
-            None
-        }?;
+    let trigger = if hard_stop_hit {
+        Some(PositionExitReason::StopLoss)
+    } else if policy.trailing_stop_enabled
+        && policy.maximum_profit_pct > 0.0
+        && pnl_pct >= policy.maximum_profit_pct
+    {
+        Some(PositionExitReason::MaximumProfit)
+    } else if policy.trailing_stop_enabled
+        && policy.trailing_stop_active
+        && current_price_sol <= policy.trailing_stop_price_sol
+    {
+        Some(PositionExitReason::TrailingStop)
+    } else if !policy.trailing_stop_enabled
+        && policy.take_profit_pct > 0.0
+        && current_price_sol >= policy.take_profit_price_sol
+    {
+        Some(PositionExitReason::TakeProfit)
+    } else {
+        None
+    }?;
 
     Some(PositionExitTrigger {
         reason: trigger,
