@@ -16,7 +16,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, patch, post, put},
+    routing::{get, patch, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -1572,7 +1572,7 @@ fn start_token_state_projector(
                                         position_id,
                                         triggered_mint,
                                         "open",
-                                        &triggered,
+                                        triggered,
                                     )
                                     .await
                                     {
