@@ -800,7 +800,7 @@ pub async fn delete_token_market_history(pool: &SqlitePool, mint: &str) -> Resul
         .execute(&mut *transaction)
         .await?;
     sqlx::query("DELETE FROM engine_activity_logs WHERE activity_json LIKE ?")
-         .bind(&pattern)
+        .bind(&pattern)
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
