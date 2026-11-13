@@ -88,9 +88,15 @@ pub struct PositionRiskPolicy {
     pub captured_at: String,
 }
 
-fn default_trailing_activation_profit_pct() -> f64 { 50.0 }
-fn default_trailing_stop_callback_pct() -> f64 { 10.0 }
-fn default_maximum_profit_pct() -> f64 { 500.0 }
+fn default_trailing_activation_profit_pct() -> f64 {
+    50.0
+}
+fn default_trailing_stop_callback_pct() -> f64 {
+    10.0
+}
+fn default_maximum_profit_pct() -> f64 {
+    500.0
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -142,7 +148,8 @@ pub fn capture_position_risk(
         // Trailing is always opt-in per position; the frontend can enable it only
         // after the backend has assessed the token's behaviour as suitable.
         trailing_stop_eligible: false,
-        trailing_stop_eligibility_reason: "Waiting for confirmed trade-flow and price-behaviour evidence.".into(),
+        trailing_stop_eligibility_reason:
+            "Waiting for confirmed trade-flow and price-behaviour evidence.".into(),
         trailing_stop_enabled: false,
         trailing_activation_profit_pct: default_trailing_activation_profit_pct(),
         trailing_stop_callback_pct: config.trailing_stop_callback_pct,
