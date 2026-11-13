@@ -1553,9 +1553,9 @@ fn start_token_state_projector(
                                 );
                             drop(positions);
 
-                            for triggered in triggered_positions {
+                            for triggered in &triggered_positions {
                                 portfolio::event_publisher::publish_exit_triggered(
-                                    &events, &triggered,
+                                    &events, triggered,
                                 );
                                 let position_id = triggered
                                     .get("position_id")
@@ -1616,6 +1616,29 @@ fn start_token_state_projector(
                                     portfolio_snapshot,
                                 );
                             }
+
+                            // Exit requests are not complete until the simulated
+                            // sale is atomically settled in the paper wallet and SQLite.
+                            for triggered in &triggered_positions {
+                                if let Some(position_id) = triggered
+                                    .get("position_id")
+                                    .and_then(serde_json::Value::as_str)
+                                {
+                                    if let Err(error) = settle_triggered_paper_exit(
+                                        &database,
+                                        &wallet,
+                                        &sol_price,
+                                        &portfolio_positions,
+                                        &profile,
+                                        &events,
+                                        position_id,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(%error, position_id, "Paper exit settlement failed; position remains flagged for retry");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1625,6 +1648,149 @@ fn start_token_state_projector(
             }
         }
     });
+}
+
+/// Complete one triggered full-position paper sale. Wallet, ledger and
+/// closed-position state are committed in one SQLite transaction before the
+/// in-memory state and browser events are updated.
+async fn settle_triggered_paper_exit(
+    database: &sqlx::SqlitePool,
+    wallet: &Arc<RwLock<PaperWallet>>,
+    sol_price: &Arc<RwLock<SolPriceSnapshot>>,
+    positions: &Arc<RwLock<Vec<serde_json::Value>>>,
+    profile: &Arc<RwLock<serde_json::Value>>,
+    events: &broadcast::Sender<serde_json::Value>,
+    position_id: &str,
+) -> Result<(), String> {
+    let mut wallet_guard = wallet.write().await;
+    let mut positions_guard = positions.write().await;
+    let index = positions_guard.iter().position(|position| {
+        position.get("position_id").and_then(serde_json::Value::as_str) == Some(position_id)
+            || position.get("id").and_then(serde_json::Value::as_str) == Some(position_id)
+    }).ok_or_else(|| "Triggered paper position no longer exists.".to_string())?;
+    let current = positions_guard[index].clone();
+    if current.get("status").and_then(serde_json::Value::as_str) != Some("open")
+        || current.get("exit_requested").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        return Ok(());
+    }
+
+    let mint = current.get("mint_address").and_then(serde_json::Value::as_str)
+        .or_else(|| current.get("mint").and_then(serde_json::Value::as_str))
+        .ok_or_else(|| "Triggered paper position has no mint address.".to_string())?
+        .to_string();
+    let exit_price_sol = current.get("exit_trigger_price_sol")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| current.get("current_price_sol").and_then(serde_json::Value::as_f64))
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| "Triggered paper exit has no valid market price.".to_string())?;
+    let quantity = current.get("token_quantity").or_else(|| current.get("quantity"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| "Triggered paper exit has no remaining token quantity.".to_string())?;
+    let cost_basis_sol = current.get("cost_basis_sol").or_else(|| current.get("invested_sol"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| "Triggered paper exit has no valid cost basis.".to_string())?;
+    let proceeds_sol = quantity * exit_price_sol;
+    let invested_lamports_f64 = cost_basis_sol * LAMPORTS_PER_SOL as f64;
+    let proceeds_lamports_f64 = proceeds_sol * LAMPORTS_PER_SOL as f64;
+    if !proceeds_sol.is_finite()
+        || !invested_lamports_f64.is_finite()
+        || !proceeds_lamports_f64.is_finite()
+        || invested_lamports_f64 < 1.0
+        || proceeds_lamports_f64 < 0.0
+        || invested_lamports_f64 > u64::MAX as f64
+        || proceeds_lamports_f64 > u64::MAX as f64
+    {
+        return Err("Paper exit proceeds or cost basis exceed the supported settlement range.".into());
+    }
+    let invested_lamports = invested_lamports_f64.round() as u64;
+    let proceeds_lamports = proceeds_lamports_f64.round() as u64;
+    let mut next_wallet = wallet_guard.clone();
+    let ledger = next_wallet.settle_full_sale(&mint, invested_lamports, proceeds_lamports)
+        .map_err(|error| format!("Paper wallet rejected full-sale settlement: {error}"))?;
+
+    let quote = sol_price.read().await.clone();
+    let usd_quote_valid = quote.status == "live" && quote.price_usd.is_finite() && quote.price_usd > 0.0;
+    let realized_pnl_sol = proceeds_sol - cost_basis_sol;
+    let realized_pnl_pct = realized_pnl_sol / cost_basis_sol * 100.0;
+    let realized_pnl_usd = if usd_quote_valid { realized_pnl_sol * quote.price_usd } else { 0.0 };
+    let exit_price_usd = if usd_quote_valid { exit_price_sol * quote.price_usd } else { 0.0 };
+    let mut closed = current.clone();
+    if let Some(object) = closed.as_object_mut() {
+        object.insert("status".into(), json!("closed"));
+        object.insert("original_token_quantity".into(), json!(quantity));
+        object.insert("token_quantity".into(), json!(0.0));
+        object.insert("quantity".into(), json!(0.0));
+        object.insert("remaining_token_quantity".into(), json!(0.0));
+        object.insert("current_value_sol".into(), json!(0.0));
+        object.insert("current_value_usd".into(), json!(0.0));
+        object.insert("current_position_value_usd".into(), json!(0.0));
+        object.insert("unrealized_pnl_sol".into(), json!(0.0));
+        object.insert("unrealized_pnl_usd".into(), json!(0.0));
+        object.insert("pnl_sol".into(), json!(realized_pnl_sol));
+        object.insert("pnl_usd".into(), json!(realized_pnl_usd));
+        object.insert("pnl_pct".into(), json!(realized_pnl_pct));
+        object.insert("realized_pnl_sol".into(), json!(realized_pnl_sol));
+        object.insert("realized_pnl_usd".into(), json!(realized_pnl_usd));
+        object.insert("realized_pnl_pct".into(), json!(realized_pnl_pct));
+        object.insert("exit_price_sol".into(), json!(exit_price_sol));
+        object.insert("exit_price_usd".into(), json!(exit_price_usd));
+        object.insert("exit_proceeds_sol".into(), json!(proceeds_sol));
+        object.insert("exit_proceeds_lamports".into(), json!(proceeds_lamports));
+        object.insert("closed_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+        object.insert("exit_reason".into(), current.get("exit_trigger_reason").cloned().unwrap_or_else(|| json!("risk_policy")));
+        object.insert("paper_only".into(), json!(true));
+    }
+    nodex_persistence::commit_paper_sell(
+        database,
+        &next_wallet,
+        &ledger,
+        position_id,
+        &mint,
+        &closed,
+    ).await.map_err(|error| format!("Atomic paper sell persistence failed: {error}"))?;
+
+    *wallet_guard = next_wallet.clone();
+    positions_guard[index] = closed.clone();
+    let position_snapshot = positions_guard.clone();
+    drop(positions_guard);
+    drop(wallet_guard);
+
+    let portfolio = calculate_portfolio_snapshot(&next_wallet, &quote, &position_snapshot);
+    let profile_snapshot = {
+        let mut current_profile = profile.write().await;
+        if let Some(object) = current_profile.as_object_mut() {
+            object.insert("paper_wallet".into(), json!(next_wallet.clone()));
+            object.insert("sol_price".into(), json!(quote));
+            object.insert("portfolio".into(), portfolio.clone());
+        }
+        current_profile.clone()
+    };
+    if let Err(error) = nodex_persistence::save_portfolio_snapshot(database, &portfolio).await {
+        tracing::error!(%error, position_id, "Paper sale settled but portfolio snapshot persistence failed");
+    }
+    if let Err(error) = nodex_persistence::save_profile(database, &profile_snapshot).await {
+        tracing::error!(%error, position_id, "Paper sale settled but profile persistence failed");
+    }
+    let _ = events.send(json!({
+        "type":"paper_sell_executed",
+        "data":{
+            "mint_address":mint,
+            "position":closed.clone(),
+            "ledger":ledger,
+            "wallet":next_wallet.clone(),
+            "exit_reason":closed.get("exit_reason"),
+            "paper_only":true,
+            "execution_mode":"simulated",
+            "full_exit":true
+        }
+    }));
+    portfolio::event_publisher::publish_position_update(events, &closed);
+    let _ = events.send(json!({"type":"wallet_updated","data":{"wallet":next_wallet}}));
+    portfolio::event_publisher::publish_profile_and_summary(events, profile_snapshot, portfolio);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
