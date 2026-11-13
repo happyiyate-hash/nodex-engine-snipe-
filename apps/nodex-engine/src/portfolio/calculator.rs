@@ -3,7 +3,7 @@
 use super::super::*;
 
 /// Build the one authoritative USD portfolio valuation used by REST, SQLite and WebSocket.
-pub(super) fn calculate_portfolio_snapshot(
+pub(crate) fn calculate_portfolio_snapshot(
     wallet: &PaperWallet,
     price: &SolPriceSnapshot,
     positions: &[serde_json::Value],
