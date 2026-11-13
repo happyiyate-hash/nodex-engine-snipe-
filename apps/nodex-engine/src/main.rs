@@ -1523,6 +1523,7 @@ fn start_token_state_projector(
                             let price_snapshot = sol_price.read().await.clone();
                             let mut positions = portfolio_positions.write().await;
                             let mut triggered_positions = Vec::new();
+                            let mut pending_exit_positions = Vec::new();
                             let mut updated_positions = Vec::new();
                             for position in positions.iter_mut().filter(|position| {
                                 position
@@ -1537,10 +1538,16 @@ fn start_token_state_projector(
                                     price_sol,
                                     &price_snapshot,
                                 );
+                                let exit_was_requested = position
+                                    .get("exit_requested")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true);
                                 if trading_decisions::position_exit::evaluate_exit(
                                     position, price_sol,
                                 ) {
                                     triggered_positions.push(position.clone());
+                                } else if exit_was_requested {
+                                    pending_exit_positions.push(position.clone());
                                 }
                                 updated_positions.push(position.clone());
                             }
@@ -1620,8 +1627,11 @@ fn start_token_state_projector(
 
                             // Exit requests are not complete until the simulated
                             // sale is atomically settled in the paper wallet and SQLite.
-                            for triggered in &triggered_positions {
-                                if let Some(position_id) = triggered
+                            for pending in triggered_positions
+                                .iter()
+                                .chain(pending_exit_positions.iter())
+                            {
+                                if let Some(position_id) = pending
                                     .get("position_id")
                                     .and_then(serde_json::Value::as_str)
                                 {
