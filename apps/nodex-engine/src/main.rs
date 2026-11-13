@@ -495,7 +495,7 @@ fn start_inactive_token_cleanup(
     events: broadcast::Sender<serde_json::Value>,
 ) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
@@ -504,7 +504,9 @@ fn start_inactive_token_cleanup(
             if !stream_status.read().await.connected || market_monitor.read().await.is_none() {
                 continue;
             }
-            let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+            // Recheck frequently so abandoned subscriptions are released promptly.
+            // Feed disconnects are excluded above to avoid expiring tokens during upstream outages.
+            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);
             let inactive_mints = registry
                 .snapshot()
                 .into_iter()
@@ -543,7 +545,7 @@ fn start_inactive_token_cleanup(
                         "type":"tokens_removed_inactive",
                         "data":{
                             "mint_addresses":deleted_mints,
-                            "inactive_for_seconds":3600,
+                            "inactive_for_seconds":60,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }
                     }));
