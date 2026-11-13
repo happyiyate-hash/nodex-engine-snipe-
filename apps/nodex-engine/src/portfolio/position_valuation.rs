@@ -2,17 +2,16 @@
 //! This module does not write to the token registry or change the market-data price.
 
 use super::super::*;
-use nodex_trading::main_bot::{evaluate_position_exit, PositionRiskPolicy};
 
 /// Mark one open position from the authoritative market tick.
-/// Returns true only when this tick creates a new exit request for the position.
+/// Position valuation is deliberately independent from trading decisions.
 pub(crate) fn mark_position(
     position: &mut serde_json::Value,
     price_sol: f64,
     price_snapshot: &SolPriceSnapshot,
-) -> bool {
+) {
     if !price_sol.is_finite() || price_sol <= 0.0 {
-        return false;
+        return;
     }
 
     let sol_usd = price_snapshot.price_usd;
@@ -86,41 +85,7 @@ pub(crate) fn mark_position(
         object.insert("marked_at".into(), json!(chrono::Utc::now().to_rfc3339()));
     }
 
-    // Keep the existing per-position risk policy behavior; execution remains paper-only.
-    let risk_value = position.get("risk_policy").cloned();
-    let mut exit_was_triggered = false;
-    if let Some(value) = risk_value {
-        if let Ok(mut policy) = serde_json::from_value::<PositionRiskPolicy>(value) {
-            let trigger = evaluate_position_exit(&mut policy, price_sol);
-            if let Some(object) = position.as_object_mut() {
-                object.insert(
-                    "risk_policy".into(),
-                    serde_json::to_value(&policy).unwrap_or(serde_json::Value::Null),
-                );
-                if let Some(trigger) = trigger {
-                    if object
-                        .get("exit_requested")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(true)
-                    {
-                        object.insert("exit_requested".into(), json!(true));
-                        object.insert("exit_trigger_reason".into(), json!(trigger.reason));
-                        object.insert(
-                            "exit_trigger_price_sol".into(),
-                            json!(trigger.trigger_price_sol),
-                        );
-                        object.insert("exit_trigger_pnl_pct".into(), json!(trigger.pnl_pct));
-                        object.insert(
-                            "exit_triggered_at".into(),
-                            json!(chrono::Utc::now().to_rfc3339()),
-                        );
-                        exit_was_triggered = true;
-                    }
-                }
-            }
-        }
-    }
-    exit_was_triggered
+
 }
 
 #[cfg(test)]
@@ -144,8 +109,7 @@ mod tests {
             status: "live".into(),
             last_error: None,
         };
-        let triggered = mark_position(&mut position, 0.3, &quote);
-        assert!(!triggered);
+        mark_position(&mut position, 0.3, &quote);
         assert_eq!(position["current_price_sol"], json!(0.3));
         assert_eq!(position["current_value_sol"], json!(3.0));
         assert_eq!(position["unrealized_pnl_sol"], json!(1.0));
@@ -163,7 +127,7 @@ mod tests {
             status: "live".into(),
             last_error: None,
         };
-        assert!(!mark_position(&mut position, f64::NAN, &quote));
+        mark_position(&mut position, f64::NAN, &quote);
         assert_eq!(position["current_price_sol"], json!(0.5));
         assert_eq!(position["unrealized_pnl_sol"], json!(1.0));
     }
