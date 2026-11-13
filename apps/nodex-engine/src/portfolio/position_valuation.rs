@@ -2,10 +2,11 @@
 //! This module does not write to the token registry or change the market-data price.
 
 use super::super::*;
+use nodex_trading::main_bot::{evaluate_position_exit, PositionRiskPolicy};
 
 /// Mark one open position from the authoritative market tick.
 /// Returns true only when this tick creates a new exit request for the position.
-pub(super) fn mark_position(
+pub(crate) fn mark_position(
     position: &mut serde_json::Value,
     price_sol: f64,
     price_snapshot: &SolPriceSnapshot,
