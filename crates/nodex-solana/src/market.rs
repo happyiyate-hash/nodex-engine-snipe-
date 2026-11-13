@@ -826,6 +826,14 @@ async fn connect_market_stream(
                                             "received_at":chrono::Utc::now().to_rfc3339()
                                         }
                                     }));
+                                    fill_waiting_market_subscriptions(
+                                        &mut sink,
+                                        &mut next_request_id,
+                                        desired,
+                                        &mut pending,
+                                        waiting,
+                                        cancelled_pending.len(),
+                                    ).await?;
                                 }
                             }
                             continue;
