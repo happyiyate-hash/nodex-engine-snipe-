@@ -778,6 +778,25 @@ pub async fn delete_inactive_token_history(
     Ok(deleted)
 }
 
+/// Remove token discovery/market history after a terminal rejection or a fully closed paper position.
+/// Paper positions, wallet balances, paper ledger and portfolio snapshots are deliberately preserved.
+pub async fn delete_token_market_history(pool: &SqlitePool, mint: &str) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM token_states WHERE mint_address = ?")
+        .bind(mint).execute(&mut *transaction).await?;
+    sqlx::query("DELETE FROM token_launches WHERE mint_address = ?")
+        .bind(mint).execute(&mut *transaction).await?;
+    sqlx::query("DELETE FROM chart_candles WHERE mint_address = ?")
+        .bind(mint).execute(&mut *transaction).await?;
+    let pattern = format!("%{}%", mint);
+    sqlx::query("DELETE FROM solana_raw_events WHERE event_json LIKE ?")
+        .bind(&pattern).execute(&mut *transaction).await?;
+    sqlx::query("DELETE FROM engine_activity_logs WHERE activity_json LIKE ?")
+        .bind(&pattern).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// Upsert one OHLCV candle by token, timeframe and its event-time bucket.
 pub async fn save_chart_candle(
     pool: &SqlitePool,
