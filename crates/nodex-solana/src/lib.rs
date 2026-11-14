@@ -455,14 +455,35 @@ impl SolanaRpc {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("JSON-RPC provider error");
-                let limited = message.to_ascii_lowercase().contains("rate")
-                    || message.to_ascii_lowercase().contains("too many")
-                    || message.contains("429");
+                let lower_message = message.to_ascii_lowercase();
+                let limited = lower_message.contains("rate")
+                    || lower_message.contains("too many")
+                    || lower_message.contains("429");
+                let invalid_key = lower_message.contains("invalid api key")
+                    || lower_message.contains("invalid api-key")
+                    || lower_message.contains("unauthorized")
+                    || lower_message.contains("authentication failed");
+                if invalid_key {
+                    self.emit_activity(json!({
+                        "id": format!("{attempt_id}-credential-error"),
+                        "correlation_id": correlation_id,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "direction": "response",
+                        "provider": "solana_rpc",
+                        "endpoint": endpoint_host,
+                        "operation": method,
+                        "token_mint": token_mint,
+                        "credential_env_var": credential_env_var,
+                        "http_status": status.as_u16(),
+                        "severity": "error",
+                        "error": message
+                    }));
+                }
                 last_error = Some(anyhow!(
                     "NODEX_PROVIDER_ERROR_JSON:{}",
                     json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"credential_env_var":credential_env_var,"response":error})
                 ));
-                if limited {
+                if limited || invalid_key {
                     self.endpoint_health[index]
                         .lock()
                         .await
@@ -1086,7 +1107,7 @@ impl SolanaRpc {
                     "token_mint": mint,
                     "duration_ms": request_started.elapsed().as_millis(),
                     "severity": "error",
-                    "credential_env_var": last_attempt_credential_env_var,
+                    "credential_env_var": last_attempt_credential_env_var.clone(),
                     "error": message
                 }));
                 return RugCheckSummary {
@@ -1137,7 +1158,7 @@ impl SolanaRpc {
             "token_mint": mint,
             "duration_ms": request_started.elapsed().as_millis(),
             "http_status": status.as_u16(),
-            "credential_env_var": last_attempt_credential_env_var,
+            "credential_env_var": last_attempt_credential_env_var.clone(),
             "severity": if status.is_success() {"info"} else {"error"},
             "configured_key_count": key_count,
             "body_truncated": response_truncated,
@@ -1157,7 +1178,7 @@ impl SolanaRpc {
                     "provider":"rugcheck",
                     "kind":"http_error",
                     "http_status":status.as_u16(),
-                    "credential_env_var":last_attempt_credential_env_var,
+                    "credential_env_var":last_attempt_credential_env_var.clone(),
                     "response":value.clone()
                 })),
                 raw_response: Some(value),
