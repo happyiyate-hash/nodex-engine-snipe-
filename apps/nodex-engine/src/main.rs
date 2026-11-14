@@ -742,7 +742,6 @@ fn activity_log_from_event(event: &serde_json::Value) -> Option<serde_json::Valu
             | "market_subscription_failed"
             | "market_monitoring_expired"
             | "market_subscriptions_removed"
-            | "market_tick"
             | "market_monitor_status"
             | "provider_status"
             | "connection_status"
