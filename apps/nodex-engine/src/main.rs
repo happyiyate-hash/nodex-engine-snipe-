@@ -1309,7 +1309,10 @@ fn start_token_state_projector(
                     "progress": 0,
                     "scan_attempt": data.get("scan_attempt").cloned().unwrap_or(json!(0)),
                     "stage": "retry_wait",
-                    "sub_event": "Retrying security scan"
+                    "sub_event": data.get("retry_after")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|retry_after| format!("Retrying security scan — next retry at {retry_after}"))
+                        .unwrap_or_else(|| "Retrying security scan".to_owned())
                 })),
                 "token_scan_started" => Some(json!({
                     "status": "scanning",
