@@ -193,20 +193,46 @@ fn redact_provider_value(value: &mut Value) {
 }
 
 fn credential_env_name_for_rpc_url(url: &str) -> String {
-    if std::env::var("SOLANA_RPC_HTTP_URL").ok().is_some_and(|value| !value.trim().is_empty() && value.trim() == url) {
+    if std::env::var("SOLANA_RPC_HTTP_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty() && value.trim() == url)
+    {
         return "SOLANA_RPC_HTTP_URL".into();
     }
     let credential = reqwest::Url::parse(url).ok().and_then(|parsed| {
-        parsed.query_pairs().find(|(name, _)| name == "key" || name == "api-key").map(|(_, value)| value.into_owned())
+        parsed
+            .query_pairs()
+            .find(|(name, _)| name == "key" || name == "api-key")
+            .map(|(_, value)| value.into_owned())
     });
-    let Some(credential) = credential else { return "UNKNOWN_RPC_CREDENTIAL".into(); };
+    let Some(credential) = credential else {
+        return "UNKNOWN_RPC_CREDENTIAL".into();
+    };
     for index in 1..=10 {
-        let name = if index == 1 { "FLUXRPC_API_KEY".to_owned() } else { format!("FLUXRPC_API_KEY{index}") };
-        if std::env::var(&name).ok().is_some_and(|value| value.trim() == credential) { return name; }
+        let name = if index == 1 {
+            "FLUXRPC_API_KEY".to_owned()
+        } else {
+            format!("FLUXRPC_API_KEY{index}")
+        };
+        if std::env::var(&name)
+            .ok()
+            .is_some_and(|value| value.trim() == credential)
+        {
+            return name;
+        }
     }
     for index in 1..=20 {
-        let name = if index == 1 { "HELIUS_API_KEY".to_owned() } else { format!("HELIUS_API_KEY{index}") };
-        if std::env::var(&name).ok().is_some_and(|value| value.trim() == credential) { return name; }
+        let name = if index == 1 {
+            "HELIUS_API_KEY".to_owned()
+        } else {
+            format!("HELIUS_API_KEY{index}")
+        };
+        if std::env::var(&name)
+            .ok()
+            .is_some_and(|value| value.trim() == credential)
+        {
+            return name;
+        }
     }
     "UNKNOWN_RPC_CREDENTIAL".into()
 }
@@ -231,7 +257,10 @@ impl SolanaRpc {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(request_limit.saturating_mul(4))
             .clamp(1, 500);
-        let credential_env_names = http_urls.iter().map(|url| credential_env_name_for_rpc_url(url)).collect();
+        let credential_env_names = http_urls
+            .iter()
+            .map(|url| credential_env_name_for_rpc_url(url))
+            .collect();
         let endpoint_health = (0..http_urls.len())
             .map(|_| Mutex::new(EndpointHealth::default()))
             .collect();
@@ -1044,7 +1073,9 @@ impl SolanaRpc {
             } else {
                 None
             };
-            let credential_env_var = key.map(|(name, _)| name.as_str()).unwrap_or("NO_RUGCHECK_API_KEY_CONFIGURED");
+            let credential_env_var = key
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("NO_RUGCHECK_API_KEY_CONFIGURED");
             last_attempt_credential_env_var = credential_env_var.to_owned();
             let mut request = self
                 .client
@@ -1084,7 +1115,9 @@ impl SolanaRpc {
                     break;
                 }
                 Err(error) => {
-                    last_error = Some(format!("RugCheck request failed using {credential_env_var}: {error}"));
+                    last_error = Some(format!(
+                        "RugCheck request failed using {credential_env_var}: {error}"
+                    ));
                     if offset + 1 == attempts {
                         break;
                     }
