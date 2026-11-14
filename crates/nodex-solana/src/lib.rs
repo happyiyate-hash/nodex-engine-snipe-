@@ -977,17 +977,17 @@ impl SolanaRpc {
         } else {
             format!("https://api.rugcheck.xyz{path}")
         };
-        let keys: Vec<String> = (1..=10)
+        let keys: Vec<(String, String)> = (1..=10)
             .filter_map(|index| {
                 let name = if index == 1 {
                     "RUGCHECK_API_KEY".to_owned()
                 } else {
                     format!("RUGCHECK_API_KEY{index}")
                 };
-                std::env::var(name)
+                std::env::var(&name)
                     .ok()
-                    .map(|key| key.trim().to_owned())
-                    .filter(|key| !key.is_empty())
+                    .map(|key| (name, key.trim().to_owned()))
+                    .filter(|(_, key)| !key.is_empty())
             })
             .collect();
         let key_count = keys.len();
@@ -1009,24 +1009,28 @@ impl SolanaRpc {
             "operation": "GET /v1/tokens/{mint}/report",
             "token_mint": mint,
             "configured_key_count": key_count,
+            "credential_env_vars": keys.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             "refresh_requested": refresh,
             "request": {"method":"GET","path":path}
         }));
 
         let mut final_response = None;
         let mut last_error = None;
+        let mut last_attempt_credential_env_var = "NO_RUGCHECK_API_KEY_CONFIGURED".to_owned();
         for offset in 0..attempts {
             let key = if key_count > 0 {
                 Some(&keys[(start_index + offset) % key_count])
             } else {
                 None
             };
+            let credential_env_var = key.map(|(name, _)| name.as_str()).unwrap_or("NO_RUGCHECK_API_KEY_CONFIGURED");
+            last_attempt_credential_env_var = credential_env_var.to_owned();
             let mut request = self
                 .client
                 .get(&url)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .timeout(std::time::Duration::from_secs(12));
-            if let Some(key) = key {
+            if let Some((_, key)) = key {
                 request = request.header("X-API-KEY", key);
             }
             match request.send().await {
@@ -1038,16 +1042,28 @@ impl SolanaRpc {
                         || status.is_server_error())
                         && offset + 1 < attempts
                     {
-                        last_error = Some(format!(
-                            "RugCheck returned HTTP {status}; trying another configured key"
-                        ));
+                        self.emit_activity(json!({
+                            "id": format!("{activity_id}-key-attempt-{offset}-response"),
+                            "correlation_id": activity_id,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "direction": "response",
+                            "provider": "rugcheck",
+                            "endpoint": "api.rugcheck.xyz",
+                            "operation": "GET /v1/tokens/{mint}/report",
+                            "token_mint": mint,
+                            "credential_env_var": credential_env_var,
+                            "http_status": status.as_u16(),
+                            "severity": "error",
+                            "error": format!("RugCheck returned HTTP {status}; trying another configured key")
+                        }));
+                        last_error = Some(format!("RugCheck returned HTTP {status} using {credential_env_var}; trying another configured key"));
                         continue;
                     }
                     final_response = Some(response);
                     break;
                 }
                 Err(error) => {
-                    last_error = Some(error.to_string());
+                    last_error = Some(format!("RugCheck request failed using {credential_env_var}: {error}"));
                     if offset + 1 == attempts {
                         break;
                     }
@@ -1070,6 +1086,7 @@ impl SolanaRpc {
                     "token_mint": mint,
                     "duration_ms": request_started.elapsed().as_millis(),
                     "severity": "error",
+                    "credential_env_var": last_attempt_credential_env_var,
                     "error": message
                 }));
                 return RugCheckSummary {
@@ -1120,6 +1137,7 @@ impl SolanaRpc {
             "token_mint": mint,
             "duration_ms": request_started.elapsed().as_millis(),
             "http_status": status.as_u16(),
+            "credential_env_var": last_attempt_credential_env_var,
             "severity": if status.is_success() {"info"} else {"error"},
             "configured_key_count": key_count,
             "body_truncated": response_truncated,
@@ -1139,6 +1157,7 @@ impl SolanaRpc {
                     "provider":"rugcheck",
                     "kind":"http_error",
                     "http_status":status.as_u16(),
+                    "credential_env_var":last_attempt_credential_env_var,
                     "response":value.clone()
                 })),
                 raw_response: Some(value),
