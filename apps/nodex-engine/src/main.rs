@@ -1434,63 +1434,88 @@ fn start_token_state_projector(
                 // verified badge while waiting for the first valid price update.
                 "market_subscription_requested" => {
                     let verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    verified.then(|| json!({
-                        "status":"verified","label":"Verified",
-                        "stage":"market_subscription_requested",
-                        "sub_event": data.get("message").and_then(serde_json::Value::as_str)
-                            .unwrap_or("Requesting market-data subscription")
-                    }))
+                    verified.then(|| {
+                        json!({
+                            "status":"verified","label":"Verified",
+                            "stage":"market_subscription_requested",
+                            "sub_event": data.get("message").and_then(serde_json::Value::as_str)
+                                .unwrap_or("Requesting market-data subscription")
+                        })
+                    })
                 }
                 "market_subscription_subscribed" => {
                     let verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    verified.then(|| json!({
-                        "status":"verified","label":"Verified",
-                        "stage":"market_subscription_subscribed",
-                        "sub_event": data.get("message").and_then(serde_json::Value::as_str)
-                            .unwrap_or("Market-data subscription acknowledged")
-                    }))
+                    verified.then(|| {
+                        json!({
+                            "status":"verified","label":"Verified",
+                            "stage":"market_subscription_subscribed",
+                            "sub_event": data.get("message").and_then(serde_json::Value::as_str)
+                                .unwrap_or("Market-data subscription acknowledged")
+                        })
+                    })
                 }
                 "market_subscription_active" => {
                     let verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    verified.then(|| json!({
-                        "status":"verified","label":"Verified",
-                        "stage":"market_subscription_active",
-                        "sub_event": data.get("message").and_then(serde_json::Value::as_str)
-                            .unwrap_or("Market-data stream active")
-                    }))
+                    verified.then(|| {
+                        json!({
+                            "status":"verified","label":"Verified",
+                            "stage":"market_subscription_active",
+                            "sub_event": data.get("message").and_then(serde_json::Value::as_str)
+                                .unwrap_or("Market-data stream active")
+                        })
+                    })
                 }
                 "market_subscription_waiting" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    security_is_verified.then(|| json!({
-                        "status":"verified","label":"Verified",
-                        "stage":"market_subscription_waiting",
-                        "sub_event": data.get("message").and_then(serde_json::Value::as_str)
-                            .unwrap_or("Waiting for market-subscription capacity")
-                    }))
+                    security_is_verified.then(|| {
+                        json!({
+                            "status":"verified","label":"Verified",
+                            "stage":"market_subscription_waiting",
+                            "sub_event": data.get("message").and_then(serde_json::Value::as_str)
+                                .unwrap_or("Waiting for market-subscription capacity")
+                        })
+                    })
                 }
                 "market_subscription_failed" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
-                        !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
+                        !security
+                            .get("diagnostic_only")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
                             && core_verification_gate_passed(security)
                     });
-                    security_is_verified.then(|| json!({
-                        "status":"verified","label":"Verified",
-                        "stage":"market_data_unavailable",
-                        "sub_event": data.get("reason").or_else(|| data.get("message"))
-                            .and_then(serde_json::Value::as_str).unwrap_or("Market-data subscription failed")
-                    }))
+                    security_is_verified.then(|| {
+                        json!({
+                            "status":"verified","label":"Verified",
+                            "stage":"market_data_unavailable",
+                            "sub_event": data.get("reason").or_else(|| data.get("message"))
+                                .and_then(serde_json::Value::as_str).unwrap_or("Market-data subscription failed")
+                        })
+                    })
                 }
                 "market_monitoring_expired" => Some(json!({
                     "status":"monitoring_stopped","label":"Monitoring stopped",
