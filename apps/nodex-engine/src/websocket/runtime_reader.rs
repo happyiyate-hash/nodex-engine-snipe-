@@ -11,7 +11,6 @@ const POSITION_SCOPED_MARKET_EVENTS: &[&str] = &[
     "chart_candle_closed",
     "market_account_update",
     "market_curve_completed",
-    "market_tick",
     "pumpswap_volume_update",
 ];
 
@@ -43,7 +42,6 @@ const TOKEN_SCOPED_EVENTS: &[&str] = &[
     "chart_candle_closed",
     "market_account_update",
     "market_curve_completed",
-    "market_tick",
     "market_monitoring_expired",
     "paper_buy_started",
     "paper_buy_executed",
