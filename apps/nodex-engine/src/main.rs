@@ -1465,7 +1465,7 @@ fn start_token_state_projector(
                             .unwrap_or("Market-data stream active")
                     }))
                 }
-"market_subscription_waiting" => {
+                "market_subscription_waiting" => {
                     let security_is_verified = current_security.as_ref().is_some_and(|security| {
                         !security.get("diagnostic_only").and_then(serde_json::Value::as_bool).unwrap_or(true)
                             && core_verification_gate_passed(security)
@@ -1494,7 +1494,7 @@ fn start_token_state_projector(
                     "stage":"early_entry_window_expired",
                     "sub_event": data.get("message").and_then(serde_json::Value::as_str)
                         .unwrap_or("Early-entry monitoring window expired")
-                }))
+                })),
                 "paper_entry_evaluation" => {
                     let is_monitoring = current_activity
                         .as_ref()
