@@ -77,7 +77,6 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("market_subscription_waiting")
             | Some("market_subscription_failed")
             | Some("market_monitoring_expired")
-            | Some("market_tick")
             | Some("market_subscriptions_removed")
             | Some("creator_history_started")
             | Some("creator_history_update")
@@ -118,7 +117,6 @@ mod tests {
             "market_subscription_waiting",
             "market_subscription_failed",
             "market_monitoring_expired",
-            "market_tick",
         ] {
             assert!(
                 is_frontend_event(&serde_json::json!({"type":event_type,"data":{}})),
