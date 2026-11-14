@@ -76,6 +76,8 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("market_subscription_active")
             | Some("market_subscription_waiting")
             | Some("market_subscription_failed")
+            | Some("market_monitoring_expired")
+            | Some("market_tick")
             | Some("market_subscriptions_removed")
             | Some("creator_history_started")
             | Some("creator_history_update")
@@ -99,6 +101,24 @@ mod tests {
             "token_rejected_cleanup",
             "token_removed",
             "tokens_removed_inactive",
+        ] {
+            assert!(
+                is_frontend_event(&serde_json::json!({"type":event_type,"data":{}})),
+                "{event_type} must be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn market_monitoring_lifecycle_events_are_forwarded_to_the_frontend() {
+        for event_type in [
+            "market_subscription_requested",
+            "market_subscription_subscribed",
+            "market_subscription_active",
+            "market_subscription_waiting",
+            "market_subscription_failed",
+            "market_monitoring_expired",
+            "market_tick",
         ] {
             assert!(
                 is_frontend_event(&serde_json::json!({"type":event_type,"data":{}})),
