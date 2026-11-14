@@ -119,6 +119,7 @@ pub fn decode_pump_swap_activity_logs(
 #[derive(Debug, Clone)]
 pub struct SolanaRpc {
     http_urls: Vec<String>,
+    credential_env_names: Vec<String>,
     active_http_index: Arc<AtomicUsize>,
     request_limit: Arc<Semaphore>,
     queue_limit: Arc<Semaphore>,
@@ -191,6 +192,25 @@ fn redact_provider_value(value: &mut Value) {
     }
 }
 
+fn credential_env_name_for_rpc_url(url: &str) -> String {
+    if std::env::var("SOLANA_RPC_HTTP_URL").ok().is_some_and(|value| !value.trim().is_empty() && value.trim() == url) {
+        return "SOLANA_RPC_HTTP_URL".into();
+    }
+    let credential = reqwest::Url::parse(url).ok().and_then(|parsed| {
+        parsed.query_pairs().find(|(name, _)| name == "key" || name == "api-key").map(|(_, value)| value.into_owned())
+    });
+    let Some(credential) = credential else { return "UNKNOWN_RPC_CREDENTIAL".into(); };
+    for index in 1..=10 {
+        let name = if index == 1 { "FLUXRPC_API_KEY".to_owned() } else { format!("FLUXRPC_API_KEY{index}") };
+        if std::env::var(&name).ok().is_some_and(|value| value.trim() == credential) { return name; }
+    }
+    for index in 1..=20 {
+        let name = if index == 1 { "HELIUS_API_KEY".to_owned() } else { format!("HELIUS_API_KEY{index}") };
+        if std::env::var(&name).ok().is_some_and(|value| value.trim() == credential) { return name; }
+    }
+    "UNKNOWN_RPC_CREDENTIAL".into()
+}
+
 impl SolanaRpc {
     pub fn new(http_url: impl Into<String>) -> Self {
         Self::new_with_urls(vec![http_url.into()])
@@ -211,6 +231,7 @@ impl SolanaRpc {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(request_limit.saturating_mul(4))
             .clamp(1, 500);
+        let credential_env_names = http_urls.iter().map(|url| credential_env_name_for_rpc_url(url)).collect();
         let endpoint_health = (0..http_urls.len())
             .map(|_| Mutex::new(EndpointHealth::default()))
             .collect();
@@ -219,6 +240,7 @@ impl SolanaRpc {
             shared_rpc_limits(limit_env, request_limit, queue_capacity);
         Self {
             http_urls,
+            credential_env_names,
             active_http_index: Arc::new(AtomicUsize::new(0)),
             request_limit,
             queue_limit,
@@ -303,6 +325,7 @@ impl SolanaRpc {
         for offset in 0..count {
             let index = (start + offset) % count;
             let url = &self.http_urls[index];
+            let credential_env_var = &self.credential_env_names[index];
             if !self.endpoint_health[index].lock().await.is_available() {
                 continue;
             }
@@ -322,6 +345,7 @@ impl SolanaRpc {
                 "operation": method,
                 "token_mint": token_mint,
                 "attempt": index + 1,
+                "credential_env_var": credential_env_var,
                 "request": {"jsonrpc":"2.0","method":method,"params":request_params}
             }));
             let response = match self
@@ -342,6 +366,7 @@ impl SolanaRpc {
                         "endpoint": endpoint_host,
                         "operation": method,
                         "token_mint": token_mint,
+                        "credential_env_var": credential_env_var,
                         "duration_ms": attempt_started.elapsed().as_millis(),
                         "severity": "error",
                         "error": error.to_string()
@@ -389,6 +414,7 @@ impl SolanaRpc {
                 "endpoint": endpoint_host,
                 "operation": method,
                 "token_mint": token_mint,
+                "credential_env_var": credential_env_var,
                 "duration_ms": attempt_started.elapsed().as_millis(),
                 "http_status": status.as_u16(),
                 "severity": if status.is_success() { "info" } else { "error" },
@@ -404,7 +430,7 @@ impl SolanaRpc {
                 }
                 last_error = Some(anyhow!(
                     "NODEX_PROVIDER_ERROR_JSON:{}",
-                    json!({"provider":"solana_rpc","method":method,"kind":"http_error","http_status":status.as_u16(),"response":response_json})
+                    json!({"provider":"solana_rpc","method":method,"kind":"http_error","http_status":status.as_u16(),"credential_env_var":credential_env_var,"response":response_json})
                 ));
                 if status.as_u16() == 429
                     || status.is_server_error()
@@ -434,7 +460,7 @@ impl SolanaRpc {
                     || message.contains("429");
                 last_error = Some(anyhow!(
                     "NODEX_PROVIDER_ERROR_JSON:{}",
-                    json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"response":error})
+                    json!({"provider":"solana_rpc","method":method,"kind":"json_rpc_error","http_status":status.as_u16(),"credential_env_var":credential_env_var,"response":error})
                 ));
                 if limited {
                     self.endpoint_health[index]
