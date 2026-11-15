@@ -147,7 +147,7 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
 
     let concentration_risk = token
         .latest_holder_concentration_pct
-        .map(|pct| clamp_score(pct));
+        .map(clamp_score);
     let drawdown_risk = token
         .peak_market_cap_usd
         .filter(|peak| *peak > 0.0)
