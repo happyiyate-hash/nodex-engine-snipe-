@@ -56,7 +56,9 @@ pub async fn initialize(pool: &SqlitePool) -> Result<()> {
             total_launches INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         )"#,
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS training_tokens (
@@ -74,14 +76,20 @@ pub async fn initialize(pool: &SqlitePool) -> Result<()> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )"#,
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_training_tokens_creator ON training_tokens(creator_address, launched_at DESC)",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_training_tokens_status ON training_tokens(lifecycle_status, last_observed_at)",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS training_token_observations (
@@ -103,13 +111,19 @@ pub async fn initialize(pool: &SqlitePool) -> Result<()> {
             evidence_json TEXT NOT NULL DEFAULT '{}',
             UNIQUE(mint_address, observation_key)
         )"#,
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_training_observations_mint_time ON training_token_observations(mint_address, observed_at)",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_training_observations_creator_time ON training_token_observations(creator_address, observed_at)",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -140,7 +154,8 @@ pub async fn record_launch(pool: &SqlitePool, launch: &TrainingLaunch) -> Result
     .bind(&launch.detected_at)
     .execute(&mut *tx)
     .await?
-    .rows_affected() == 1;
+    .rows_affected()
+        == 1;
 
     if inserted {
         sqlx::query(
@@ -191,19 +206,23 @@ pub async fn record_observation(pool: &SqlitePool, observation: &TokenObservatio
     ] {
         validate_optional_nonnegative(name, value)?;
     }
-    if observation.holder_concentration_pct.is_some_and(|v| v > 100.0) {
+    if observation
+        .holder_concentration_pct
+        .is_some_and(|v| v > 100.0)
+    {
         return Err(anyhow!("holder concentration cannot exceed 100"));
     }
 
     let mut tx = pool.begin().await?;
-    let creator: Option<String> = sqlx::query_scalar(
-        "SELECT creator_address FROM training_tokens WHERE mint_address = ?",
-    )
-    .bind(observation.mint_address.trim())
-    .fetch_optional(&mut *tx)
-    .await?;
+    let creator: Option<String> =
+        sqlx::query_scalar("SELECT creator_address FROM training_tokens WHERE mint_address = ?")
+            .bind(observation.mint_address.trim())
+            .fetch_optional(&mut *tx)
+            .await?;
     let Some(creator) = creator else {
-        return Err(anyhow!("training launch must be recorded before its observations"));
+        return Err(anyhow!(
+            "training launch must be recorded before its observations"
+        ));
     };
 
     let inserted = sqlx::query(
@@ -228,7 +247,11 @@ pub async fn record_observation(pool: &SqlitePool, observation: &TokenObservatio
     .bind(observation.holder_concentration_pct)
     .bind(observation.graduated)
     .bind(observation.trading_active)
-    .bind(if observation.evidence_json.trim().is_empty() { "{}" } else { &observation.evidence_json })
+    .bind(if observation.evidence_json.trim().is_empty() {
+        "{}"
+    } else {
+        &observation.evidence_json
+    })
     .execute(&mut *tx)
     .await?
     .rows_affected() == 1;
@@ -281,17 +304,21 @@ pub async fn list_tokens_for_creator(
     .bind(limit.clamp(1, 500) as i64)
     .fetch_all(pool)
     .await?;
-    rows.into_iter().map(|row| Ok(TrainingToken {
-        mint_address: row.try_get("mint_address")?,
-        creator_address: row.try_get("creator_address")?,
-        source: row.try_get("source")?,
-        launched_at: row.try_get("launched_at")?,
-        last_observed_at: row.try_get("last_observed_at")?,
-        lifecycle_status: row.try_get("lifecycle_status")?,
-        graduated_at: row.try_get("graduated_at")?,
-        peak_market_cap_usd: row.try_get("peak_market_cap_usd")?,
-        observation_count: row.try_get::<i64, _>("observation_count")?.max(0) as u64,
-    })).collect()
+    rows.into_iter()
+        .map(|row| {
+            Ok(TrainingToken {
+                mint_address: row.try_get("mint_address")?,
+                creator_address: row.try_get("creator_address")?,
+                source: row.try_get("source")?,
+                launched_at: row.try_get("launched_at")?,
+                last_observed_at: row.try_get("last_observed_at")?,
+                lifecycle_status: row.try_get("lifecycle_status")?,
+                graduated_at: row.try_get("graduated_at")?,
+                peak_market_cap_usd: row.try_get("peak_market_cap_usd")?,
+                observation_count: row.try_get::<i64, _>("observation_count")?.max(0) as u64,
+            })
+        })
+        .collect()
 }
 
 /// Return stored observations in chronological order for an individual token.
@@ -312,26 +339,30 @@ pub async fn list_token_observations(
     .bind(limit.clamp(1, 5000) as i64)
     .fetch_all(pool)
     .await?;
-    let mut observations = rows.into_iter().map(|row| Ok(TokenObservation {
-        mint_address: row.try_get("mint_address")?,
-        observation_key: row.try_get("observation_key")?,
-        observed_at: row.try_get("observed_at")?,
-        market_cap_usd: row.try_get("market_cap_usd")?,
-        price_usd: row.try_get("price_usd")?,
-        liquidity_usd: row.try_get("liquidity_usd")?,
-        volume_5m_usd: row.try_get("volume_5m_usd")?,
-        buy_count_5m: row.try_get::<i64, _>("buy_count_5m")?.max(0) as u64,
-        sell_count_5m: row.try_get::<i64, _>("sell_count_5m")?.max(0) as u64,
-        unique_buyers_5m: row.try_get::<i64, _>("unique_buyers_5m")?.max(0) as u64,
-        holder_concentration_pct: row.try_get("holder_concentration_pct")?,
-        graduated: row.try_get::<i64, _>("graduated")? != 0,
-        trading_active: row.try_get::<i64, _>("trading_active")? != 0,
-        evidence_json: row.try_get("evidence_json")?,
-    })).collect::<Result<Vec<_>>>()?;
+    let mut observations = rows
+        .into_iter()
+        .map(|row| {
+            Ok(TokenObservation {
+                mint_address: row.try_get("mint_address")?,
+                observation_key: row.try_get("observation_key")?,
+                observed_at: row.try_get("observed_at")?,
+                market_cap_usd: row.try_get("market_cap_usd")?,
+                price_usd: row.try_get("price_usd")?,
+                liquidity_usd: row.try_get("liquidity_usd")?,
+                volume_5m_usd: row.try_get("volume_5m_usd")?,
+                buy_count_5m: row.try_get::<i64, _>("buy_count_5m")?.max(0) as u64,
+                sell_count_5m: row.try_get::<i64, _>("sell_count_5m")?.max(0) as u64,
+                unique_buyers_5m: row.try_get::<i64, _>("unique_buyers_5m")?.max(0) as u64,
+                holder_concentration_pct: row.try_get("holder_concentration_pct")?,
+                graduated: row.try_get::<i64, _>("graduated")? != 0,
+                trading_active: row.try_get::<i64, _>("trading_active")? != 0,
+                evidence_json: row.try_get("evidence_json")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     observations.reverse();
     Ok(observations)
 }
-
 
 #[cfg(test)]
 mod tests {
