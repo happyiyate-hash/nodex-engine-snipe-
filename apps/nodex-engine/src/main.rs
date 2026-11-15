@@ -518,8 +518,7 @@ fn start_creator_lifecycle_evaluator(
                 }
             }
             match nodex_persistence::creator_reputation::evaluate_creator_reputations(
-                &database,
-                now,
+                &database, now,
             )
             .await
             {
