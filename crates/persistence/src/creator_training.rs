@@ -582,3 +582,92 @@ mod tests {
         assert!(record_observation(&pool, &invalid).await.is_err());
     }
 }
+
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn at(minutes_ago: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-11-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            - chrono::Duration::minutes(minutes_ago)
+    }
+
+    #[test]
+    fn young_launch_without_observations_remains_observing() {
+        assert_eq!(
+            classify_lifecycle(
+                "2026-11-15T11:55:00Z",
+                None,
+                None,
+                None,
+                None,
+                false,
+                at(0),
+            ),
+            "observing"
+        );
+    }
+
+    #[test]
+    fn older_launch_without_observations_is_insufficient_not_inactive() {
+        assert_eq!(
+            classify_lifecycle(
+                "2026-11-15T10:00:00Z",
+                None,
+                None,
+                None,
+                None,
+                false,
+                at(0),
+            ),
+            "insufficient_data"
+        );
+    }
+
+    #[test]
+    fn recent_trades_are_active_and_old_observations_become_inactive() {
+        assert_eq!(
+            classify_lifecycle(
+                "2026-11-15T10:00:00Z",
+                Some("2026-11-15T11:55:00Z"),
+                Some(true),
+                Some(4),
+                Some(2),
+                false,
+                at(0),
+            ),
+            "active"
+        );
+        assert_eq!(
+            classify_lifecycle(
+                "2026-11-15T10:00:00Z",
+                Some("2026-11-15T05:00:00Z"),
+                Some(false),
+                Some(0),
+                Some(0),
+                true,
+                at(0),
+            ),
+            "graduated_inactive"
+        );
+    }
+
+    #[test]
+    fn graduated_status_is_preserved_as_a_lifecycle_prefix() {
+        assert_eq!(
+            classify_lifecycle(
+                "2026-11-15T10:00:00Z",
+                Some("2026-11-15T11:50:00Z"),
+                Some(false),
+                Some(0),
+                Some(0),
+                true,
+                at(0),
+            ),
+            "graduated_slowing"
+        );
+    }
+}
