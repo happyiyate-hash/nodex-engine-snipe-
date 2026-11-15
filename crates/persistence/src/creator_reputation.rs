@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-const MIN_ESTABLISHED_LAUNCHES: usize = 3;
+const MIN_ESTABLISHED_LAUNCHES: u64 = 3;
 const MIN_ESTABLISHED_OBSERVED_TOKENS: usize = 2;
 const MIN_ESTABLISHED_OBSERVATIONS: u64 = 12;
 
