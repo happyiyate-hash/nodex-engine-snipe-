@@ -137,11 +137,7 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
     let volume_activity = token
         .latest_volume_5m_usd
         .map(|volume| clamp_score(volume / 10_000.0 * 100.0));
-    let activity = average(
-        [buyer_activity, volume_activity]
-            .into_iter()
-            .map(|value| value),
-    );
+    let activity = average([buyer_activity, volume_activity].into_iter());
 
     let stability = token
         .peak_market_cap_usd
@@ -491,6 +487,15 @@ mod tests {
         token.launched_at = "2026-11-15T11:00:00Z".into();
         let scores = token_scores(&token, now());
         assert_eq!(scores[2], None);
+    }
+
+    #[test]
+    fn inactive_tokens_are_not_mistaken_for_active_longevity() {
+        let mut token = evidence();
+        token.lifecycle_status = "inactive".into();
+        let scores = token_scores(&token, now());
+        assert!(scores[0].unwrap() < 100.0);
+        assert_eq!(scores[5], Some(85.0));
     }
 
     #[test]
