@@ -502,11 +502,9 @@ fn start_creator_lifecycle_evaluator(
             if !stream_status.read().await.connected {
                 continue;
             }
-            match nodex_persistence::creator_training::evaluate_lifecycle_statuses(
-                &database,
-                chrono::Utc::now(),
-            )
-            .await
+            let now = chrono::Utc::now();
+            match nodex_persistence::creator_training::evaluate_lifecycle_statuses(&database, now)
+                .await
             {
                 Ok(changed) if changed > 0 => {
                     tracing::info!(
@@ -517,6 +515,23 @@ fn start_creator_lifecycle_evaluator(
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(%error, "Creator-training lifecycle evaluation failed");
+                }
+            }
+            match nodex_persistence::creator_reputation::evaluate_creator_reputations(
+                &database,
+                now,
+            )
+            .await
+            {
+                Ok(updated) if updated > 0 => {
+                    tracing::info!(
+                        creators_updated = updated,
+                        "Recomputed evidence-based creator reputation scores"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "Creator reputation evaluation failed");
                 }
             }
         }
