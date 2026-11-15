@@ -1,4 +1,5 @@
 pub mod creator_intelligence;
+pub mod creator_training;
 
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
@@ -28,6 +29,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         .connect_with(options)
         .await?;
     creator_intelligence::initialize(&pool).await?;
+    creator_training::initialize(&pool).await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS token_launches (
             id TEXT PRIMARY KEY NOT NULL, mint_address TEXT NOT NULL, creator_address TEXT,
