@@ -87,12 +87,12 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
         .zip(parse_time(&token.launched_at))
         .map(|(last, launch)| last.signed_duration_since(launch).num_seconds().max(0) as f64 / 3600.0);
 
-    let longevity = age_hours.map(|hours| {
+    let phase = token
+        .lifecycle_status
+        .strip_prefix("graduated_")
+        .unwrap_or(&token.lifecycle_status);
+    let longevity = observed_hours.map(|hours| {
         let duration = clamp_score(hours / 24.0 * 100.0);
-        let phase = token
-            .lifecycle_status
-            .strip_prefix("graduated_")
-            .unwrap_or(&token.lifecycle_status);
         let lifecycle_bonus = if phase == "active" {
             15.0
         } else if phase == "slowing" {
@@ -101,7 +101,7 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
             0.0
         };
         clamp_score(duration * 0.8 + lifecycle_bonus)
-    }).or_else(|| observed_hours.map(|hours| clamp_score(hours / 24.0 * 80.0)));
+    });
 
     let growth = token.peak_market_cap_usd.map(|cap| {
         if cap >= 2_000_000.0 {
@@ -129,13 +129,17 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
         None
     };
 
-    let activity = token.latest_unique_buyers_5m.map(|buyers| {
-        let buyer_score = clamp_score(buyers as f64 / 20.0 * 100.0);
-        let volume_score = token.latest_volume_5m_usd
-            .map(|volume| clamp_score(volume / 10_000.0 * 100.0))
-            .unwrap_or(0.0);
-        clamp_score(buyer_score * 0.65 + volume_score * 0.35)
-    });
+    let buyer_activity = token
+        .latest_unique_buyers_5m
+        .map(|buyers| clamp_score(buyers as f64 / 20.0 * 100.0));
+    let volume_activity = token
+        .latest_volume_5m_usd
+        .map(|volume| clamp_score(volume / 10_000.0 * 100.0));
+    let activity = average(
+        [buyer_activity, volume_activity]
+            .into_iter()
+            .map(|value| value),
+    );
 
     let stability = token
         .peak_market_cap_usd
