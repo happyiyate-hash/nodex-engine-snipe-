@@ -135,7 +135,9 @@ pub(super) fn start_launch_processor(
                     if let Err(error) = nodex_persistence::creator_training::record_launch(
                         &database,
                         &training_launch,
-                    ).await {
+                    )
+                    .await
+                    {
                         let _ = events.publish(json!({
                             "type":"token_diagnostic",
                             "data":token_diagnostic(
