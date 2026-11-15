@@ -254,7 +254,8 @@ pub async fn record_observation(pool: &SqlitePool, observation: &TokenObservatio
     })
     .execute(&mut *tx)
     .await?
-    .rows_affected() == 1;
+    .rows_affected()
+        == 1;
 
     if inserted {
         sqlx::query(
@@ -443,12 +444,17 @@ mod tests {
         let second = observation("bucket-2", "2026-01-02T00:10:00Z", 250_000.0, true);
         assert!(record_observation(&pool, &second).await.unwrap());
 
-        let tokens = list_tokens_for_creator(&pool, "creator-1", 20).await.unwrap();
+        let tokens = list_tokens_for_creator(&pool, "creator-1", 20)
+            .await
+            .unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].observation_count, 2);
         assert_eq!(tokens[0].peak_market_cap_usd, Some(500_000.0));
         assert_eq!(tokens[0].lifecycle_status, "graduated");
-        assert_eq!(tokens[0].graduated_at.as_deref(), Some("2026-01-02T00:10:00Z"));
+        assert_eq!(
+            tokens[0].graduated_at.as_deref(),
+            Some("2026-01-02T00:10:00Z")
+        );
 
         let history = list_token_observations(&pool, "mint-1", 20).await.unwrap();
         assert_eq!(history.len(), 2);
