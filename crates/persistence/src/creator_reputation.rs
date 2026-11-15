@@ -231,6 +231,36 @@ fn build_breakdown(
     }
 }
 
+pub async fn initialize(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS creator_reputations (
+            creator_address TEXT PRIMARY KEY NOT NULL,
+            total_launches INTEGER NOT NULL DEFAULT 0,
+            observed_tokens INTEGER NOT NULL DEFAULT 0,
+            total_observations INTEGER NOT NULL DEFAULT 0,
+            graduated_tokens INTEGER NOT NULL DEFAULT 0,
+            longevity_score REAL,
+            growth_score REAL,
+            graduation_score REAL,
+            activity_score REAL,
+            stability_score REAL,
+            risk_score REAL,
+            overall_score REAL,
+            confidence_pct REAL NOT NULL DEFAULT 0,
+            sample_status TEXT NOT NULL DEFAULT 'insufficient_data',
+            updated_at TEXT NOT NULL
+        )"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_creator_reputations_rank ON creator_reputations(overall_score DESC, risk_score ASC, updated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Recompute creator reputation from immutable launch relationships and deduplicated
 /// token observations. Recomputing from source evidence avoids score inflation on retries.
 pub async fn evaluate_creator_reputations(
