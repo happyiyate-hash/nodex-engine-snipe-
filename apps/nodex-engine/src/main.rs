@@ -5584,6 +5584,7 @@ async fn main() -> anyhow::Result<()> {
         market_monitor.clone(),
         events.clone(),
     );
+    start_creator_lifecycle_evaluator(db.clone(), stream_status.clone());
     start_inactive_token_cleanup(
         db.clone(),
         token_registry.clone(),
