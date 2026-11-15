@@ -365,7 +365,6 @@ pub async fn list_token_observations(
     Ok(observations)
 }
 
-
 /// Classify a token from its launch age and latest persisted market evidence.
 /// Missing observations are never treated as proof of inactivity.
 pub fn classify_lifecycle(
@@ -583,7 +582,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
@@ -598,15 +596,7 @@ mod lifecycle_tests {
     #[test]
     fn young_launch_without_observations_remains_observing() {
         assert_eq!(
-            classify_lifecycle(
-                "2026-11-15T11:55:00Z",
-                None,
-                None,
-                None,
-                None,
-                false,
-                at(0),
-            ),
+            classify_lifecycle("2026-11-15T11:55:00Z", None, None, None, None, false, at(0),),
             "observing"
         );
     }
@@ -614,15 +604,7 @@ mod lifecycle_tests {
     #[test]
     fn older_launch_without_observations_is_insufficient_not_inactive() {
         assert_eq!(
-            classify_lifecycle(
-                "2026-11-15T10:00:00Z",
-                None,
-                None,
-                None,
-                None,
-                false,
-                at(0),
-            ),
+            classify_lifecycle("2026-11-15T10:00:00Z", None, None, None, None, false, at(0),),
             "insufficient_data"
         );
     }
