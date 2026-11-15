@@ -987,7 +987,6 @@ fn record_confirmed_trade(
     }
 }
 
-
 /// Persist one creator-training sample from authoritative market data and the
 /// confirmed-trade window. Missing USD quotes, liquidity and holder data stay
 /// unknown rather than being represented as zero.
@@ -1001,29 +1000,33 @@ async fn persist_creator_training_observation(
     graduated: bool,
     observation_key: String,
 ) -> anyhow::Result<bool> {
-    let has_training_launch: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM training_tokens WHERE mint_address = ?)",
-    )
-    .bind(mint)
-    .fetch_one(database)
-    .await?;
+    let has_training_launch: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM training_tokens WHERE mint_address = ?)")
+            .bind(mint)
+            .fetch_one(database)
+            .await?;
     if !has_training_launch {
         return Ok(false);
     }
 
-    let valid_number = |value: Option<f64>| {
-        value.filter(|number| number.is_finite() && *number > 0.0)
-    };
+    let valid_number =
+        |value: Option<f64>| value.filter(|number| number.is_finite() && *number > 0.0);
     let sol_usd = (sol_price.status == "live")
         .then_some(sol_price.price_usd)
         .filter(|price| price.is_finite() && *price > 0.0);
     let price_sol = valid_number(market.get("price_sol").and_then(serde_json::Value::as_f64));
-    let market_cap_sol =
-        valid_number(market.get("market_cap_sol").and_then(serde_json::Value::as_f64));
+    let market_cap_sol = valid_number(
+        market
+            .get("market_cap_sol")
+            .and_then(serde_json::Value::as_f64),
+    );
     let direct_price_usd =
         valid_number(market.get("price_usd").and_then(serde_json::Value::as_f64));
-    let direct_market_cap_usd =
-        valid_number(market.get("market_cap_usd").and_then(serde_json::Value::as_f64));
+    let direct_market_cap_usd = valid_number(
+        market
+            .get("market_cap_usd")
+            .and_then(serde_json::Value::as_f64),
+    );
     let price_usd = if quote_is_sol {
         direct_price_usd.or_else(|| price_sol.zip(sol_usd).map(|(price, sol)| price * sol))
     } else {
@@ -1208,9 +1211,7 @@ fn start_token_state_projector(
                         .get(mint)
                         .and_then(|snapshot| snapshot.data.get("market").cloned())
                         .unwrap_or_else(|| json!({}));
-                    let quote_is_sol = data
-                        .get("quote_mint")
-                        .and_then(serde_json::Value::as_str)
+                    let quote_is_sol = data.get("quote_mint").and_then(serde_json::Value::as_str)
                         == Some("So11111111111111111111111111111111111111112");
                     let empty_trades = VecDeque::new();
                     let trades = trade_observations.get(mint).unwrap_or(&empty_trades);
