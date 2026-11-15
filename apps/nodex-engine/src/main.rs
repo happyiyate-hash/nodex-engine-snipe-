@@ -4004,6 +4004,87 @@ async fn creator_intelligence(
     Ok(Json(creators))
 }
 
+async fn creator_reputation(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<
+    Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>,
+    (StatusCode, String),
+> {
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let creators =
+        nodex_persistence::creator_reputation::list_creator_reputations(&state.database, limit)
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(creators))
+}
+
+async fn creator_training(
+    State(state): State<AppState>,
+    Path(creator_address): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let creator_address = creator_address.trim();
+    if creator_address.is_empty() || creator_address.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "creator_address must contain between 1 and 128 characters.".into(),
+        ));
+    }
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let tokens = nodex_persistence::creator_training::list_tokens_for_creator(
+        &state.database,
+        creator_address,
+        limit,
+    )
+    .await
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let token_count = tokens.len();
+    Ok(Json(json!({
+        "creator_address": creator_address,
+        "token_count": token_count,
+        "tokens": tokens
+    })))
+}
+
+async fn training_token_observations(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<
+    Json<Vec<nodex_persistence::creator_training::TokenObservation>>,
+    (StatusCode, String),
+> {
+    let mint = mint.trim();
+    if mint.is_empty() || mint.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "mint must contain between 1 and 128 characters.".into(),
+        ));
+    }
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(500)
+        .clamp(1, 5_000);
+    let observations = nodex_persistence::creator_training::list_token_observations(
+        &state.database,
+        mint,
+        limit,
+    )
+    .await
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(observations))
+}
+
 async fn engine_activity_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5743,6 +5824,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/profile", get(get_profile))
         .route("/api/v1/tokens/recent", get(recent_launches))
         .route("/api/v1/creators/intelligence", get(creator_intelligence))
+        .route("/api/v1/creators/reputation", get(creator_reputation))
+        .route(
+            "/api/v1/creators/:creator_address/training",
+            get(creator_training),
+        )
+        .route(
+            "/api/v1/training/tokens/:mint/observations",
+            get(training_token_observations),
+        )
         .route("/api/v1/tokens/:mint/state", get(token_state))
         .route(
             "/api/v1/tokens/:mint/metadata/refresh",
