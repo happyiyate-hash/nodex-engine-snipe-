@@ -85,7 +85,9 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
         .as_deref()
         .and_then(parse_time)
         .zip(parse_time(&token.launched_at))
-        .map(|(last, launch)| last.signed_duration_since(launch).num_seconds().max(0) as f64 / 3600.0);
+        .map(|(last, launch)| {
+            last.signed_duration_since(launch).num_seconds().max(0) as f64 / 3600.0
+        });
 
     let phase = token
         .lifecycle_status
@@ -178,7 +180,10 @@ fn build_breakdown(
     tokens: &[TokenEvidence],
     now: chrono::DateTime<chrono::Utc>,
 ) -> ScoreBreakdown {
-    let observed: Vec<&TokenEvidence> = tokens.iter().filter(|token| token.observation_count > 0).collect();
+    let observed: Vec<&TokenEvidence> = tokens
+        .iter()
+        .filter(|token| token.observation_count > 0)
+        .collect();
     let observations = observed.iter().map(|token| token.observation_count).sum();
     let graduated_tokens = tokens.iter().filter(|token| token.graduated).count() as u64;
     let scores: Vec<[Option<f64>; 6]> = observed
@@ -203,9 +208,18 @@ fn build_breakdown(
         (stability, 0.15),
         (risk.map(|value| 100.0 - value), 0.15),
     ];
-    let weight_total: f64 = weighted.iter().filter_map(|(score, weight)| score.map(|_| *weight)).sum();
+    let weight_total: f64 = weighted
+        .iter()
+        .filter_map(|(score, weight)| score.map(|_| *weight))
+        .sum();
     let overall = if weight_total > 0.0 {
-        Some(weighted.iter().filter_map(|(score, weight)| score.map(|value| value * weight)).sum::<f64>() / weight_total)
+        Some(
+            weighted
+                .iter()
+                .filter_map(|(score, weight)| score.map(|value| value * weight))
+                .sum::<f64>()
+                / weight_total,
+        )
     } else {
         None
     };
@@ -220,7 +234,11 @@ fn build_breakdown(
     } else {
         "insufficient_data"
     };
-    let launch_coverage = if launches == 0 { 0.0 } else { observed.len() as f64 / launches as f64 };
+    let launch_coverage = if launches == 0 {
+        0.0
+    } else {
+        observed.len() as f64 / launches as f64
+    };
     let volume_coverage = (observations as f64 / 24.0).min(1.0);
     let sample_confidence = (launch_coverage.min(1.0) * 50.0) + (volume_coverage * 50.0);
 
@@ -318,8 +336,11 @@ pub async fn evaluate_creator_reputations(
                     peak_market_cap_usd: row.try_get("peak_market_cap_usd")?,
                     latest_market_cap_usd: row.try_get("latest_market_cap_usd")?,
                     latest_volume_5m_usd: row.try_get("latest_volume_5m_usd")?,
-                    latest_unique_buyers_5m: row.try_get::<Option<i64>, _>("latest_unique_buyers_5m")?.map(|v| v.max(0) as u64),
-                    latest_holder_concentration_pct: row.try_get("latest_holder_concentration_pct")?,
+                    latest_unique_buyers_5m: row
+                        .try_get::<Option<i64>, _>("latest_unique_buyers_5m")?
+                        .map(|v| v.max(0) as u64),
+                    latest_holder_concentration_pct: row
+                        .try_get("latest_holder_concentration_pct")?,
                     observation_count: row.try_get::<i64, _>("observation_count")?.max(0) as u64,
                 })
             })
@@ -377,7 +398,10 @@ pub async fn evaluate_creator_reputations(
     Ok(updated)
 }
 
-pub async fn list_creator_reputations(pool: &SqlitePool, limit: u32) -> Result<Vec<CreatorReputation>> {
+pub async fn list_creator_reputations(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<CreatorReputation>> {
     let rows = sqlx::query(
         r#"SELECT creator_address, total_launches, observed_tokens, total_observations,
                   graduated_tokens, longevity_score, growth_score, graduation_score,
