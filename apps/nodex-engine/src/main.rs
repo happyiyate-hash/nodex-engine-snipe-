@@ -987,6 +987,120 @@ fn record_confirmed_trade(
     }
 }
 
+
+/// Persist one creator-training sample from authoritative market data and the
+/// confirmed-trade window. Missing USD quotes, liquidity and holder data stay
+/// unknown rather than being represented as zero.
+async fn persist_creator_training_observation(
+    database: &sqlx::SqlitePool,
+    mint: &str,
+    market: &serde_json::Value,
+    trades: &VecDeque<ConfirmedTradeObservation>,
+    sol_price: &SolPriceSnapshot,
+    quote_is_sol: bool,
+    graduated: bool,
+    observation_key: String,
+) -> anyhow::Result<bool> {
+    let has_training_launch: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM training_tokens WHERE mint_address = ?)",
+    )
+    .bind(mint)
+    .fetch_one(database)
+    .await?;
+    if !has_training_launch {
+        return Ok(false);
+    }
+
+    let valid_number = |value: Option<f64>| {
+        value.filter(|number| number.is_finite() && *number > 0.0)
+    };
+    let sol_usd = (sol_price.status == "live")
+        .then_some(sol_price.price_usd)
+        .filter(|price| price.is_finite() && *price > 0.0);
+    let price_sol = valid_number(market.get("price_sol").and_then(serde_json::Value::as_f64));
+    let market_cap_sol =
+        valid_number(market.get("market_cap_sol").and_then(serde_json::Value::as_f64));
+    let direct_price_usd =
+        valid_number(market.get("price_usd").and_then(serde_json::Value::as_f64));
+    let direct_market_cap_usd =
+        valid_number(market.get("market_cap_usd").and_then(serde_json::Value::as_f64));
+    let price_usd = direct_price_usd.or_else(|| {
+        quote_is_sol.then(|| price_sol.zip(sol_usd).map(|(price, sol)| price * sol)).flatten()
+    });
+    let market_cap_usd = direct_market_cap_usd.or_else(|| {
+        quote_is_sol.then(|| market_cap_sol.zip(sol_usd).map(|(cap, sol)| cap * sol)).flatten()
+    });
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let recent_trades = trades
+        .iter()
+        .filter(|trade| now_ms.saturating_sub(trade.timestamp_ms) <= 300_000)
+        .collect::<Vec<_>>();
+    let buy_count = recent_trades.iter().filter(|trade| trade.is_buy).count() as u64;
+    let sell_count = recent_trades.len() as u64 - buy_count;
+    let unique_buyers = recent_trades
+        .iter()
+        .filter(|trade| trade.is_buy)
+        .map(|trade| trade.trader.as_str())
+        .collect::<HashSet<_>>()
+        .len() as u64;
+    let volume_5m_usd = if quote_is_sol {
+        sol_usd.map(|sol| {
+            recent_trades
+                .iter()
+                .map(|trade| trade.sol_amount_lamports as f64 / 1_000_000_000.0)
+                .sum::<f64>()
+                * sol
+        })
+    } else {
+        None
+    };
+    let observed_at = market
+        .get("received_at")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let evidence = json!({
+        "market_source": market.get("venue").cloned().unwrap_or(serde_json::Value::Null),
+        "quote_is_sol": quote_is_sol,
+        "sol_usd_status": sol_price.status,
+        "sol_usd_source": sol_price.source,
+        "usd_conversion_available": sol_usd.is_some(),
+        "confirmed_trade_window_seconds": 300,
+        "confirmed_trade_count_5m": recent_trades.len(),
+        "trading_activity_evidence": if recent_trades.is_empty() {
+            "no_confirmed_trades_in_window; feed silence is not proof of inactivity"
+        } else {
+            "confirmed_trades_seen"
+        },
+        "liquidity_available": false,
+        "holder_concentration_available": false,
+        "bonding_curve_complete": market.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        "graduation_verified_by_pool": graduated
+    });
+
+    nodex_persistence::creator_training::record_observation(
+        database,
+        &nodex_persistence::creator_training::TokenObservation {
+            mint_address: mint.to_owned(),
+            observation_key,
+            observed_at,
+            market_cap_usd,
+            price_usd,
+            liquidity_usd: None,
+            volume_5m_usd,
+            buy_count_5m: buy_count,
+            sell_count_5m: sell_count,
+            unique_buyers_5m: unique_buyers,
+            holder_concentration_pct: None,
+            graduated,
+            trading_active: !recent_trades.is_empty(),
+            evidence_json: evidence.to_string(),
+        },
+    )
+    .await
+}
+
 /// Projects independent worker events into the canonical shared token state.
 /// Workers remain decoupled: they publish domain events and this projector updates
 /// only the matching domain of the token record.
@@ -1013,6 +1127,7 @@ fn start_token_state_projector(
         let mut last_entry_attempts = HashMap::<String, Instant>::new();
         let mut last_market_slots = HashMap::<String, u64>::new();
         let mut last_activity_persisted = HashMap::<String, Instant>::new();
+        let mut last_training_observed = HashMap::<String, Instant>::new();
         loop {
             let event = match receiver.recv().await {
                 Ok(event) => event,
@@ -1078,6 +1193,31 @@ fn start_token_state_projector(
                     data.get("mint_address").and_then(serde_json::Value::as_str),
                     data.get("pool_address").and_then(serde_json::Value::as_str),
                 ) {
+                    let market = registry
+                        .get(mint)
+                        .and_then(|snapshot| snapshot.data.get("market").cloned())
+                        .unwrap_or_else(|| json!({}));
+                    let quote_is_sol = data
+                        .get("quote_mint")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("So11111111111111111111111111111111111111112");
+                    let empty_trades = VecDeque::new();
+                    let trades = trade_observations.get(mint).unwrap_or(&empty_trades);
+                    let sol_snapshot = sol_price.read().await.clone();
+                    if let Err(error) = persist_creator_training_observation(
+                        &database,
+                        mint,
+                        &market,
+                        trades,
+                        &sol_snapshot,
+                        quote_is_sol,
+                        true,
+                        format!("graduated:{pool}"),
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, mint_address = mint, "Could not persist creator graduation evidence");
+                    }
                     pool_to_mint.insert(pool.to_owned(), mint.to_owned());
                     if data.get("quote_mint").and_then(serde_json::Value::as_str)
                         == Some("So11111111111111111111111111111111111111112")
@@ -1159,6 +1299,48 @@ fn start_token_state_projector(
                 }
                 if let Some(slot) = incoming_slot {
                     last_market_slots.insert(mint.to_owned(), slot);
+                }
+                let should_train = last_training_observed
+                    .get(mint)
+                    .map(|last| last.elapsed() >= Duration::from_secs(60))
+                    .unwrap_or(true);
+                if should_train && market_quote_is_fresh(&data) {
+                    let now_ms = data
+                        .get("timestamp_ms")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                    let observation_key = format!("minute:{}", now_ms.div_euclid(60_000));
+                    let empty_trades = VecDeque::new();
+                    let trades = trade_observations.get(mint).unwrap_or(&empty_trades);
+                    let venue = data.get("venue").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let quote_is_sol = match venue {
+                        "pump_fun_bonding_curve" => true,
+                        "pump_swap" => data
+                            .get("pool_address")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|pool| pool_quote_is_sol.contains(pool)),
+                        _ => false,
+                    };
+                    let sol_snapshot = sol_price.read().await.clone();
+                    match persist_creator_training_observation(
+                        &database,
+                        mint,
+                        &data,
+                        trades,
+                        &sol_snapshot,
+                        quote_is_sol,
+                        false,
+                        observation_key,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            last_training_observed.insert(mint.to_owned(), Instant::now());
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, mint_address = mint, "Could not persist creator market observation");
+                        }
+                    }
                 }
             }
             if kind == "pump_fun_trade_activity" {
