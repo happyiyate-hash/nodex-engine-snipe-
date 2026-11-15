@@ -121,6 +121,33 @@ pub(super) fn start_launch_processor(
                     },
                 });
                 let Some(launch) = launch else { continue };
+                // Persist creator-to-token identity immediately after validated launch
+                // decoding, before metadata/security work can fail or be retried.
+                if let Some(creator_address) = launch.creator_address.as_deref() {
+                    let training_launch = nodex_persistence::creator_training::TrainingLaunch {
+                        mint_address: launch.mint_address.clone(),
+                        creator_address: creator_address.to_string(),
+                        source: "pump_fun".to_string(),
+                        signature: launch.signature.clone(),
+                        slot: launch.slot,
+                        detected_at: launch.detected_at.to_rfc3339(),
+                    };
+                    if let Err(error) = nodex_persistence::creator_training::record_launch(
+                        &database,
+                        &training_launch,
+                    ).await {
+                        let _ = events.publish(json!({
+                            "type":"token_diagnostic",
+                            "data":token_diagnostic(
+                                &launch.mint_address,
+                                "creator_training_launch",
+                                "sqlite",
+                                error.to_string(),
+                                json!({"kind":"creator_training_persistence_error","message":error.to_string()})
+                            )
+                        }));
+                    }
+                }
                 // Unknown/unpreferred creators remain visible and monitored. Strict
                 // preferred-owner mode is an entry restriction, not a discovery filter.
                 let whitelist_settings = trading_settings.read().await;
