@@ -148,6 +148,8 @@ pub async fn record_launch(pool: &SqlitePool, launch: &TrainingLaunch) -> Result
                (creator_address, first_seen_at, last_seen_at, total_launches, updated_at)
                VALUES (?, ?, ?, 1, ?)
                ON CONFLICT(creator_address) DO UPDATE SET
+                 first_seen_at = CASE WHEN excluded.first_seen_at < training_developers.first_seen_at
+                                      THEN excluded.first_seen_at ELSE training_developers.first_seen_at END,
                  last_seen_at = CASE WHEN excluded.last_seen_at > training_developers.last_seen_at
                                      THEN excluded.last_seen_at ELSE training_developers.last_seen_at END,
                  total_launches = training_developers.total_launches + 1,
@@ -328,4 +330,113 @@ pub async fn list_token_observations(
     })).collect::<Result<Vec<_>>>()?;
     observations.reverse();
     Ok(observations)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite pool");
+        initialize(&pool).await.expect("training schema");
+        pool
+    }
+
+    fn launch(mint: &str, creator: &str, signature: &str, at: &str) -> TrainingLaunch {
+        TrainingLaunch {
+            mint_address: mint.to_string(),
+            creator_address: creator.to_string(),
+            source: "pump_fun".to_string(),
+            signature: signature.to_string(),
+            slot: 42,
+            detected_at: at.to_string(),
+        }
+    }
+
+    fn observation(key: &str, at: &str, cap: f64, graduated: bool) -> TokenObservation {
+        TokenObservation {
+            mint_address: "mint-1".to_string(),
+            observation_key: key.to_string(),
+            observed_at: at.to_string(),
+            market_cap_usd: Some(cap),
+            price_usd: Some(0.01),
+            liquidity_usd: Some(12_000.0),
+            volume_5m_usd: Some(4_000.0),
+            buy_count_5m: 10,
+            sell_count_5m: 2,
+            unique_buyers_5m: 8,
+            holder_concentration_pct: Some(35.0),
+            graduated,
+            trading_active: true,
+            evidence_json: "{}".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_replays_do_not_inflate_developer_launch_count() {
+        let pool = test_pool().await;
+        let first = launch("mint-1", "creator-1", "signature-1", "2026-01-02T00:00:00Z");
+        assert!(record_launch(&pool, &first).await.unwrap());
+        assert!(!record_launch(&pool, &first).await.unwrap());
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT total_launches FROM training_developers WHERE creator_address = ?",
+        )
+        .bind("creator-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn observations_are_deduplicated_and_keep_peak_and_graduation() {
+        let pool = test_pool().await;
+        record_launch(
+            &pool,
+            &launch("mint-1", "creator-1", "signature-1", "2026-01-02T00:00:00Z"),
+        )
+        .await
+        .unwrap();
+
+        let first = observation("bucket-1", "2026-01-02T00:05:00Z", 500_000.0, false);
+        assert!(record_observation(&pool, &first).await.unwrap());
+        assert!(!record_observation(&pool, &first).await.unwrap());
+
+        let second = observation("bucket-2", "2026-01-02T00:10:00Z", 250_000.0, true);
+        assert!(record_observation(&pool, &second).await.unwrap());
+
+        let tokens = list_tokens_for_creator(&pool, "creator-1", 20).await.unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].observation_count, 2);
+        assert_eq!(tokens[0].peak_market_cap_usd, Some(500_000.0));
+        assert_eq!(tokens[0].lifecycle_status, "graduated");
+        assert_eq!(tokens[0].graduated_at.as_deref(), Some("2026-01-02T00:10:00Z"));
+
+        let history = list_token_observations(&pool, "mint-1", 20).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].observation_key, "bucket-1");
+        assert_eq!(history[1].observation_key, "bucket-2");
+    }
+
+    #[tokio::test]
+    async fn invalid_market_values_are_rejected() {
+        let pool = test_pool().await;
+        record_launch(
+            &pool,
+            &launch("mint-1", "creator-1", "signature-1", "2026-01-02T00:00:00Z"),
+        )
+        .await
+        .unwrap();
+
+        let mut invalid = observation("bucket-1", "2026-01-02T00:05:00Z", 1.0, false);
+        invalid.market_cap_usd = Some(-1.0);
+        assert!(record_observation(&pool, &invalid).await.is_err());
+    }
 }
