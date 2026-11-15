@@ -1024,12 +1024,20 @@ async fn persist_creator_training_observation(
         valid_number(market.get("price_usd").and_then(serde_json::Value::as_f64));
     let direct_market_cap_usd =
         valid_number(market.get("market_cap_usd").and_then(serde_json::Value::as_f64));
-    let price_usd = direct_price_usd.or_else(|| {
-        quote_is_sol.then(|| price_sol.zip(sol_usd).map(|(price, sol)| price * sol)).flatten()
-    });
-    let market_cap_usd = direct_market_cap_usd.or_else(|| {
-        quote_is_sol.then(|| market_cap_sol.zip(sol_usd).map(|(cap, sol)| cap * sol)).flatten()
-    });
+    let price_usd = if quote_is_sol {
+        direct_price_usd.or_else(|| price_sol.zip(sol_usd).map(|(price, sol)| price * sol))
+    } else {
+        direct_price_usd
+    };
+    let market_cap_usd = if quote_is_sol {
+        direct_market_cap_usd.or_else(|| {
+            market_cap_sol
+                .zip(sol_usd)
+                .map(|(cap, sol)| cap * sol)
+        })
+    } else {
+        direct_market_cap_usd
+    };
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let recent_trades = trades
@@ -1075,7 +1083,10 @@ async fn persist_creator_training_observation(
         },
         "liquidity_available": false,
         "holder_concentration_available": false,
-        "bonding_curve_complete": market.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        "bonding_curve_complete": market
+            .get("complete")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         "graduation_verified_by_pool": graduated
     });
 
@@ -1312,7 +1323,10 @@ fn start_token_state_projector(
                     let observation_key = format!("minute:{}", now_ms.div_euclid(60_000));
                     let empty_trades = VecDeque::new();
                     let trades = trade_observations.get(mint).unwrap_or(&empty_trades);
-                    let venue = data.get("venue").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let venue = data
+                        .get("venue")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
                     let quote_is_sol = match venue {
                         "pump_fun_bonding_curve" => true,
                         "pump_swap" => data
