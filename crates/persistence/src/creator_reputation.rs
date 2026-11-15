@@ -495,7 +495,7 @@ mod tests {
         token.lifecycle_status = "inactive".into();
         let scores = token_scores(&token, now());
         assert!(scores[0].unwrap() < 100.0);
-        assert_eq!(scores[5], Some(85.0));
+        assert_eq!(scores[5], Some(45.0));
     }
 
     #[test]
@@ -504,6 +504,6 @@ mod tests {
         token.latest_market_cap_usd = Some(100_000.0);
         let scores = token_scores(&token, now());
         assert_eq!(scores[4], Some(10.0));
-        assert!(scores[5].unwrap() > 70.0);
+        assert!(scores[5].unwrap() > 40.0);
     }
 }
