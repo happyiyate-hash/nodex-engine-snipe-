@@ -1033,11 +1033,7 @@ async fn persist_creator_training_observation(
         direct_price_usd
     };
     let market_cap_usd = if quote_is_sol {
-        direct_market_cap_usd.or_else(|| {
-            market_cap_sol
-                .zip(sol_usd)
-                .map(|(cap, sol)| cap * sol)
-        })
+        direct_market_cap_usd.or_else(|| market_cap_sol.zip(sol_usd).map(|(cap, sol)| cap * sol))
     } else {
         direct_market_cap_usd
     };
