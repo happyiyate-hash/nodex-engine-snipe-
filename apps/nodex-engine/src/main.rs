@@ -990,6 +990,7 @@ fn record_confirmed_trade(
 /// Persist one creator-training sample from authoritative market data and the
 /// confirmed-trade window. Missing USD quotes, liquidity and holder data stay
 /// unknown rather than being represented as zero.
+#[allow(clippy::too_many_arguments)]
 async fn persist_creator_training_observation(
     database: &sqlx::SqlitePool,
     mint: &str,
