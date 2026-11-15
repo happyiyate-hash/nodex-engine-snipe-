@@ -365,6 +365,111 @@ pub async fn list_token_observations(
     Ok(observations)
 }
 
+
+/// Classify a token from its launch age and latest persisted market evidence.
+/// Missing observations are never treated as proof of inactivity.
+pub fn classify_lifecycle(
+    launched_at: &str,
+    last_observed_at: Option<&str>,
+    latest_trading_active: Option<bool>,
+    latest_buy_count: Option<u64>,
+    latest_sell_count: Option<u64>,
+    graduated: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let parse_time = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&chrono::Utc))
+    };
+    let Some(launched) = parse_time(launched_at) else {
+        return "insufficient_data".to_string();
+    };
+    let age = now.signed_duration_since(launched).num_seconds().max(0);
+    let Some(last_observed) = last_observed_at.and_then(parse_time) else {
+        return if age < 600 {
+            "observing".to_string()
+        } else {
+            "insufficient_data".to_string()
+        };
+    };
+
+    let silence = now
+        .signed_duration_since(last_observed)
+        .num_seconds()
+        .max(0);
+    let has_trade_activity = latest_trading_active.unwrap_or(false)
+        || latest_buy_count.unwrap_or(0) > 0
+        || latest_sell_count.unwrap_or(0) > 0;
+
+    let phase = if silence >= 21_600 {
+        "inactive"
+    } else if silence >= 1_800 || !has_trade_activity {
+        "slowing"
+    } else {
+        "active"
+    };
+
+    if graduated {
+        format!("graduated_{phase}")
+    } else {
+        phase.to_string()
+    }
+}
+
+/// Re-evaluate all training tokens using the newest durable observation.
+/// This is a read/metadata update only; it cannot place or modify trades.
+pub async fn evaluate_lifecycle_statuses(
+    pool: &SqlitePool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<u64> {
+    let rows = sqlx::query(
+        r#"SELECT t.mint_address, t.launched_at, t.graduated_at,
+                  o.observed_at, o.trading_active, o.buy_count_5m, o.sell_count_5m
+           FROM training_tokens t
+           LEFT JOIN training_token_observations o
+             ON o.mint_address = t.mint_address
+            AND o.id = (
+                SELECT latest.id FROM training_token_observations latest
+                WHERE latest.mint_address = t.mint_address
+                ORDER BY latest.observed_at DESC, latest.id DESC LIMIT 1
+            )"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut changed = 0_u64;
+    for row in rows {
+        let mint: String = row.try_get("mint_address")?;
+        let launched_at: String = row.try_get("launched_at")?;
+        let last_observed_at: Option<String> = row.try_get("observed_at")?;
+        let trading_active: Option<bool> = row.try_get("trading_active")?;
+        let buy_count: Option<i64> = row.try_get("buy_count_5m")?;
+        let sell_count: Option<i64> = row.try_get("sell_count_5m")?;
+        let graduated_at: Option<String> = row.try_get("graduated_at")?;
+        let status = classify_lifecycle(
+            &launched_at,
+            last_observed_at.as_deref(),
+            trading_active,
+            buy_count.map(|value| value.max(0) as u64),
+            sell_count.map(|value| value.max(0) as u64),
+            graduated_at.is_some(),
+            now,
+        );
+        let result = sqlx::query(
+            "UPDATE training_tokens SET lifecycle_status = ?, updated_at = ? WHERE mint_address = ? AND lifecycle_status != ?",
+        )
+        .bind(&status)
+        .bind(now.to_rfc3339())
+        .bind(&mint)
+        .bind(&status)
+        .execute(pool)
+        .await?;
+        changed += result.rows_affected();
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
