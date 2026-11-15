@@ -487,6 +487,42 @@ fn paper_entry_security_gate_passed(security: Option<&serde_json::Value>) -> boo
     security.is_some_and(token_approved_for_market_monitoring)
 }
 
+/// Periodically classify creator-training tokens from durable market evidence.
+/// Pauses while the Solana stream is disconnected so feed outages are not scored as inactivity.
+fn start_creator_lifecycle_evaluator(
+    database: sqlx::SqlitePool,
+    stream_status: Arc<RwLock<StreamStatus>>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !stream_status.read().await.connected {
+                continue;
+            }
+            match nodex_persistence::creator_training::evaluate_lifecycle_statuses(
+                &database,
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                Ok(changed) if changed > 0 => {
+                    tracing::info!(
+                        lifecycle_transitions = changed,
+                        "Updated creator-training token lifecycle classifications"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "Creator-training lifecycle evaluation failed");
+                }
+            }
+        }
+    });
+}
+
 fn start_inactive_token_cleanup(
     database: sqlx::SqlitePool,
     registry: TokenRegistry,
