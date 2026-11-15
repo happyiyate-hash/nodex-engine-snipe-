@@ -89,9 +89,13 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
 
     let longevity = age_hours.map(|hours| {
         let duration = clamp_score(hours / 24.0 * 100.0);
-        let lifecycle_bonus = if token.lifecycle_status.ends_with("active") {
+        let phase = token
+            .lifecycle_status
+            .strip_prefix("graduated_")
+            .unwrap_or(&token.lifecycle_status);
+        let lifecycle_bonus = if phase == "active" {
             15.0
-        } else if token.lifecycle_status.ends_with("slowing") {
+        } else if phase == "slowing" {
             5.0
         } else {
             0.0
@@ -100,23 +104,21 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
     }).or_else(|| observed_hours.map(|hours| clamp_score(hours / 24.0 * 80.0)));
 
     let growth = token.peak_market_cap_usd.map(|cap| {
-        let (threshold, score) = if cap >= 2_000_000.0 {
-            (2_000_000.0, 100.0)
+        if cap >= 2_000_000.0 {
+            100.0
         } else if cap >= 1_000_000.0 {
-            (1_000_000.0, 85.0)
+            85.0
         } else if cap >= 500_000.0 {
-            (500_000.0, 70.0)
+            70.0
         } else if cap >= 250_000.0 {
-            (250_000.0, 55.0)
+            55.0
         } else if cap >= 100_000.0 {
-            (100_000.0, 35.0)
+            35.0
         } else if cap >= 50_000.0 {
-            (50_000.0, 20.0)
+            20.0
         } else {
-            (0.0, 5.0)
-        };
-        let _ = threshold;
-        score
+            5.0
+        }
     });
 
     let graduation = if token.graduated {
@@ -149,11 +151,15 @@ fn token_scores(token: &TokenEvidence, now: chrono::DateTime<chrono::Utc>) -> [O
         .filter(|peak| *peak > 0.0)
         .zip(token.latest_market_cap_usd)
         .map(|(peak, latest)| clamp_score((1.0 - latest / peak) * 100.0));
-    let lifecycle_risk = if token.lifecycle_status.ends_with("inactive") {
+    let phase = token
+        .lifecycle_status
+        .strip_prefix("graduated_")
+        .unwrap_or(&token.lifecycle_status);
+    let lifecycle_risk = if phase == "inactive" {
         Some(85.0)
-    } else if token.lifecycle_status.ends_with("slowing") {
+    } else if phase == "slowing" {
         Some(45.0)
-    } else if token.lifecycle_status.ends_with("active") {
+    } else if phase == "active" {
         Some(10.0)
     } else {
         None
