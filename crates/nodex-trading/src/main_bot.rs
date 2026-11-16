@@ -449,7 +449,9 @@ pub fn evaluate_entry(
             if value.is_finite()
                 && value > 0.0
                 && (is_long_term || value <= maximum_early_entry_market_cap_usd) => {}
-        Some(value) if value.is_finite() && value > maximum_early_entry_market_cap_usd && !is_long_term => {
+        Some(value)
+            if value.is_finite() && value > maximum_early_entry_market_cap_usd && !is_long_term =>
+        {
             wait!("Market cap is already above the early-entry ceiling; avoiding a late short-term entry.")
         }
         _ => wait!("Waiting for a reliable market-cap estimate from token supply and live price."),
@@ -465,7 +467,9 @@ pub fn evaluate_entry(
     if config.entry_horizon_mode == "long_term"
         && market.seconds_since_launch <= maximum_early_entry_age_seconds
     {
-        wait!("Waiting for this token to establish a longer trading history before long-term entry.");
+        wait!(
+            "Waiting for this token to establish a longer trading history before long-term entry."
+        );
     }
     if is_long_term && !config.long_term_token_active {
         wait!("Long-term entry requires persisted evidence that this token is still actively trading.");
@@ -787,13 +791,7 @@ mod tests {
             entry_horizon_mode: "short_term".into(),
             ..TradingBotConfig::default()
         };
-        let result = evaluate_entry(
-            &config,
-            &creator(Some(91.0)),
-            &security(),
-            &live,
-            0,
-        );
+        let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
         assert_eq!(result.decision, TradingBotDecision::Reject);
         assert!(result
             .reasons
