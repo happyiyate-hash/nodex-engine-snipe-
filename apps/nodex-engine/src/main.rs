@@ -1076,6 +1076,59 @@ fn record_confirmed_trade(
     }
 }
 
+/// Persist a confirmed decoded on-chain trade as append-only training evidence.
+async fn persist_confirmed_training_trade(
+    database: &sqlx::SqlitePool,
+    mint: &str,
+    data: &serde_json::Value,
+    venue: &str,
+    side: &str,
+    quote_amount_raw: u64,
+    base_amount_raw: u64,
+    timestamp_ms: i64,
+) -> anyhow::Result<bool> {
+    let signature = data
+        .get("signature")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let trader = data
+        .get("trader_address")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if signature.is_empty() || trader.is_empty() {
+        return Ok(false);
+    }
+    let event_index = data
+        .get("event_index")
+        .or_else(|| data.get("instruction_index"))
+        .or_else(|| data.get("trade_index"))
+        .map(|value| value.as_u64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_owned)))
+        .flatten();
+    let event_key = event_index.map_or_else(
+        || format!("{signature}:{mint}:{venue}:{trader}:{side}:{quote_amount_raw}:{base_amount_raw}"),
+        |index| format!("{signature}:{mint}:{venue}:{index}"),
+    );
+    let evidence_json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_owned());
+    nodex_persistence::training_trades::record_trade_event(
+        database,
+        &nodex_persistence::training_trades::TrainingTradeEvent {
+            event_key,
+            signature: signature.to_owned(),
+            mint_address: mint.to_owned(),
+            venue: venue.to_owned(),
+            trader_address: trader.to_owned(),
+            side: side.to_ascii_lowercase(),
+            quote_amount_raw,
+            base_amount_raw,
+            quote_mint: Some("So11111111111111111111111111111111111111112".to_owned()),
+            slot: json_u64(data.get("slot")),
+            timestamp_ms,
+            evidence_json,
+        },
+    )
+    .await
+}
+
 /// Persist one creator-training sample from authoritative market data and the
 /// confirmed-trade window. Missing USD quotes, liquidity and holder data stay
 /// unknown rather than being represented as zero.
@@ -1366,6 +1419,11 @@ fn start_token_state_projector(
                     timestamp_ms,
                 );
                 let base_raw = json_u64(data.get("base_amount_raw")).unwrap_or(0);
+                if let Err(error) = persist_confirmed_training_trade(
+                    &database, &mint, &data, "pump_swap", side, amount, base_raw, timestamp_ms,
+                ).await {
+                    tracing::warn!(%error, mint_address = mint, "Could not persist confirmed PumpSwap training trade");
+                }
                 let token_decimals = registry
                     .get(&mint)
                     .and_then(|snapshot| {
@@ -1515,6 +1573,11 @@ fn start_token_state_projector(
                 );
                 let token_raw = json_u64(data.get("token_amount_raw")).unwrap_or(0);
                 let sol_lamports = json_u64(data.get("sol_amount_lamports")).unwrap_or(0);
+                if let Err(error) = persist_confirmed_training_trade(
+                    &database, mint, &data, "pump_fun_bonding_curve", side, sol_lamports, token_raw, timestamp_ms,
+                ).await {
+                    tracing::warn!(%error, mint_address = mint, "Could not persist confirmed Pump.fun training trade");
+                }
                 let token_units = token_raw as f64 / 1_000_000.0;
                 let quote_sol = sol_lamports as f64 / 1_000_000_000.0;
                 if token_units.is_finite()
