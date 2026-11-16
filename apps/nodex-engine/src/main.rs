@@ -1327,15 +1327,28 @@ fn start_token_state_projector(
                     timestamp_ms,
                 );
                 let base_raw = json_u64(data.get("base_amount_raw")).unwrap_or(0);
-                let token_decimals = registry.get(&mint)
-                    .and_then(|snapshot| snapshot.data.pointer("/info/decimals").and_then(serde_json::Value::as_u64))
-                    .unwrap_or(6).min(18) as i32;
+                let token_decimals = registry
+                    .get(&mint)
+                    .and_then(|snapshot| {
+                        snapshot
+                            .data
+                            .pointer("/info/decimals")
+                            .and_then(serde_json::Value::as_u64)
+                    })
+                    .unwrap_or(6)
+                    .min(18) as i32;
                 let token_units = base_raw as f64 / 10_f64.powi(token_decimals);
                 let quote_sol = amount as f64 / 1_000_000_000.0;
-                if token_units.is_finite() && token_units > 0.0 && quote_sol.is_finite() && quote_sol > 0.0 {
+                if token_units.is_finite()
+                    && token_units > 0.0
+                    && quote_sol.is_finite()
+                    && quote_sol > 0.0
+                {
                     let price_sol = quote_sol / token_units;
                     let sol_quote = sol_price.read().await.clone();
-                    let price_usd = (sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0)
+                    let price_usd = (sol_quote.status == "live"
+                        && sol_quote.price_usd.is_finite()
+                        && sol_quote.price_usd > 0.0)
                         .then_some(price_sol * sol_quote.price_usd);
                     let _ = events.send(json!({
                         "type":"confirmed_trade_update",
