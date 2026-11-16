@@ -15,6 +15,8 @@ struct Candle {
     buys: u64,
     sells: u64,
     closed: bool,
+    first_trade_order: Option<(i64, u64)>,
+    last_trade_order: Option<(i64, u64)>,
 }
 
 impl Candle {
@@ -30,21 +32,8 @@ impl Candle {
             buys: 0,
             sells: 0,
             closed: false,
-        }
-    }
-
-    fn empty(open_time_ms: i64) -> Self {
-        Self {
-            open_time_ms,
-            open: None,
-            high: None,
-            low: None,
-            close: None,
-            volume_sol: 0.0,
-            trade_count: 0,
-            buys: 0,
-            sells: 0,
-            closed: false,
+            first_trade_order: None,
+            last_trade_order: None,
         }
     }
 
@@ -59,10 +48,11 @@ impl Candle {
     }
 }
 
-const TIMEFRAMES: [(&str, i64); 5] = [
+const TIMEFRAMES: [(&str, i64); 6] = [
     ("1m", 60_000),
     ("5m", 300_000),
     ("15m", 900_000),
+    ("30m", 1_800_000),
     ("1h", 3_600_000),
     ("24h", 86_400_000),
 ];
@@ -110,113 +100,65 @@ pub fn start_chart_service(
             if !approved {
                 continue;
             }
-            let (timestamp_ms, price, volume_sol, side) = match kind {
-                "market_price_update" => {
-                    let Some(price) = data
-                        .get("price_sol")
-                        .and_then(Value::as_f64)
-                        .filter(|value| value.is_finite() && *value > 0.0)
-                    else {
-                        continue;
-                    };
-                    let timestamp = data
-                        .get("timestamp_ms")
-                        .and_then(Value::as_i64)
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                    (timestamp, Some(price), 0.0, None)
-                }
-                "pumpswap_activity" => {
-                    let event_type = data
-                        .get("event_type")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if event_type != "buy" && event_type != "sell" {
-                        continue;
-                    }
-                    if data.get("quote_amount_unit").and_then(Value::as_str) != Some("lamports") {
-                        continue;
-                    }
-                    let Some(raw) = data
-                        .get("quote_amount_raw")
-                        .and_then(Value::as_str)
-                        .and_then(|value| value.parse::<u64>().ok())
-                    else {
-                        continue;
-                    };
-                    let timestamp = data
-                        .get("timestamp")
-                        .and_then(Value::as_i64)
-                        .map(|seconds| seconds.saturating_mul(1_000))
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                    (
-                        timestamp,
-                        None,
-                        raw as f64 / 1_000_000_000.0,
-                        Some(event_type),
-                    )
-                }
-                _ => continue,
-            };
+            // Only normalized confirmed swaps may create or update OHLC.
+            // Market-account and market-cap ticks are never chart trades.
+            if kind != "confirmed_trade_update" {
+                continue;
+            }
+            let Some(price) = data.get("price_usd").and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value > 0.0) else { continue; };
+            let timestamp_ms = data.get("timestamp_ms").and_then(Value::as_i64)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            let volume_sol = data.get("volume_sol").and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value > 0.0).unwrap_or(0.0);
+            let side = data.get("side").and_then(Value::as_str).unwrap_or_default();
+            if side != "buy" && side != "sell" { continue; }
+            let event_index = data.get("event_index").and_then(Value::as_u64).unwrap_or(0);
+            let trade_order = (timestamp_ms, event_index);
 
             for (timeframe, duration) in TIMEFRAMES {
                 let open_time = timestamp_ms.div_euclid(duration).saturating_mul(duration);
                 let key = (mint.to_owned(), timeframe.to_owned(), open_time);
 
-                if let Some(price) = price {
-                    let previous = candles
-                        .keys()
-                        .filter(|(candidate_mint, candidate_tf, candidate_open)| {
-                            candidate_mint == mint
-                                && candidate_tf == timeframe
-                                && *candidate_open < open_time
-                        })
-                        .map(|(_, _, previous_open)| *previous_open)
-                        .max();
-                    if let Some(previous_open) = previous {
-                        let previous_key = (mint.to_owned(), timeframe.to_owned(), previous_open);
-                        if let Some(previous_candle) = candles.get_mut(&previous_key) {
-                            if !previous_candle.closed {
-                                previous_candle.closed = true;
-                                let payload = previous_candle.json(mint, timeframe, duration);
-                                if let Err(error) = nodex_persistence::save_chart_candle(
-                                    &database,
-                                    mint,
-                                    timeframe,
-                                    previous_open,
-                                    &payload,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        %error,
-                                        mint_address = mint,
-                                        timeframe,
-                                        "Could not persist closed chart candle"
-                                    );
-                                }
-                                let _ = events
-                                    .send(json!({"type":"chart_candle_closed","data":payload}));
+                let previous = candles.keys()
+                    .filter(|(candidate_mint, candidate_tf, candidate_open)| {
+                        candidate_mint == mint && candidate_tf == timeframe && *candidate_open < open_time
+                    })
+                    .map(|(_, _, previous_open)| *previous_open)
+                    .max();
+                if let Some(previous_open) = previous {
+                    let previous_key = (mint.to_owned(), timeframe.to_owned(), previous_open);
+                    if let Some(previous_candle) = candles.get_mut(&previous_key) {
+                        if !previous_candle.closed {
+                            previous_candle.closed = true;
+                            let payload = previous_candle.json(mint, timeframe, duration);
+                            if let Err(error) = nodex_persistence::save_chart_candle(
+                                &database, mint, timeframe, previous_open, &payload,
+                            ).await {
+                                tracing::warn!(%error, mint_address = mint, timeframe, "Could not persist closed chart candle");
                             }
+                            let _ = events.send(json!({"type":"chart_candle_closed","data":payload}));
                         }
                     }
-                    let candle = candles
-                        .entry(key.clone())
-                        .or_insert_with(|| Candle::price(open_time, price));
-                    candle.open.get_or_insert(price);
-                    candle.high = Some(candle.high.map_or(price, |value| value.max(price)));
-                    candle.low = Some(candle.low.map_or(price, |value| value.min(price)));
+                }
+                let candle = candles.entry(key.clone())
+                    .or_insert_with(|| Candle::price(open_time, price));
+                candle.high = Some(candle.high.map_or(price, |value| value.max(price)));
+                candle.low = Some(candle.low.map_or(price, |value| value.min(price)));
+                if candle.first_trade_order.is_none_or(|first| trade_order < first) {
+                    candle.open = Some(price);
+                    candle.first_trade_order = Some(trade_order);
+                }
+                if candle.last_trade_order.is_none_or(|last| trade_order > last) {
                     candle.close = Some(price);
-                } else if let Some(side) = side {
-                    let candle = candles
-                        .entry(key.clone())
-                        .or_insert_with(|| Candle::empty(open_time));
-                    candle.volume_sol += volume_sol;
-                    candle.trade_count = candle.trade_count.saturating_add(1);
-                    if side == "buy" {
-                        candle.buys = candle.buys.saturating_add(1);
-                    } else {
-                        candle.sells = candle.sells.saturating_add(1);
-                    }
+                    candle.last_trade_order = Some(trade_order);
+                }
+                candle.volume_sol += volume_sol;
+                candle.trade_count = candle.trade_count.saturating_add(1);
+                if side == "buy" {
+                    candle.buys = candle.buys.saturating_add(1);
+                } else {
+                    candle.sells = candle.sells.saturating_add(1);
                 }
 
                 if let Some(candle) = candles.get(&key).copied() {
