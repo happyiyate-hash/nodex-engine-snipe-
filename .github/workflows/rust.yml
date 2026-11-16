@@ -1,8 +1,7 @@
-name: Rust CI and EC2 deploy
-
+name: Rust checks and AWS deployment
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -10,13 +9,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: nodex-production-deploy
-  cancel-in-progress: false
-
 jobs:
   quality:
-    name: Format, lint, and test
+    name: Rust quality checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,131 +23,102 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Run tests
+      - name: Run workspace tests
         run: cargo test --workspace
 
-  build:
-    name: Build Linux production binary
+  package:
+    name: Build Linux release binary
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: quality
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       - name: Build NodeX engine
-        run: cargo build --release --locked -p nodex-engine --target x86_64-unknown-linux-gnu
-      - name: Stage production binary
-        run: |
-          mkdir -p deploy
-          install -m 0755 target/x86_64-unknown-linux-gnu/release/nodex-engine deploy/nodex-engine
-      - name: Upload production binary
+        run: cargo build --release -p nodex-engine
+      - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
           name: nodex-engine-linux-x86_64
-          path: deploy/nodex-engine
+          path: target/release/nodex-engine
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
 
   deploy:
     name: Deploy to AWS EC2
-    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [quality, package]
     runs-on: ubuntu-latest
-    # Keep deployment disabled until the owner has added and verified all repository secrets.
-    if: ${{ github.ref == 'refs/heads/main' && vars.ENABLE_EC2_DEPLOY == 'true' }}
+    environment: production
     steps:
-      - name: Download production binary
+      - name: Download release binary
         uses: actions/download-artifact@v4
         with:
           name: nodex-engine-linux-x86_64
-          path: deploy
+          path: ./release
 
       - name: Configure SSH
         env:
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+          AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
         run: |
           set -euo pipefail
-          test -n "$EC2_SSH_KEY" || { echo "Missing EC2_SSH_PRIVATE_KEY secret"; exit 1; }
-          test -n "$EC2_KNOWN_HOSTS" || { echo "Missing EC2_KNOWN_HOSTS secret"; exit 1; }
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/id_ed25519
+          test -n "$AWS_HOST" || { echo "Missing AWS_HOST secret"; exit 1; }
+          test -n "$AWS_USER" || { echo "Missing AWS_USER secret"; exit 1; }
+          test -n "$AWS_SSH_PRIVATE_KEY" || { echo "Missing AWS_SSH_PRIVATE_KEY secret"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$AWS_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+          ssh-keyscan -H "$AWS_HOST" >> ~/.ssh/known_hosts
 
-      - name: Copy binary to EC2
+      - name: Transfer release binary
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
         run: |
           set -euo pipefail
-          test -n "$EC2_HOST" || { echo "Missing EC2_HOST secret"; exit 1; }
-          test -n "$EC2_USER" || { echo "Missing EC2_USER secret"; exit 1; }
-          scp -i ~/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            deploy/nodex-engine "${EC2_USER}@${EC2_HOST}:nodex-engine.new"
+          chmod +x ./release/nodex-engine
+          scp ./release/nodex-engine "$AWS_USER@$AWS_HOST:/tmp/nodex-engine-${GITHUB_SHA}"
 
-      - name: Install, restart, health-check, and rollback on failure
+      - name: Install, restart and verify service
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-          DEPLOY_PATH: ${{ vars.EC2_DEPLOY_PATH }}
-          SERVICE_NAME: ${{ vars.EC2_SERVICE_NAME }}
-          HEALTH_URL: ${{ vars.EC2_HEALTH_URL }}
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
         run: |
           set -euo pipefail
-          : "${DEPLOY_PATH:=/opt/nodex/target/release/nodex-engine}"
-          : "${SERVICE_NAME:=nodex.service}"
-          : "${HEALTH_URL:=http://127.0.0.1:8080/health}"
-
-          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "${EC2_USER}@${EC2_HOST}" \
-            "DEPLOY_PATH='${DEPLOY_PATH}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' bash -s" <<'REMOTE'
+          ssh "$AWS_USER@$AWS_HOST" "GITHUB_SHA='$GITHUB_SHA' bash -s" <<'REMOTE'
           set -euo pipefail
-          incoming="$HOME/nodex-engine.new"
-          test -s "$incoming" || { echo "Uploaded binary is missing or empty"; exit 1; }
-          target="$DEPLOY_PATH"
-          directory="$(dirname "$target")"
-          backup="${target}.previous"
-          timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          SERVICE="nodex.service"
+          APP_DIR="/opt/nodex"
+          TARGET="$APP_DIR/target/release/nodex-engine"
+          NEW_BINARY="/tmp/nodex-engine-$GITHUB_SHA"
+          BACKUP="$APP_DIR/target/release/nodex-engine.previous"
 
-          sudo mkdir -p "$directory"
-          if sudo test -f "$target"; then
-            sudo cp -p "$target" "${backup}.${timestamp}"
-            sudo cp -p "$target" "$backup"
+          test -x "$NEW_BINARY"
+          sudo install -d -o nodex -g nodex "$APP_DIR/target/release"
+          if sudo test -f "$TARGET"; then
+            sudo cp "$TARGET" "$BACKUP"
           fi
-
-          sudo install -m 0755 "$incoming" "$target"
-          rm -f "$incoming"
-
-          if ! sudo systemctl restart "$SERVICE_NAME"; then
-            echo "Service restart failed; attempting rollback"
-            if sudo test -f "$backup"; then sudo install -m 0755 "$backup" "$target"; sudo systemctl restart "$SERVICE_NAME" || true; fi
-            exit 1
-          fi
-
-          healthy=false
-          for attempt in $(seq 1 20); do
-            if curl --fail --silent --show-error "$HEALTH_URL" >/dev/null 2>&1; then
-              healthy=true
-              break
-            fi
-            sleep 3
-          done
-
-          if [ "$healthy" != true ]; then
-            echo "Health check failed; restoring previous binary"
-            if sudo test -f "$backup"; then
-              sudo install -m 0755 "$backup" "$target"
-              sudo systemctl restart "$SERVICE_NAME" || true
-            else
-              echo "No previous binary backup exists; cannot automatically roll back"
+          sudo install -o nodex -g nodex -m 0755 "$NEW_BINARY" "$TARGET"
+          if ! sudo systemctl restart "$SERVICE"; then
+            if sudo test -f "$BACKUP"; then
+              sudo cp "$BACKUP" "$TARGET"
+              sudo systemctl restart "$SERVICE" || true
             fi
             exit 1
           fi
-
-          echo "Deployment healthy"
-          sudo systemctl --no-pager --full status "$SERVICE_NAME" | head -n 20 || true
+          sleep 5
+          if ! sudo systemctl is-active --quiet "$SERVICE"; then
+            echo "Service failed after deployment; attempting rollback"
+            if sudo test -f "$BACKUP"; then
+              sudo cp "$BACKUP" "$TARGET"
+              sudo systemctl restart "$SERVICE" || true
+            fi
+            sudo systemctl status "$SERVICE" --no-pager || true
+            exit 1
+          fi
+          rm -f "$NEW_BINARY"
+          echo "NodeX deployment succeeded: $GITHUB_SHA"
           REMOTE
