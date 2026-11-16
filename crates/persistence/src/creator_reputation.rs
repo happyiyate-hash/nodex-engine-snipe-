@@ -474,6 +474,7 @@ pub async fn get_creator_reputation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
 
     fn evidence() -> TokenEvidence {
         TokenEvidence {
