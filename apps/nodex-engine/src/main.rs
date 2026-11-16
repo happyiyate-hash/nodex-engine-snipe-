@@ -6428,6 +6428,7 @@ mod main_bot_config_tests {
             minimum_observation_seconds: default_minimum_observation_seconds(),
             maximum_early_entry_age_seconds: default_maximum_early_entry_age_seconds(),
             maximum_early_entry_market_cap_usd: default_maximum_early_entry_market_cap_usd(),
+            entry_horizon_mode: default_entry_horizon_mode(),
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
