@@ -595,9 +595,7 @@ fn start_inactive_token_cleanup(
                 .fetch_optional(&database)
                 .await;
                 match training_status {
-                    Ok(Some(status))
-                        if status != "inactive" && status != "graduated_inactive" =>
-                    {
+                    Ok(Some(status)) if status != "inactive" && status != "graduated_inactive" => {
                         continue;
                     }
                     Err(error) => {
