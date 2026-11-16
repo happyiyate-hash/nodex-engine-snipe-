@@ -729,8 +729,10 @@ mod tests {
 
     #[test]
     fn both_mode_routes_older_tokens_through_active_long_term_path() {
-        let mut config = TradingBotConfig::default();
-        config.long_term_token_active = true;
+        let mut config = TradingBotConfig {
+            long_term_token_active: true,
+            ..TradingBotConfig::default()
+        };
         let mut live = market();
         live.seconds_since_launch = 600;
         let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
