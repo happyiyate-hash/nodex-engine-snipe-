@@ -1485,7 +1485,9 @@ fn start_token_state_projector(
                 {
                     let price_sol = quote_sol / token_units;
                     let sol_quote = sol_price.read().await.clone();
-                    let price_usd = (sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0)
+                    let price_usd = (sol_quote.status == "live"
+                        && sol_quote.price_usd.is_finite()
+                        && sol_quote.price_usd > 0.0)
                         .then_some(price_sol * sol_quote.price_usd);
                     let _ = events.send(json!({
                         "type":"confirmed_trade_update",
@@ -4172,10 +4174,7 @@ async fn training_token_observations(
     State(state): State<AppState>,
     Path(mint): Path<String>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<
-    Json<Vec<nodex_persistence::creator_training::TokenObservation>>,
-    (StatusCode, String),
-> {
+) -> Result<Json<Vec<nodex_persistence::creator_training::TokenObservation>>, (StatusCode, String)> {
     training_token_observations_data(
         &state.database,
         &mint,
