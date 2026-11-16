@@ -222,7 +222,10 @@ impl Default for TradingSettings {
 
 impl TradingSettings {
     fn validate(&self) -> Result<(), String> {
-        if !matches!(self.entry_horizon_mode.as_str(), "both" | "short_term" | "long_term") {
+        if !matches!(
+            self.entry_horizon_mode.as_str(),
+            "both" | "short_term" | "long_term"
+        ) {
             return Err("entry_horizon_mode must be both, short_term, or long_term.".into());
         }
         if self.preferred_owners.len() > 500 {
