@@ -4007,10 +4007,8 @@ async fn creator_intelligence(
 async fn creator_reputation(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<
-    Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>,
-    (StatusCode, String),
-> {
+) -> Result<Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>, (StatusCode, String)>
+{
     let limit = query
         .get("limit")
         .and_then(|value| value.parse::<u32>().ok())
@@ -4059,10 +4057,8 @@ async fn training_token_observations(
     State(state): State<AppState>,
     Path(mint): Path<String>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<
-    Json<Vec<nodex_persistence::creator_training::TokenObservation>>,
-    (StatusCode, String),
-> {
+) -> Result<Json<Vec<nodex_persistence::creator_training::TokenObservation>>, (StatusCode, String)>
+{
     let mint = mint.trim();
     if mint.is_empty() || mint.len() > 128 {
         return Err((
@@ -4077,8 +4073,8 @@ async fn training_token_observations(
         .clamp(1, 5_000);
     let observations =
         nodex_persistence::creator_training::list_token_observations(&state.database, mint, limit)
-    .await
-    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(observations))
 }
 
