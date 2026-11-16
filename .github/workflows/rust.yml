@@ -1,14 +1,22 @@
-name: Rust checks
+name: Rust CI and EC2 deploy
+
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: nodex-production-deploy
+  cancel-in-progress: false
+
 jobs:
   quality:
+    name: Format, lint, and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,6 +24,135 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace
+
+  build:
+    name: Build Linux production binary
+    needs: quality
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Build NodeX engine
+        run: cargo build --release --locked -p nodex-engine --target x86_64-unknown-linux-gnu
+      - name: Stage production binary
+        run: |
+          mkdir -p deploy
+          install -m 0755 target/x86_64-unknown-linux-gnu/release/nodex-engine deploy/nodex-engine
+      - name: Upload production binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodex-engine-linux-x86_64
+          path: deploy/nodex-engine
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to AWS EC2
+    needs: build
+    runs-on: ubuntu-latest
+    # Keep deployment disabled until the owner has added and verified all repository secrets.
+    if: ${{ github.ref == 'refs/heads/main' && vars.ENABLE_EC2_DEPLOY == 'true' }}
+    steps:
+      - name: Download production binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nodex-engine-linux-x86_64
+          path: deploy
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_SSH_KEY" || { echo "Missing EC2_SSH_PRIVATE_KEY secret"; exit 1; }
+          test -n "$EC2_KNOWN_HOSTS" || { echo "Missing EC2_KNOWN_HOSTS secret"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Copy binary to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST" || { echo "Missing EC2_HOST secret"; exit 1; }
+          test -n "$EC2_USER" || { echo "Missing EC2_USER secret"; exit 1; }
+          scp -i ~/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            deploy/nodex-engine "${EC2_USER}@${EC2_HOST}:nodex-engine.new"
+
+      - name: Install, restart, health-check, and rollback on failure
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          DEPLOY_PATH: ${{ vars.EC2_DEPLOY_PATH }}
+          SERVICE_NAME: ${{ vars.EC2_SERVICE_NAME }}
+          HEALTH_URL: ${{ vars.EC2_HEALTH_URL }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_PATH:=/opt/nodex/target/release/nodex-engine}"
+          : "${SERVICE_NAME:=nodex.service}"
+          : "${HEALTH_URL:=http://127.0.0.1:8080/health}"
+
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "DEPLOY_PATH='${DEPLOY_PATH}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          incoming="$HOME/nodex-engine.new"
+          test -s "$incoming" || { echo "Uploaded binary is missing or empty"; exit 1; }
+          target="$DEPLOY_PATH"
+          directory="$(dirname "$target")"
+          backup="${target}.previous"
+          timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+          sudo mkdir -p "$directory"
+          if sudo test -f "$target"; then
+            sudo cp -p "$target" "${backup}.${timestamp}"
+            sudo cp -p "$target" "$backup"
+          fi
+
+          sudo install -m 0755 "$incoming" "$target"
+          rm -f "$incoming"
+
+          if ! sudo systemctl restart "$SERVICE_NAME"; then
+            echo "Service restart failed; attempting rollback"
+            if sudo test -f "$backup"; then sudo install -m 0755 "$backup" "$target"; sudo systemctl restart "$SERVICE_NAME" || true; fi
+            exit 1
+          fi
+
+          healthy=false
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error "$HEALTH_URL" >/dev/null 2>&1; then
+              healthy=true
+              break
+            fi
+            sleep 3
+          done
+
+          if [ "$healthy" != true ]; then
+            echo "Health check failed; restoring previous binary"
+            if sudo test -f "$backup"; then
+              sudo install -m 0755 "$backup" "$target"
+              sudo systemctl restart "$SERVICE_NAME" || true
+            else
+              echo "No previous binary backup exists; cannot automatically roll back"
+            fi
+            exit 1
+          fi
+
+          echo "Deployment healthy"
+          sudo systemctl --no-pager --full status "$SERVICE_NAME" | head -n 20 || true
+          REMOTE
