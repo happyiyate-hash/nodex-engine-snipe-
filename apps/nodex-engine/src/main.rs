@@ -116,6 +116,9 @@ fn default_maximum_early_entry_age_seconds() -> u64 {
 fn default_maximum_early_entry_market_cap_usd() -> f64 {
     150_000.0
 }
+fn default_entry_horizon_mode() -> String {
+    "both".to_owned()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -161,6 +164,8 @@ struct TradingSettings {
     maximum_early_entry_age_seconds: u64,
     #[serde(default = "default_maximum_early_entry_market_cap_usd")]
     maximum_early_entry_market_cap_usd: f64,
+    #[serde(default = "default_entry_horizon_mode")]
+    entry_horizon_mode: String,
     blacklist_creators_with_prior_rugs: bool,
     paper_starting_balance: f64,
     paper_starting_balance_currency: String,
@@ -202,6 +207,7 @@ impl Default for TradingSettings {
             minimum_observation_seconds: default_minimum_observation_seconds(),
             maximum_early_entry_age_seconds: default_maximum_early_entry_age_seconds(),
             maximum_early_entry_market_cap_usd: default_maximum_early_entry_market_cap_usd(),
+            entry_horizon_mode: default_entry_horizon_mode(),
             blacklist_creators_with_prior_rugs: true,
             paper_starting_balance: 10.0,
             paper_starting_balance_currency: "USD".into(),
@@ -216,6 +222,9 @@ impl Default for TradingSettings {
 
 impl TradingSettings {
     fn validate(&self) -> Result<(), String> {
+        if !matches!(self.entry_horizon_mode.as_str(), "both" | "short_term" | "long_term") {
+            return Err("entry_horizon_mode must be both, short_term, or long_term.".into());
+        }
         if self.preferred_owners.len() > 500 {
             return Err("preferred_owners must contain no more than 500 wallets.".into());
         }
@@ -385,6 +394,8 @@ fn main_bot_config_from_settings(
         minimum_observation_seconds: settings.minimum_observation_seconds,
         maximum_early_entry_age_seconds: settings.maximum_early_entry_age_seconds,
         maximum_early_entry_market_cap_usd: settings.maximum_early_entry_market_cap_usd,
+        entry_horizon_mode: settings.entry_horizon_mode.clone(),
+        long_term_token_active: false,
         high_creator_score_threshold: 80.0,
         low_score_observation_seconds: 30,
         blacklist_known_rug_creators: settings.blacklist_creators_with_prior_rugs,
