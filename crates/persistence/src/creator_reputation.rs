@@ -431,6 +431,47 @@ pub async fn list_creator_reputations(
         .collect()
 }
 
+
+/// Load one creator's durable reputation record for live entry evaluation.
+/// Unknown or developing samples remain available to the API, but are not promoted
+/// into the fast-entry score until the evidence reaches the established threshold.
+pub async fn get_creator_reputation(
+    pool: &SqlitePool,
+    creator_address: &str,
+) -> Result<Option<CreatorReputation>> {
+    let row = sqlx::query(
+        r#"SELECT creator_address, total_launches, observed_tokens, total_observations,
+                  graduated_tokens, longevity_score, growth_score, graduation_score,
+                  activity_score, stability_score, risk_score, overall_score,
+                  confidence_pct, sample_status, updated_at
+           FROM creator_reputations WHERE creator_address = ?"#,
+    )
+    .bind(creator_address.trim())
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(CreatorReputation {
+            creator_address: row.try_get("creator_address")?,
+            total_launches: row.try_get::<i64, _>("total_launches")?.max(0) as u64,
+            observed_tokens: row.try_get::<i64, _>("observed_tokens")?.max(0) as u64,
+            total_observations: row.try_get::<i64, _>("total_observations")?.max(0) as u64,
+            graduated_tokens: row.try_get::<i64, _>("graduated_tokens")?.max(0) as u64,
+            longevity_score: row.try_get("longevity_score")?,
+            growth_score: row.try_get("growth_score")?,
+            graduation_score: row.try_get("graduation_score")?,
+            activity_score: row.try_get("activity_score")?,
+            stability_score: row.try_get("stability_score")?,
+            risk_score: row.try_get("risk_score")?,
+            overall_score: row.try_get("overall_score")?,
+            confidence_pct: row.try_get("confidence_pct")?,
+            sample_status: row.try_get("sample_status")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    })
+    .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +495,37 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339("2026-11-15T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc)
+    }
+
+    #[tokio::test]
+    async fn creator_reputation_lookup_returns_the_persisted_wallet_score() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        initialize(&pool).await.unwrap();
+        sqlx::query(
+            r#"INSERT INTO creator_reputations (
+                creator_address, total_launches, observed_tokens, total_observations,
+                graduated_tokens, overall_score, confidence_pct, sample_status, updated_at
+            ) VALUES ('creator-a', 3, 2, 12, 1, 87.5, 75.0, 'established', '2026-11-16T00:00:00Z')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let reputation = get_creator_reputation(&pool, "creator-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reputation.overall_score, Some(87.5));
+        assert_eq!(reputation.sample_status, "established");
+        assert_eq!(reputation.total_launches, 3);
+        assert!(get_creator_reputation(&pool, "unknown")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
