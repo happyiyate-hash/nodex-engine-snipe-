@@ -855,8 +855,19 @@ pub async fn load_chart_candles(
     .await?;
     let mut candles = rows
         .into_iter()
-        .map(|payload| serde_json::from_str(&payload))
-        .collect::<std::result::Result<Vec<serde_json::Value>, _>>()?;
+        .map(|payload| serde_json::from_str::<serde_json::Value>(&payload))
+        .collect::<std::result::Result<Vec<serde_json::Value>, _>>()?
+        .into_iter()
+        // Older rows were generated from market-account price ticks and have
+        // no confirmed trades. Exclude them rather than showing false candles.
+        .filter(|candle| {
+            candle
+                .get("trade_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0
+        })
+        .collect::<Vec<_>>();
     candles.reverse();
     Ok(candles)
 }
