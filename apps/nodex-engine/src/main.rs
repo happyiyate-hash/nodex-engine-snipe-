@@ -1102,9 +1102,18 @@ async fn persist_confirmed_training_trade(
         .get("event_index")
         .or_else(|| data.get("instruction_index"))
         .or_else(|| data.get("trade_index"))
-        .and_then(|value| value.as_u64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_owned)));
+        .and_then(|value| {
+            value
+                .as_u64()
+                .map(|number| number.to_string())
+                .or_else(|| value.as_str().map(str::to_owned))
+        });
     let event_key = event_index.map_or_else(
-        || format!("{signature}:{mint}:{venue}:{trader}:{side}:{quote_amount_raw}:{base_amount_raw}"),
+        || {
+            format!(
+                "{signature}:{mint}:{venue}:{trader}:{side}:{quote_amount_raw}:{base_amount_raw}"
+            )
+        },
         |index| format!("{signature}:{mint}:{venue}:{index}"),
     );
     let evidence_json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_owned());
@@ -1419,8 +1428,17 @@ fn start_token_state_projector(
                 );
                 let base_raw = json_u64(data.get("base_amount_raw")).unwrap_or(0);
                 if let Err(error) = persist_confirmed_training_trade(
-                    &database, &mint, &data, "pump_swap", side, amount, base_raw, timestamp_ms,
-                ).await {
+                    &database,
+                    &mint,
+                    &data,
+                    "pump_swap",
+                    side,
+                    amount,
+                    base_raw,
+                    timestamp_ms,
+                )
+                .await
+                {
                     tracing::warn!(%error, mint_address = mint, "Could not persist confirmed PumpSwap training trade");
                 }
                 let token_decimals = registry
@@ -1573,8 +1591,17 @@ fn start_token_state_projector(
                 let token_raw = json_u64(data.get("token_amount_raw")).unwrap_or(0);
                 let sol_lamports = json_u64(data.get("sol_amount_lamports")).unwrap_or(0);
                 if let Err(error) = persist_confirmed_training_trade(
-                    &database, mint, &data, "pump_fun_bonding_curve", side, sol_lamports, token_raw, timestamp_ms,
-                ).await {
+                    &database,
+                    mint,
+                    &data,
+                    "pump_fun_bonding_curve",
+                    side,
+                    sol_lamports,
+                    token_raw,
+                    timestamp_ms,
+                )
+                .await
+                {
                     tracing::warn!(%error, mint_address = mint, "Could not persist confirmed Pump.fun training trade");
                 }
                 let token_units = token_raw as f64 / 1_000_000.0;
