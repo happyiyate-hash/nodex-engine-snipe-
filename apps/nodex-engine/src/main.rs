@@ -568,20 +568,47 @@ fn start_inactive_token_cleanup(
             // Recheck frequently so abandoned subscriptions are released promptly.
             // Feed disconnects are excluded above to avoid expiring tokens during upstream outages.
             let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);
-            let inactive_mints = registry
-                .snapshot()
-                .into_iter()
-                .filter_map(|snapshot| {
-                    let last_activity = snapshot
-                        .data
-                        .get("last_activity_at")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                        .map(|value| value.with_timezone(&chrono::Utc))
-                        .unwrap_or(snapshot.updated_at);
-                    (last_activity < cutoff).then_some(snapshot.mint_address)
-                })
-                .collect::<Vec<_>>();
+            let mut inactive_mints = Vec::new();
+            for snapshot in registry.snapshot() {
+                let last_activity = snapshot
+                    .data
+                    .get("last_activity_at")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .unwrap_or(snapshot.updated_at);
+                if last_activity >= cutoff {
+                    continue;
+                }
+
+                // The short-lived UI/token cache must not evict a token whose
+                // durable creator-training lifecycle is still active, slowing,
+                // or unknown. Only a confirmed inactive classification permits
+                // removal of its live subscription and transient state.
+                let training_status = sqlx::query_scalar::<_, String>(
+                    "SELECT lifecycle_status FROM training_tokens WHERE mint_address = ?",
+                )
+                .bind(&snapshot.mint_address)
+                .fetch_optional(&database)
+                .await;
+                match training_status {
+                    Ok(Some(status))
+                        if status != "inactive" && status != "graduated_inactive" =>
+                    {
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            mint_address = %snapshot.mint_address,
+                            "Could not verify durable token lifecycle; preserving monitoring"
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
+                inactive_mints.push(snapshot.mint_address);
+            }
             if inactive_mints.is_empty() {
                 continue;
             }
@@ -600,7 +627,7 @@ fn start_inactive_token_cleanup(
                     }
                     tracing::info!(
                         deleted_tokens = deleted_mints.len(),
-                        "Removed tokens inactive for one hour; tokens with paper positions were preserved"
+                        "Removed tokens confirmed inactive by durable lifecycle evidence; tokens with paper positions were preserved"
                     );
                     let _ = events.send(json!({
                         "type":"tokens_removed_inactive",
