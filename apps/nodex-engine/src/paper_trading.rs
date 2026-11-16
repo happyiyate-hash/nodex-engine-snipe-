@@ -262,9 +262,35 @@ pub(super) async fn evaluate_and_execute_paper_entry(
     let known_rug_creator = creator_history
         .and_then(|value| value.get("known_rug_creator"))
         .and_then(serde_json::Value::as_bool);
-    let creator_score = creator_history
-        .and_then(|value| value.get("activity_score"))
-        .and_then(serde_json::Value::as_f64);
+    // Entry decisions consume the durable, aggregate reputation built from every
+    // observed launch by this wallet. The short transaction-history scan is not a
+    // substitute for the persisted developer score.
+    let persisted_creator_reputation = if creator_address.is_empty() {
+        None
+    } else {
+        match nodex_persistence::creator_reputation::get_creator_reputation(
+            database,
+            creator_address,
+        )
+        .await
+        {
+            Ok(reputation) => reputation,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    creator_address,
+                    "Could not load persisted creator reputation; treating creator as unknown"
+                );
+                None
+            }
+        }
+    };
+    let creator_score = persisted_creator_reputation
+        .as_ref()
+        .filter(|reputation| {
+            reputation.sample_status == "established" && reputation.confidence_pct >= 50.0
+        })
+        .and_then(|reputation| reputation.overall_score);
 
     // Use the actual launch-detection timestamp, not the later security-scan
     // completion time. Otherwise an old token could receive a fresh five-minute
