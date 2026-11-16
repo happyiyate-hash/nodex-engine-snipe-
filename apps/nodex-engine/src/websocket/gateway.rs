@@ -55,6 +55,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("token_market_update")
             | Some("token_statistics_update")
             | Some("chart_candle_update")
+            | Some("confirmed_trade_update")
             | Some("chart_candle_closed")
             | Some("position_updated")
             | Some("portfolio_summary_updated")
