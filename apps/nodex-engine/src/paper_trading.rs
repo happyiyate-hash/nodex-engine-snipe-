@@ -14,6 +14,39 @@ use std::{
 /// existing diagnostic scan retry window and avoids rescanning on every market tick.
 pub(super) const SECURITY_APPROVAL_TTL_SECONDS: i64 = 900;
 
+/// Resolve the wallet decoded from the launch instruction. Security enrichment may
+/// supply the same address, but the durable discovery record is the authoritative
+/// fallback when that optional enrichment is absent.
+fn creator_address_from_sources<'a>(
+    creator_history: Option<&'a serde_json::Value>,
+    token_data: Option<&'a serde_json::Value>,
+) -> Option<&'a str> {
+    creator_history
+        .and_then(|value| value.get("creator_address"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            token_data
+                .and_then(|data| data.get("discovery"))
+                .and_then(|discovery| discovery.get("creator_address"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            token_data
+                .and_then(|data| data.get("identity"))
+                .and_then(|identity| {
+                    identity
+                        .get("creator_wallet")
+                        .or_else(|| identity.get("creator_address"))
+                })
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            token_data
+                .and_then(|data| data.get("creator_wallet"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
 fn security_approval_cache_is_fresh(
     security: Option<&serde_json::Value>,
     now: chrono::DateTime<chrono::Utc>,
@@ -234,34 +267,11 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
     let creator_history = security.and_then(|value| value.get("creator_history"));
-    let creator_address = creator_history
-        .and_then(|value| value.get("creator_address"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            token_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.data.get("discovery"))
-                .and_then(|discovery| discovery.get("creator_address"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .or_else(|| {
-            token_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.data.get("identity"))
-                .and_then(|identity| {
-                    identity
-                        .get("creator_wallet")
-                        .or_else(|| identity.get("creator_address"))
-                })
-                .and_then(serde_json::Value::as_str)
-        })
-        .or_else(|| {
-            token_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.data.get("creator_wallet"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .unwrap_or_default();
+    let creator_address = creator_address_from_sources(
+        creator_history,
+        token_snapshot.as_ref().map(|snapshot| &snapshot.data),
+    )
+    .unwrap_or_default();
     let preferred_owner = settings
         .preferred_owners
         .iter()
@@ -721,6 +731,40 @@ pub(super) async fn evaluate_and_execute_paper_entry(
 #[cfg(test)]
 mod security_approval_cache_tests {
     use super::*;
+
+    #[test]
+    fn creator_address_prefers_security_history_then_decoded_launch_discovery() {
+        let security_history = json!({"creator_address":"security-creator"});
+        let token_data = json!({
+            "discovery":{"creator_address":"decoded-launch-creator"},
+            "identity":{"creator_wallet":"metadata-creator"},
+            "creator_wallet":"legacy-creator"
+        });
+        assert_eq!(
+            creator_address_from_sources(Some(&security_history), Some(&token_data)),
+            Some("security-creator")
+        );
+        assert_eq!(
+            creator_address_from_sources(None, Some(&token_data)),
+            Some("decoded-launch-creator")
+        );
+    }
+
+    #[test]
+    fn creator_address_falls_back_to_legacy_identity_and_never_invents_one() {
+        let identity = json!({"identity":{"creator_wallet":"legacy-identity-creator"}});
+        let legacy = json!({"creator_wallet":"legacy-top-level-creator"});
+        let empty = json!({});
+        assert_eq!(
+            creator_address_from_sources(None, Some(&identity)),
+            Some("legacy-identity-creator")
+        );
+        assert_eq!(
+            creator_address_from_sources(None, Some(&legacy)),
+            Some("legacy-top-level-creator")
+        );
+        assert_eq!(creator_address_from_sources(None, Some(&empty)), None);
+    }
 
     #[test]
     fn fresh_cached_approval_is_reused_without_an_external_rescan() {
