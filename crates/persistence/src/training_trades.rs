@@ -65,10 +65,7 @@ pub async fn initialize(pool: &SqlitePool) -> Result<()> {
 
 /// Appends a verified trade and snapshots the creator relationship currently
 /// recorded for the mint. A duplicate event_key returns false without mutation.
-pub async fn record_trade_event(
-    pool: &SqlitePool,
-    event: &TrainingTradeEvent,
-) -> Result<bool> {
+pub async fn record_trade_event(pool: &SqlitePool, event: &TrainingTradeEvent) -> Result<bool> {
     let side = event.side.trim().to_ascii_lowercase();
     if event.event_key.trim().is_empty()
         || event.signature.trim().is_empty()
@@ -80,7 +77,9 @@ pub async fn record_trade_event(
         || event.base_amount_raw == 0
         || event.timestamp_ms <= 0
     {
-        return Err(anyhow!("confirmed trade event is missing valid identity or amount fields"));
+        return Err(anyhow!(
+            "confirmed trade event is missing valid identity or amount fields"
+        ));
     }
 
     let result = sqlx::query(
