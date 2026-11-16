@@ -74,6 +74,28 @@ pub(super) fn schedule_early_monitor_expiry(
         let remaining = observation_window_seconds.saturating_sub(elapsed);
         tokio::time::sleep(Duration::from_secs(remaining)).await;
         loop {
+            // A token that remains active in durable training history graduates
+            // from the short launch window into continued long-term observation.
+            // Unknown lifecycle data is retained rather than mistaken for inactivity.
+            let lifecycle = sqlx::query_scalar::<_, String>(
+                "SELECT lifecycle_status FROM training_tokens WHERE mint_address = ?",
+            )
+            .bind(&mint)
+            .fetch_optional(&database)
+            .await;
+            match lifecycle {
+                Ok(Some(status)) if status != "inactive" && status != "graduated_inactive" => {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, mint_address = %mint, "Could not verify training lifecycle before ending market monitoring");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+                _ => {}
+            }
+
             let open_positions = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM portfolio_positions WHERE mint_address = ? AND status = 'open'",
             )
