@@ -838,7 +838,7 @@ mod tests {
         assert!(result
             .reasons
             .iter()
-            .any(|reason| reason.contains("five-minute")));
+            .any(|reason| reason.contains("short-term entry window")));
     }
 
     #[test]
