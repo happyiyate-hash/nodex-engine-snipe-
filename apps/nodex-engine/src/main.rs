@@ -5175,7 +5175,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                             let timeframe = timeframe.trim().to_owned();
                             let valid_timeframe = matches!(
                                 timeframe.as_str(),
-                                "1m" | "5m" | "15m" | "1h" | "24h"
+                                "1m" | "5m" | "15m" | "30m" | "1h" | "24h"
                             );
                             if !valid_timeframe || !subscribed_tokens.contains(&mint) {
                                 Some(json!({"type":"command_rejected","data":{
