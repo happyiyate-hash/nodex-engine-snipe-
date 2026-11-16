@@ -240,6 +240,13 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         .or_else(|| {
             token_snapshot
                 .as_ref()
+                .and_then(|snapshot| snapshot.data.get("discovery"))
+                .and_then(|discovery| discovery.get("creator_address"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            token_snapshot
+                .as_ref()
                 .and_then(|snapshot| snapshot.data.get("identity"))
                 .and_then(|identity| {
                     identity
