@@ -1102,8 +1102,7 @@ async fn persist_confirmed_training_trade(
         .get("event_index")
         .or_else(|| data.get("instruction_index"))
         .or_else(|| data.get("trade_index"))
-        .map(|value| value.as_u64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_owned)))
-        .flatten();
+        .and_then(|value| value.as_u64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_owned)));
     let event_key = event_index.map_or_else(
         || format!("{signature}:{mint}:{venue}:{trader}:{side}:{quote_amount_raw}:{base_amount_raw}"),
         |index| format!("{signature}:{mint}:{venue}:{index}"),
