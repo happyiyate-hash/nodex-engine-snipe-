@@ -1076,17 +1076,31 @@ fn record_confirmed_trade(
     }
 }
 
-/// Persist a confirmed decoded on-chain trade as append-only training evidence.
-async fn persist_confirmed_training_trade(
-    database: &sqlx::SqlitePool,
-    mint: &str,
-    data: &serde_json::Value,
-    venue: &str,
-    side: &str,
+/// Inputs required to persist one confirmed decoded on-chain trade.
+struct ConfirmedTrainingTrade<'a> {
+    mint: &'a str,
+    data: &'a serde_json::Value,
+    venue: &'a str,
+    side: &'a str,
     quote_amount_raw: u64,
     base_amount_raw: u64,
     timestamp_ms: i64,
+}
+
+/// Persist a confirmed decoded on-chain trade as append-only training evidence.
+async fn persist_confirmed_training_trade(
+    database: &sqlx::SqlitePool,
+    trade: ConfirmedTrainingTrade<'_>,
 ) -> anyhow::Result<bool> {
+    let ConfirmedTrainingTrade {
+        mint,
+        data,
+        venue,
+        side,
+        quote_amount_raw,
+        base_amount_raw,
+        timestamp_ms,
+    } = trade;
     let signature = data
         .get("signature")
         .and_then(serde_json::Value::as_str)
@@ -1429,13 +1443,15 @@ fn start_token_state_projector(
                 let base_raw = json_u64(data.get("base_amount_raw")).unwrap_or(0);
                 if let Err(error) = persist_confirmed_training_trade(
                     &database,
-                    &mint,
-                    &data,
-                    "pump_swap",
-                    side,
-                    amount,
-                    base_raw,
-                    timestamp_ms,
+                    ConfirmedTrainingTrade {
+                        mint: &mint,
+                        data: &data,
+                        venue: "pump_swap",
+                        side,
+                        quote_amount_raw: amount,
+                        base_amount_raw: base_raw,
+                        timestamp_ms,
+                    },
                 )
                 .await
                 {
@@ -1592,13 +1608,15 @@ fn start_token_state_projector(
                 let sol_lamports = json_u64(data.get("sol_amount_lamports")).unwrap_or(0);
                 if let Err(error) = persist_confirmed_training_trade(
                     &database,
-                    mint,
-                    &data,
-                    "pump_fun_bonding_curve",
-                    side,
-                    sol_lamports,
-                    token_raw,
-                    timestamp_ms,
+                    ConfirmedTrainingTrade {
+                        mint,
+                        data: &data,
+                        venue: "pump_fun_bonding_curve",
+                        side,
+                        quote_amount_raw: sol_lamports,
+                        base_amount_raw: token_raw,
+                        timestamp_ms,
+                    },
                 )
                 .await
                 {
