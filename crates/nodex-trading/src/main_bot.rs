@@ -783,8 +783,12 @@ mod tests {
     fn strategy_rejects_tokens_outside_the_five_minute_early_entry_window() {
         let mut live = market();
         live.seconds_since_launch = 301;
+        let config = TradingBotConfig {
+            entry_horizon_mode: "short_term".into(),
+            ..TradingBotConfig::default()
+        };
         let result = evaluate_entry(
-            &TradingBotConfig::default(),
+            &config,
             &creator(Some(91.0)),
             &security(),
             &live,
