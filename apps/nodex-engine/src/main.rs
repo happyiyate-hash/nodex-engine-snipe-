@@ -4174,7 +4174,8 @@ async fn training_token_observations(
     State(state): State<AppState>,
     Path(mint): Path<String>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<nodex_persistence::creator_training::TokenObservation>>, (StatusCode, String)> {
+) -> Result<Json<Vec<nodex_persistence::creator_training::TokenObservation>>, (StatusCode, String)>
+{
     training_token_observations_data(
         &state.database,
         &mint,
