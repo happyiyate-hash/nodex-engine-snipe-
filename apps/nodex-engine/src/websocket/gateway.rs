@@ -52,6 +52,7 @@ pub(super) fn is_frontend_event(value: &Value) -> bool {
             | Some("profile_updated")
             | Some("sol_price_update")
             | Some("market_price_update")
+            | Some("market_tick")
             | Some("token_market_update")
             | Some("token_statistics_update")
             | Some("chart_candle_update")
@@ -102,6 +103,16 @@ mod tests {
             "token_removed",
             "tokens_removed_inactive",
         ] {
+            assert!(
+                is_frontend_event(&serde_json::json!({"type":event_type,"data":{}})),
+                "{event_type} must be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn market_ticks_and_confirmed_trades_are_forwarded_to_token_detail_pages() {
+        for event_type in ["market_tick", "confirmed_trade_update"] {
             assert!(
                 is_frontend_event(&serde_json::json!({"type":event_type,"data":{}})),
                 "{event_type} must be forwarded"
