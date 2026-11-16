@@ -4075,11 +4075,8 @@ async fn training_token_observations(
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(500)
         .clamp(1, 5_000);
-    let observations = nodex_persistence::creator_training::list_token_observations(
-        &state.database,
-        mint,
-        limit,
-    )
+    let observations =
+        nodex_persistence::creator_training::list_token_observations(&state.database, mint, limit)
     .await
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(observations))
