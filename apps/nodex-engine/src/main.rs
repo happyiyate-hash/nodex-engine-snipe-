@@ -1326,6 +1326,36 @@ fn start_token_state_projector(
                     amount,
                     timestamp_ms,
                 );
+                let base_raw = json_u64(data.get("base_amount_raw")).unwrap_or(0);
+                let token_decimals = registry.get(&mint)
+                    .and_then(|snapshot| snapshot.data.pointer("/info/decimals").and_then(serde_json::Value::as_u64))
+                    .unwrap_or(6).min(18) as i32;
+                let token_units = base_raw as f64 / 10_f64.powi(token_decimals);
+                let quote_sol = amount as f64 / 1_000_000_000.0;
+                if token_units.is_finite() && token_units > 0.0 && quote_sol.is_finite() && quote_sol > 0.0 {
+                    let price_sol = quote_sol / token_units;
+                    let sol_quote = sol_price.read().await.clone();
+                    let price_usd = (sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0)
+                        .then_some(price_sol * sol_quote.price_usd);
+                    let _ = events.send(json!({
+                        "type":"confirmed_trade_update",
+                        "data":{
+                            "mint_address":mint,
+                            "signature":signature,
+                            "event_index":data.get("event_index").cloned().unwrap_or(json!(0)),
+                            "timestamp_ms":timestamp_ms,
+                            "side":side,
+                            "token_amount_raw":base_raw.to_string(),
+                            "token_decimals":token_decimals,
+                            "quote_amount_lamports":amount.to_string(),
+                            "price_sol":price_sol,
+                            "price_usd":price_usd,
+                            "volume_sol":quote_sol,
+                            "venue":"pump_swap",
+                            "evidence":"confirmed_program_scoped_logs_notification"
+                        }
+                    }));
+                }
                 if let Ok(snapshot) = registry.upsert_patch(
                     &mint,
                     json!({"last_activity_at": chrono::Utc::now().to_rfc3339()}),
@@ -1431,6 +1461,34 @@ fn start_token_state_projector(
                     amount,
                     timestamp_ms,
                 );
+                let token_raw = json_u64(data.get("token_amount_raw")).unwrap_or(0);
+                let sol_lamports = json_u64(data.get("sol_amount_lamports")).unwrap_or(0);
+                let token_units = token_raw as f64 / 1_000_000.0;
+                let quote_sol = sol_lamports as f64 / 1_000_000_000.0;
+                if token_units.is_finite() && token_units > 0.0 && quote_sol.is_finite() && quote_sol > 0.0 {
+                    let price_sol = quote_sol / token_units;
+                    let sol_quote = sol_price.read().await.clone();
+                    let price_usd = (sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0)
+                        .then_some(price_sol * sol_quote.price_usd);
+                    let _ = events.send(json!({
+                        "type":"confirmed_trade_update",
+                        "data":{
+                            "mint_address":mint,
+                            "signature":signature,
+                            "event_index":data.get("event_index").cloned().unwrap_or(json!(0)),
+                            "timestamp_ms":timestamp_ms,
+                            "side":side,
+                            "token_amount_raw":token_raw.to_string(),
+                            "token_decimals":6,
+                            "quote_amount_lamports":sol_lamports.to_string(),
+                            "price_sol":price_sol,
+                            "price_usd":price_usd,
+                            "volume_sol":quote_sol,
+                            "venue":"pump_fun_bonding_curve",
+                            "evidence":"confirmed_program_scoped_trade_event"
+                        }
+                    }));
+                }
                 if let Ok(snapshot) = registry.upsert_patch(
                     mint,
                     json!({"last_activity_at": chrono::Utc::now().to_rfc3339()}),
@@ -3112,11 +3170,12 @@ fn start_pump_fun_trade_processor(
             let slot = notification
                 .pointer("/params/result/context/slot")
                 .and_then(serde_json::Value::as_u64);
-            for trade in decoded {
+            for (event_index, trade) in decoded.into_iter().enumerate() {
                 let _ = events.send(json!({
                     "type":"pump_fun_trade_activity",
                     "data":{
                         "signature":signature,
+                        "event_index":event_index,
                         "slot":slot,
                         "mint_address":trade.mint_address,
                         "trader_address":trade.trader_address,
@@ -3215,7 +3274,7 @@ fn start_pumpswap_activity_processor(
             let slot = notification
                 .pointer("/params/result/context/slot")
                 .and_then(serde_json::Value::as_u64);
-            for activity in decoded {
+            for (event_index, activity) in decoded.into_iter().enumerate() {
                 let (kind, timestamp, pool, user, base_amount, quote_amount) = match activity {
                     PumpSwapActivityEvent::Buy {
                         timestamp,
@@ -3238,6 +3297,7 @@ fn start_pumpswap_activity_processor(
                     "type":"pumpswap_trade_activity",
                     "data":{
                         "signature":signature,
+                        "event_index":event_index,
                         "slot":slot,
                         "event_type":kind,
                         "timestamp":timestamp,
