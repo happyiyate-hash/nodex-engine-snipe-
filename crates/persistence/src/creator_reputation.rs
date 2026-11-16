@@ -429,8 +429,6 @@ pub async fn list_creator_reputations(
             })
         })
         .collect()
-}
-
 /// Load one creator's durable reputation record for live entry evaluation.
 /// Unknown or developing samples remain available to the API, but are not promoted
 /// into the fast-entry score until the evidence reaches the established threshold.
