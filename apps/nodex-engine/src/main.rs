@@ -4004,27 +4004,29 @@ async fn creator_intelligence(
     Ok(Json(creators))
 }
 
-async fn creator_reputation(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>, (StatusCode, String)>
-{
-    let limit = query
+fn creator_api_limit(query: &HashMap<String, String>, default: u32, maximum: u32) -> u32 {
+    query
         .get("limit")
         .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(100)
-        .clamp(1, 500);
+        .unwrap_or(default)
+        .clamp(1, maximum)
+}
+
+async fn creator_reputation_data(
+    database: &sqlx::SqlitePool,
+    limit: u32,
+) -> Result<Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>, (StatusCode, String)> {
     let creators =
-        nodex_persistence::creator_reputation::list_creator_reputations(&state.database, limit)
+        nodex_persistence::creator_reputation::list_creator_reputations(database, limit)
             .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(creators))
 }
 
-async fn creator_training(
-    State(state): State<AppState>,
-    Path(creator_address): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+async fn creator_training_data(
+    database: &sqlx::SqlitePool,
+    creator_address: &str,
+    limit: u32,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let creator_address = creator_address.trim();
     if creator_address.is_empty() || creator_address.len() > 128 {
@@ -4033,13 +4035,8 @@ async fn creator_training(
             "creator_address must contain between 1 and 128 characters.".into(),
         ));
     }
-    let limit = query
-        .get("limit")
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(100)
-        .clamp(1, 500);
     let tokens = nodex_persistence::creator_training::list_tokens_for_creator(
-        &state.database,
+        database,
         creator_address,
         limit,
     )
@@ -4053,12 +4050,14 @@ async fn creator_training(
     })))
 }
 
-async fn training_token_observations(
-    State(state): State<AppState>,
-    Path(mint): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<nodex_persistence::creator_training::TokenObservation>>, (StatusCode, String)>
-{
+async fn training_token_observations_data(
+    database: &sqlx::SqlitePool,
+    mint: &str,
+    limit: u32,
+) -> Result<
+    Json<Vec<nodex_persistence::creator_training::TokenObservation>>,
+    (StatusCode, String),
+> {
     let mint = mint.trim();
     if mint.is_empty() || mint.len() > 128 {
         return Err((
@@ -4066,16 +4065,48 @@ async fn training_token_observations(
             "mint must contain between 1 and 128 characters.".into(),
         ));
     }
-    let limit = query
-        .get("limit")
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(500)
-        .clamp(1, 5_000);
     let observations =
-        nodex_persistence::creator_training::list_token_observations(&state.database, mint, limit)
+        nodex_persistence::creator_training::list_token_observations(database, mint, limit)
             .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(observations))
+}
+
+async fn creator_reputation(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>, (StatusCode, String)>
+{
+    creator_reputation_data(&state.database, creator_api_limit(&query, 100, 500)).await
+}
+
+async fn creator_training(
+    State(state): State<AppState>,
+    Path(creator_address): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    creator_training_data(
+        &state.database,
+        &creator_address,
+        creator_api_limit(&query, 100, 500),
+    )
+    .await
+}
+
+async fn training_token_observations(
+    State(state): State<AppState>,
+    Path(mint): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<
+    Json<Vec<nodex_persistence::creator_training::TokenObservation>>,
+    (StatusCode, String),
+> {
+    training_token_observations_data(
+        &state.database,
+        &mint,
+        creator_api_limit(&query, 500, 5_000),
+    )
+    .await
 }
 
 async fn engine_activity_logs(
@@ -6140,6 +6171,135 @@ mod scan_progress_state_tests {
         assert!(core_verification_gate_passed(&report));
         report["decision"] = json!("REJECTED");
         assert!(core_verification_gate_passed(&report));
+    }
+}
+
+
+#[cfg(test)]
+mod creator_training_api_tests {
+    use super::*;
+    use nodex_persistence::{
+        creator_reputation,
+        creator_training::{self, TokenObservation, TrainingLaunch},
+    };
+
+    async fn test_database() -> sqlx::SqlitePool {
+        nodex_persistence::connect("sqlite::memory:")
+            .await
+            .expect("in-memory database initializes")
+    }
+
+    async fn seed_training_data(database: &sqlx::SqlitePool) {
+        let now = chrono::Utc::now();
+        creator_training::record_launch(
+            database,
+            &TrainingLaunch {
+                mint_address: "test-mint".into(),
+                creator_address: "test-creator".into(),
+                source: "pump_fun".into(),
+                signature: "test-signature".into(),
+                slot: 42,
+                detected_at: now.to_rfc3339(),
+            },
+        )
+        .await
+        .unwrap();
+        creator_training::record_observation(
+            database,
+            &TokenObservation {
+                mint_address: "test-mint".into(),
+                observation_key: "test-observation".into(),
+                observed_at: now.to_rfc3339(),
+                market_cap_usd: Some(125_000.0),
+                price_usd: Some(0.001),
+                liquidity_usd: None,
+                volume_5m_usd: Some(2_500.0),
+                buy_count_5m: 12,
+                sell_count_5m: 3,
+                unique_buyers_5m: 8,
+                holder_concentration_pct: None,
+                graduated: false,
+                trading_active: true,
+                evidence_json: "{}".into(),
+            },
+        )
+        .await
+        .unwrap();
+        creator_reputation::evaluate_creator_reputations(database, now)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn creator_api_limits_use_defaults_and_clamp_untrusted_values() {
+        let mut query = HashMap::new();
+        assert_eq!(creator_api_limit(&query, 100, 500), 100);
+        query.insert("limit".into(), "0".into());
+        assert_eq!(creator_api_limit(&query, 100, 500), 1);
+        query.insert("limit".into(), "9000".into());
+        assert_eq!(creator_api_limit(&query, 500, 5_000), 5_000);
+        query.insert("limit".into(), "invalid".into());
+        assert_eq!(creator_api_limit(&query, 100, 500), 100);
+    }
+
+    #[tokio::test]
+    async fn creator_reputation_api_returns_serializable_ranked_records() {
+        let database = test_database().await;
+        seed_training_data(&database).await;
+
+        let Json(creators) = creator_reputation_data(&database, 100).await.unwrap();
+        assert_eq!(creators.len(), 1);
+        assert_eq!(creators[0].creator_address, "test-creator");
+        assert_eq!(creators[0].total_launches, 1);
+        assert_eq!(creators[0].observed_tokens, 1);
+        assert_eq!(creators[0].sample_status, "developing");
+        let serialized = serde_json::to_value(&creators[0]).unwrap();
+        assert_eq!(serialized["creator_address"], "test-creator");
+        assert!(serialized.get("overall_score").is_some());
+    }
+
+    #[tokio::test]
+    async fn creator_training_api_returns_creator_tokens_and_validates_address() {
+        let database = test_database().await;
+        seed_training_data(&database).await;
+
+        let Json(response) = creator_training_data(&database, " test-creator ", 100)
+            .await
+            .unwrap();
+        assert_eq!(response["creator_address"], "test-creator");
+        assert_eq!(response["token_count"], 1);
+        assert_eq!(response["tokens"][0]["mint_address"], "test-mint");
+
+        let error = creator_training_data(&database, " ", 100).await.unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        let too_long = "x".repeat(129);
+        let error = creator_training_data(&database, &too_long, 100)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn token_observations_api_returns_history_and_validates_mint() {
+        let database = test_database().await;
+        seed_training_data(&database).await;
+
+        let Json(observations) =
+            training_token_observations_data(&database, " test-mint ", 500)
+                .await
+                .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].mint_address, "test-mint");
+        assert_eq!(observations[0].unique_buyers_5m, 8);
+        let error = training_token_observations_data(&database, "", 500)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        let too_long = "x".repeat(129);
+        let error = training_token_observations_data(&database, &too_long, 500)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
     }
 }
 
