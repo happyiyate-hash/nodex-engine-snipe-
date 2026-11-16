@@ -69,7 +69,7 @@ jobs:
           test -n "$AWS_USER" || { echo "Missing AWS_USER secret"; exit 1; }
           test -n "$AWS_SSH_PRIVATE_KEY" || { echo "Missing AWS_SSH_PRIVATE_KEY secret"; exit 1; }
           install -m 700 -d ~/.ssh
-          # Normalize Windows CRLF line endings before loading the key.
+          # Normalize Windows CRLF line endings before loading the key; validate before SCP.
           printf '%s' "$AWS_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           # Validate without displaying the private key.
