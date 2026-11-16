@@ -4015,11 +4015,11 @@ fn creator_api_limit(query: &HashMap<String, String>, default: u32, maximum: u32
 async fn creator_reputation_data(
     database: &sqlx::SqlitePool,
     limit: u32,
-) -> Result<Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>, (StatusCode, String)> {
-    let creators =
-        nodex_persistence::creator_reputation::list_creator_reputations(database, limit)
-            .await
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+) -> Result<Json<Vec<nodex_persistence::creator_reputation::CreatorReputation>>, (StatusCode, String)>
+{
+    let creators = nodex_persistence::creator_reputation::list_creator_reputations(database, limit)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(creators))
 }
 
@@ -4054,10 +4054,8 @@ async fn training_token_observations_data(
     database: &sqlx::SqlitePool,
     mint: &str,
     limit: u32,
-) -> Result<
-    Json<Vec<nodex_persistence::creator_training::TokenObservation>>,
-    (StatusCode, String),
-> {
+) -> Result<Json<Vec<nodex_persistence::creator_training::TokenObservation>>, (StatusCode, String)>
+{
     let mint = mint.trim();
     if mint.is_empty() || mint.len() > 128 {
         return Err((
@@ -6174,7 +6172,6 @@ mod scan_progress_state_tests {
     }
 }
 
-
 #[cfg(test)]
 mod creator_training_api_tests {
     use super::*;
@@ -6270,7 +6267,9 @@ mod creator_training_api_tests {
         assert_eq!(response["token_count"], 1);
         assert_eq!(response["tokens"][0]["mint_address"], "test-mint");
 
-        let error = creator_training_data(&database, " ", 100).await.unwrap_err();
+        let error = creator_training_data(&database, " ", 100)
+            .await
+            .unwrap_err();
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         let too_long = "x".repeat(129);
         let error = creator_training_data(&database, &too_long, 100)
@@ -6284,10 +6283,9 @@ mod creator_training_api_tests {
         let database = test_database().await;
         seed_training_data(&database).await;
 
-        let Json(observations) =
-            training_token_observations_data(&database, " test-mint ", 500)
-                .await
-                .unwrap();
+            let Json(observations) = training_token_observations_data(&database, " test-mint ", 500)
+            .await
+            .unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].mint_address, "test-mint");
         assert_eq!(observations[0].unique_buyers_5m, 8);
