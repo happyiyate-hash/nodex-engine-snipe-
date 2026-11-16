@@ -89,13 +89,13 @@ pub async fn record_trade_event(
             trader_address, side, quote_amount_raw, base_amount_raw,
             quote_mint, slot, timestamp_ms, evidence_json, recorded_at
         )
-        SELECT ?, ?, ?, creator_address, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        FROM training_tokens
-        WHERE mint_address = ?
+        VALUES (?, ?, ?, (SELECT creator_address FROM training_tokens WHERE mint_address = ?),
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_key) DO NOTHING"#,
     )
     .bind(event.event_key.trim())
     .bind(event.signature.trim())
+    .bind(event.mint_address.trim())
     .bind(event.mint_address.trim())
     .bind(event.venue.trim())
     .bind(event.trader_address.trim())
@@ -107,7 +107,6 @@ pub async fn record_trade_event(
     .bind(event.timestamp_ms)
     .bind(&event.evidence_json)
     .bind(chrono::Utc::now().to_rfc3339())
-    .bind(event.mint_address.trim())
     .execute(pool)
     .await?;
 
