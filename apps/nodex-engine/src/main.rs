@@ -1478,7 +1478,11 @@ fn start_token_state_projector(
                 let sol_lamports = json_u64(data.get("sol_amount_lamports")).unwrap_or(0);
                 let token_units = token_raw as f64 / 1_000_000.0;
                 let quote_sol = sol_lamports as f64 / 1_000_000_000.0;
-                if token_units.is_finite() && token_units > 0.0 && quote_sol.is_finite() && quote_sol > 0.0 {
+                if token_units.is_finite()
+                    && token_units > 0.0
+                    && quote_sol.is_finite()
+                    && quote_sol > 0.0
+                {
                     let price_sol = quote_sol / token_units;
                     let sol_quote = sol_price.read().await.clone();
                     let price_usd = (sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0)
@@ -6334,7 +6338,7 @@ mod creator_training_api_tests {
         let database = test_database().await;
         seed_training_data(&database).await;
 
-            let Json(observations) = training_token_observations_data(&database, " test-mint ", 500)
+        let Json(observations) = training_token_observations_data(&database, " test-mint ", 500)
             .await
             .unwrap();
         assert_eq!(observations.len(), 1);
