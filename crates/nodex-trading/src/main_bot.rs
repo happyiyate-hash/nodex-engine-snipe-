@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn both_mode_routes_older_tokens_through_active_long_term_path() {
-        let mut config = TradingBotConfig {
+        let config = TradingBotConfig {
             long_term_token_active: true,
             ..TradingBotConfig::default()
         };
