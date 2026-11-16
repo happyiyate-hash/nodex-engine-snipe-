@@ -1,6 +1,7 @@
 pub mod creator_intelligence;
 pub mod creator_reputation;
 pub mod creator_training;
+pub mod training_trades;
 
 use anyhow::Result;
 use nodex_core::{TokenLaunch, TokenState};
@@ -31,6 +32,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         .await?;
     creator_intelligence::initialize(&pool).await?;
     creator_training::initialize(&pool).await?;
+    training_trades::initialize(&pool).await?;
     creator_reputation::initialize(&pool).await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS token_launches (
