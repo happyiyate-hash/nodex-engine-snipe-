@@ -379,7 +379,14 @@ pub fn evaluate_entry(
         0
     });
     let entry_speed = if high_score { "fast" } else { "confirmation" };
-    let minimum_observation_seconds = config.minimum_observation_seconds;
+    // Established creators can use the rapid path as soon as live trade and
+    // security evidence is present. Unknown/developing creators retain the
+    // configured observation delay; this never bypasses the market or security gates.
+    let minimum_observation_seconds = if high_score {
+        0
+    } else {
+        config.minimum_observation_seconds
+    };
     let maximum_early_entry_age_seconds = config.maximum_early_entry_age_seconds;
     let maximum_early_entry_market_cap_usd = config.maximum_early_entry_market_cap_usd;
     let is_short_term = match config.entry_horizon_mode.as_str() {
@@ -685,6 +692,39 @@ mod tests {
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
         assert_eq!(result.entry_speed, "fast");
         assert_eq!(result.minimum_distinct_buyers, 5);
+    }
+
+    #[test]
+    fn established_creator_can_use_rapid_path_without_fixed_observation_delay() {
+        let mut live = market();
+        live.seconds_since_launch = 5;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(91.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
+        assert_eq!(result.entry_speed, "fast");
+    }
+
+    #[test]
+    fn unknown_creator_keeps_configured_observation_delay() {
+        let mut live = market();
+        live.seconds_since_launch = 5;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(None),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert!(result
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("90 seconds")));
     }
 
     #[test]
