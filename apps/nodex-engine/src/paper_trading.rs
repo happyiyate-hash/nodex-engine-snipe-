@@ -69,7 +69,7 @@ pub(super) async fn evaluate_and_execute_paper_entry(
     let sol_quote = sol_price.read().await.clone();
     let sol_quote_valid =
         sol_quote.status == "live" && sol_quote.price_usd.is_finite() && sol_quote.price_usd > 0.0;
-    let config = main_bot_config_from_settings(
+    let mut config = main_bot_config_from_settings(
         &settings,
         if sol_quote_valid {
             sol_quote.price_usd
@@ -291,6 +291,23 @@ pub(super) async fn evaluate_and_execute_paper_entry(
             reputation.sample_status == "established" && reputation.confidence_pct >= 50.0
         })
         .and_then(|reputation| reputation.overall_score);
+
+    // Long-term entries are permitted only when the durable lifecycle evaluator
+    // has observed this exact mint as active (including an active graduated token).
+    config.long_term_token_active = match sqlx::query_scalar::<_, String>(
+        "SELECT lifecycle_status FROM training_tokens WHERE mint_address = ?",
+    )
+    .bind(mint)
+    .fetch_optional(database)
+    .await
+    {
+        Ok(Some(status)) => matches!(status.as_str(), "active" | "graduated_active"),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, mint_address = mint, "Could not load token lifecycle for long-term entry");
+            false
+        }
+    };
 
     // Use the actual launch-detection timestamp, not the later security-scan
     // completion time. Otherwise an old token could receive a fresh five-minute
