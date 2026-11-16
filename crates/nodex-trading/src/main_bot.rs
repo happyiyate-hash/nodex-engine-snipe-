@@ -29,6 +29,10 @@ pub struct TradingBotConfig {
     pub minimum_observation_seconds: u64,
     pub maximum_early_entry_age_seconds: u64,
     pub maximum_early_entry_market_cap_usd: f64,
+    /// both, short_term, or long_term. "both" switches horizons at the early-entry age limit.
+    pub entry_horizon_mode: String,
+    /// Set per token from durable lifecycle evidence by the application.
+    pub long_term_token_active: bool,
     pub high_creator_score_threshold: f64,
     pub low_score_observation_seconds: u64,
     pub blacklist_known_rug_creators: bool,
@@ -62,6 +66,8 @@ impl Default for TradingBotConfig {
             minimum_observation_seconds: 90,
             maximum_early_entry_age_seconds: 300,
             maximum_early_entry_market_cap_usd: 150_000.0,
+            entry_horizon_mode: "both".into(),
+            long_term_token_active: false,
             high_creator_score_threshold: 80.0,
             low_score_observation_seconds: 30,
             blacklist_known_rug_creators: true,
@@ -376,6 +382,12 @@ pub fn evaluate_entry(
     let minimum_observation_seconds = config.minimum_observation_seconds;
     let maximum_early_entry_age_seconds = config.maximum_early_entry_age_seconds;
     let maximum_early_entry_market_cap_usd = config.maximum_early_entry_market_cap_usd;
+    let is_short_term = match config.entry_horizon_mode.as_str() {
+        "short_term" => true,
+        "long_term" => false,
+        _ => market.seconds_since_launch <= maximum_early_entry_age_seconds,
+    };
+    let is_long_term = !is_short_term;
     let mut reasons = Vec::new();
     let mut rejected = false;
     let mut waiting = false;
@@ -434,17 +446,29 @@ pub fn evaluate_entry(
     }
     match market.market_cap_usd {
         Some(value)
-            if value.is_finite() && value > 0.0 && value <= maximum_early_entry_market_cap_usd => {}
-        Some(value) if value.is_finite() && value > maximum_early_entry_market_cap_usd => {
-            wait!("Market cap is already above the early-entry ceiling; avoiding a late entry.")
+            if value.is_finite()
+                && value > 0.0
+                && (is_long_term || value <= maximum_early_entry_market_cap_usd) => {}
+        Some(value) if value.is_finite() && value > maximum_early_entry_market_cap_usd && !is_long_term => {
+            wait!("Market cap is already above the early-entry ceiling; avoiding a late short-term entry.")
         }
         _ => wait!("Waiting for a reliable market-cap estimate from token supply and live price."),
     }
     if market.seconds_since_launch < minimum_observation_seconds {
         wait!("Collecting at least 90 seconds of confirmed market behaviour before entry.");
     }
-    if market.seconds_since_launch > maximum_early_entry_age_seconds {
-        reject!("The five-minute early-entry observation window has expired; skipping this token rather than chasing it late.");
+    if config.entry_horizon_mode == "short_term"
+        && market.seconds_since_launch > maximum_early_entry_age_seconds
+    {
+        reject!("The short-term entry window has expired; this token is outside the selected launch-sniping horizon.");
+    }
+    if config.entry_horizon_mode == "long_term"
+        && market.seconds_since_launch <= maximum_early_entry_age_seconds
+    {
+        wait!("Waiting for this token to establish a longer trading history before long-term entry.");
+    }
+    if is_long_term && !config.long_term_token_active {
+        wait!("Long-term entry requires persisted evidence that this token is still actively trading.");
     }
     match market.liquidity_usd {
         Some(value) if value.is_finite() && value >= config.minimum_liquidity_usd => {}
@@ -657,6 +681,48 @@ mod tests {
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
         assert_eq!(result.entry_speed, "fast");
         assert_eq!(result.minimum_distinct_buyers, 5);
+    }
+
+    #[test]
+    fn both_mode_routes_older_tokens_through_active_long_term_path() {
+        let mut config = TradingBotConfig::default();
+        config.long_term_token_active = true;
+        let mut live = market();
+        live.seconds_since_launch = 600;
+        let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
+    }
+
+    #[test]
+    fn long_term_mode_waits_until_token_is_old_enough_and_still_active() {
+        let mut config = TradingBotConfig {
+            entry_horizon_mode: "long_term".into(),
+            long_term_token_active: true,
+            ..TradingBotConfig::default()
+        };
+        let mut live = market();
+        live.seconds_since_launch = 90;
+        let early = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        assert_eq!(early.decision, TradingBotDecision::Wait);
+        live.seconds_since_launch = 600;
+        config.long_term_token_active = false;
+        let inactive = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        assert_eq!(inactive.decision, TradingBotDecision::Wait);
+        config.long_term_token_active = true;
+        let active = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        assert_eq!(active.decision, TradingBotDecision::EvaluatePaperEntry);
+    }
+
+    #[test]
+    fn short_term_mode_rejects_tokens_outside_early_window() {
+        let config = TradingBotConfig {
+            entry_horizon_mode: "short_term".into(),
+            ..TradingBotConfig::default()
+        };
+        let mut live = market();
+        live.seconds_since_launch = 600;
+        let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        assert_eq!(result.decision, TradingBotDecision::Reject);
     }
 
     #[test]
