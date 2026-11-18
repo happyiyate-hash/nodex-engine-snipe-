@@ -150,7 +150,7 @@ async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
     let tokens = count(pool, "training_tokens").await;
     let observations = count(pool, "training_token_observations").await;
     let trades = count(pool, "training_trade_events").await;
-    let allocated_bytes = sqlx::query_scalar::<_, i64>(
+    let page_allocation = sqlx::query_scalar::<_, i64>(
         r#"SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
            WHERE name IN (
              'training_developers', 'training_tokens', 'training_token_observations',
@@ -163,6 +163,22 @@ async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
     .await
     .ok()
     .map(|bytes| bytes.max(0) as u64);
+    let payload_estimate = sqlx::query_scalar::<_, i64>(
+        r#"SELECT
+          COALESCE((SELECT SUM(length(CAST(creator_address AS BLOB)) + length(CAST(first_seen_at AS BLOB)) + length(CAST(last_seen_at AS BLOB)) + length(CAST(updated_at AS BLOB))) FROM training_developers), 0) +
+          COALESCE((SELECT SUM(length(CAST(mint_address AS BLOB)) + length(CAST(creator_address AS BLOB)) + length(CAST(source AS BLOB)) + length(CAST(launch_signature AS BLOB)) + length(CAST(launched_at AS BLOB)) + COALESCE(length(CAST(last_observed_at AS BLOB)),0) + length(CAST(lifecycle_status AS BLOB)) + COALESCE(length(CAST(graduated_at AS BLOB)),0) + length(CAST(created_at AS BLOB)) + length(CAST(updated_at AS BLOB))) FROM training_tokens), 0) +
+          COALESCE((SELECT SUM(length(CAST(mint_address AS BLOB)) + length(CAST(creator_address AS BLOB)) + length(CAST(observation_key AS BLOB)) + length(CAST(observed_at AS BLOB)) + COALESCE(length(CAST(evidence_json AS BLOB)),0)) FROM training_token_observations), 0) +
+          COALESCE((SELECT SUM(length(CAST(event_key AS BLOB)) + length(CAST(signature AS BLOB)) + length(CAST(mint_address AS BLOB)) + COALESCE(length(CAST(creator_address AS BLOB)),0) + length(CAST(venue AS BLOB)) + length(CAST(trader_address AS BLOB)) + length(CAST(side AS BLOB)) + COALESCE(length(CAST(evidence_json AS BLOB)),0) + length(CAST(recorded_at AS BLOB))) FROM training_trade_events), 0) +
+          COALESCE((SELECT SUM(length(CAST(creator_address AS BLOB)) + length(CAST(sample_status AS BLOB)) + length(CAST(updated_at AS BLOB))) FROM creator_reputations), 0) +
+          COALESCE((SELECT SUM(length(CAST(creator_address AS BLOB)) + length(CAST(display_label AS BLOB)) + length(CAST(source AS BLOB)) + length(CAST(updated_at AS BLOB))) FROM creator_intelligence), 0)"#,
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .map(|bytes| bytes.max(0) as u64);
+    // dbstat includes table and index pages. If SQLite was built without dbstat,
+    // fall back to the measured byte length of persisted training payload fields.
+    let allocated_bytes = page_allocation.or(payload_estimate);
     DeveloperTrainingUsage { developers, tokens, observations, trades, allocated_bytes }
 }
 
