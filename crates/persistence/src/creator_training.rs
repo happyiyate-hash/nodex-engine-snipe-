@@ -103,6 +103,61 @@ pub async fn clear_all_training_data(pool: &SqlitePool) -> Result<CreatorTrainin
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeveloperTrainingRecord {
+    pub creator_address: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub total_launches: u64,
+    pub token_count: u64,
+    pub observation_count: u64,
+    pub trade_count: u64,
+    pub overall_score: Option<f64>,
+    pub confidence_pct: Option<f64>,
+    pub sample_status: Option<String>,
+    pub intelligence_observations: u64,
+}
+
+pub async fn list_developer_training_records(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<DeveloperTrainingRecord>> {
+    let rows = sqlx::query(
+        r#"SELECT
+             d.creator_address, d.first_seen_at, d.last_seen_at, d.total_launches,
+             (SELECT COUNT(*) FROM training_tokens t WHERE t.creator_address = d.creator_address) AS token_count,
+             (SELECT COUNT(*) FROM training_token_observations o WHERE o.creator_address = d.creator_address) AS observation_count,
+             (SELECT COUNT(*) FROM training_trade_events e WHERE e.creator_address = d.creator_address) AS trade_count,
+             r.overall_score, r.confidence_pct, r.sample_status,
+             COALESCE(i.observations_count, 0) AS intelligence_observations
+           FROM training_developers d
+           LEFT JOIN creator_reputations r ON r.creator_address = d.creator_address
+           LEFT JOIN creator_intelligence i ON i.creator_address = d.creator_address
+           ORDER BY d.last_seen_at DESC, d.creator_address ASC
+           LIMIT ?"#,
+    )
+    .bind(limit.clamp(1, 10_000) as i64)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(DeveloperTrainingRecord {
+                creator_address: row.try_get("creator_address")?,
+                first_seen_at: row.try_get("first_seen_at")?,
+                last_seen_at: row.try_get("last_seen_at")?,
+                total_launches: row.try_get::<i64, _>("total_launches")?.max(0) as u64,
+                token_count: row.try_get::<i64, _>("token_count")?.max(0) as u64,
+                observation_count: row.try_get::<i64, _>("observation_count")?.max(0) as u64,
+                trade_count: row.try_get::<i64, _>("trade_count")?.max(0) as u64,
+                overall_score: row.try_get("overall_score")?,
+                confidence_pct: row.try_get("confidence_pct")?,
+                sample_status: row.try_get("sample_status")?,
+                intelligence_observations: row.try_get::<i64, _>("intelligence_observations")?.max(0) as u64,
+            })
+        })
+        .collect()
+}
+
 pub async fn initialize(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS training_developers (
