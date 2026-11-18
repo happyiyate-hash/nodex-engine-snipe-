@@ -68,15 +68,38 @@ pub struct CreatorTrainingCleanupCounts {
 
 pub async fn clear_all_training_data(pool: &SqlitePool) -> Result<CreatorTrainingCleanupCounts> {
     let mut tx = pool.begin().await?;
-    let developers = sqlx::query("DELETE FROM training_developers").execute(&mut *tx).await?.rows_affected();
-    let tokens = sqlx::query("DELETE FROM training_tokens").execute(&mut *tx).await?.rows_affected();
-    let observations = sqlx::query("DELETE FROM training_token_observations").execute(&mut *tx).await?.rows_affected();
-    let trades = sqlx::query("DELETE FROM training_trade_events").execute(&mut *tx).await?.rows_affected();
-    let reputation_records = sqlx::query("DELETE FROM creator_reputations").execute(&mut *tx).await?.rows_affected();
-    let intelligence_records = sqlx::query("DELETE FROM creator_intelligence").execute(&mut *tx).await?.rows_affected();
+    let developers = sqlx::query("DELETE FROM training_developers")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let tokens = sqlx::query("DELETE FROM training_tokens")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let observations = sqlx::query("DELETE FROM training_token_observations")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let trades = sqlx::query("DELETE FROM training_trade_events")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let reputation_records = sqlx::query("DELETE FROM creator_reputations")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let intelligence_records = sqlx::query("DELETE FROM creator_intelligence")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
     tx.commit().await?;
     Ok(CreatorTrainingCleanupCounts {
-        developers, tokens, observations, trades, reputation_records, intelligence_records,
+        developers,
+        tokens,
+        observations,
+        trades,
+        reputation_records,
+        intelligence_records,
     })
 }
 
