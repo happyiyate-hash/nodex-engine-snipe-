@@ -18,8 +18,19 @@ pub struct StorageOverview {
     pub disk: Option<DiskUsage>,
     pub disk_error: Option<String>,
     pub database: DatabaseUsage,
+    pub developer_training: DeveloperTrainingUsage,
     pub system_journal: JournalUsage,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeveloperTrainingUsage {
+    pub developers: u64,
+    pub tokens: u64,
+    pub observations: u64,
+    pub trades: u64,
+    /// SQLite page allocation for training tables and their indexes, when dbstat is available.
+    pub allocated_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +141,31 @@ async fn database_file_usage(pool: &SqlitePool) -> DatabaseUsage {
     }
 }
 
+async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
+    async fn count(pool: &SqlitePool, table: &str) -> u64 {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        sqlx::query_scalar::<_, i64>(&query).fetch_one(pool).await.unwrap_or(0).max(0) as u64
+    }
+    let developers = count(pool, "training_developers").await;
+    let tokens = count(pool, "training_tokens").await;
+    let observations = count(pool, "training_token_observations").await;
+    let trades = count(pool, "training_trade_events").await;
+    let allocated_bytes = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
+           WHERE name IN (
+             'training_developers', 'training_tokens', 'training_token_observations',
+             'training_trade_events', 'creator_reputations', 'creator_intelligence'
+           )
+           OR name LIKE 'idx_training_%'
+           OR name IN ('idx_creator_reputations_rank', 'idx_creator_intelligence_score')"#,
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .map(|bytes| bytes.max(0) as u64);
+    DeveloperTrainingUsage { developers, tokens, observations, trades, allocated_bytes }
+}
+
 pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
     // The root mount is backed by the EC2 root EBS volume. Include both source
     // and mountpoint so the UI can identify exactly which filesystem was read.
@@ -148,6 +184,7 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
     };
 
     let database = database_file_usage(pool).await;
+    let developer_training = developer_training_usage(pool).await;
 
     let journal_report = command_output("journalctl", &["--disk-usage"]).await;
     let journal_size = journal_report.as_deref().and_then(parse_human_bytes);
@@ -162,6 +199,7 @@ pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
         disk,
         disk_error,
         database,
+        developer_training,
         system_journal: journal,
         updated_at: chrono::Utc::now().to_rfc3339(),
     }
