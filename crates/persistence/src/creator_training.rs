@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use sqlx::{Row, SqlitePool};
 
 /// A durable link between a creator wallet and a token launch.
@@ -51,6 +52,152 @@ pub struct TrainingToken {
     pub logo_url: Option<String>,
     pub metadata_uri: Option<String>,
     pub metadata_status: Option<String>,
+    /// Independent market-strength assessment; never aliases the security scanner score.
+    pub market_strength: TokenMarketStrength,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenMarketStrengthBreakdown {
+    pub market_cap: Option<f64>,
+    pub market_cap_growth: Option<f64>,
+    pub trading_activity: Option<f64>,
+    pub liquidity_health: Option<f64>,
+    pub market_stability: Option<f64>,
+    pub trading_continuity: Option<f64>,
+    pub holder_health: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenMarketStrength {
+    pub score: Option<f64>,
+    pub confidence_pct: f64,
+    pub sample_status: String,
+    pub evidence_count: u64,
+    pub observed_span_hours: Option<f64>,
+    pub breakdown: TokenMarketStrengthBreakdown,
+}
+
+fn average_available(values: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
+    let values: Vec<f64> = values.into_iter().flatten().filter(|value| value.is_finite()).collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+/// Calculate token market strength only from persisted market observations.
+/// Missing dimensions are omitted from the weighted score, never converted to zero.
+fn calculate_market_strength(
+    observations: &[TokenObservation],
+    stored_peak_market_cap_usd: Option<f64>,
+) -> TokenMarketStrength {
+    let latest = observations.last();
+    let first = observations.first();
+    let count = observations.len() as u64;
+
+    let observed_span_hours = first
+        .zip(latest)
+        .and_then(|(first, latest)| {
+            let start = chrono::DateTime::parse_from_rfc3339(&first.observed_at).ok()?;
+            let end = chrono::DateTime::parse_from_rfc3339(&latest.observed_at).ok()?;
+            Some(end.signed_duration_since(start).num_seconds().max(0) as f64 / 3600.0)
+        });
+
+    let market_cap = latest
+        .and_then(|item| item.market_cap_usd)
+        .filter(|value| *value > 0.0)
+        .map(|value| ((value.ln_1p() / 1_000_000.0_f64.ln_1p()) * 100.0).clamp(0.0, 100.0));
+
+    let market_cap_growth = first
+        .and_then(|item| item.market_cap_usd)
+        .zip(latest.and_then(|item| item.market_cap_usd))
+        .filter(|(start, end)| *start > 0.0 && *end > 0.0)
+        .map(|(start, end)| (50.0 + 20.0 * (end / start).ln()).clamp(0.0, 100.0));
+
+    let trading_activity = latest.and_then(|item| {
+        average_available([
+            item.volume_5m_usd.map(|volume| (volume / 10_000.0 * 100.0).clamp(0.0, 100.0)),
+            Some((item.unique_buyers_5m as f64 / 20.0 * 100.0).clamp(0.0, 100.0)),
+            Some(((item.buy_count_5m + item.sell_count_5m) as f64 / 40.0 * 100.0).clamp(0.0, 100.0)),
+        ])
+    });
+
+    let liquidity_health = latest
+        .and_then(|item| item.liquidity_usd.zip(item.market_cap_usd))
+        .filter(|(_, cap)| *cap > 0.0)
+        .map(|(liquidity, cap)| (liquidity / cap / 0.20 * 100.0).clamp(0.0, 100.0));
+
+    let observed_peak = observations
+        .iter()
+        .filter_map(|item| item.market_cap_usd)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(stored_peak_market_cap_usd.unwrap_or(0.0), f64::max);
+    let market_stability = latest
+        .and_then(|item| item.market_cap_usd)
+        .filter(|value| *value >= 0.0 && observed_peak > 0.0)
+        .map(|value| (value / observed_peak * 100.0).clamp(0.0, 100.0));
+
+    let trading_continuity = if observations.is_empty() {
+        None
+    } else {
+        let active = observations.iter().filter(|item| item.trading_active).count();
+        Some(active as f64 / observations.len() as f64 * 100.0)
+    };
+
+    let holder_health = latest
+        .and_then(|item| item.holder_concentration_pct)
+        .filter(|value| (0.0..=100.0).contains(value))
+        .map(|concentration| 100.0 - concentration);
+
+    let weighted = [
+        (market_cap, 0.15),
+        (market_cap_growth, 0.15),
+        (trading_activity, 0.25),
+        (liquidity_health, 0.10),
+        (market_stability, 0.15),
+        (trading_continuity, 0.10),
+        (holder_health, 0.10),
+    ];
+    let available_weight: f64 = weighted.iter().filter_map(|(value, weight)| value.map(|_| *weight)).sum();
+    let score = if available_weight > 0.0 {
+        Some(
+            weighted.iter()
+                .filter_map(|(value, weight)| value.map(|value| value * weight))
+                .sum::<f64>() / available_weight
+        )
+    } else {
+        None
+    };
+
+    let span_hours = observed_span_hours.unwrap_or(0.0);
+    let count_confidence = (count as f64 / 20.0).clamp(0.0, 1.0) * 60.0;
+    let duration_confidence = (span_hours / 2.0).clamp(0.0, 1.0) * 40.0;
+    let confidence_pct = (count_confidence + duration_confidence).clamp(0.0, 100.0);
+    let sample_status = if count >= 20 && span_hours >= 2.0 {
+        "established"
+    } else if count >= 3 {
+        "developing"
+    } else {
+        "insufficient_data"
+    };
+
+    TokenMarketStrength {
+        score,
+        confidence_pct,
+        sample_status: sample_status.to_string(),
+        evidence_count: count,
+        observed_span_hours,
+        breakdown: TokenMarketStrengthBreakdown {
+            market_cap,
+            market_cap_growth,
+            trading_activity,
+            liquidity_health,
+            market_stability,
+            trading_continuity,
+            holder_health,
+        },
+    }
 }
 
 /// Counts and removes the complete learned creator dataset. This deliberately
@@ -415,12 +562,60 @@ pub async fn list_tokens_for_creator(
            FROM training_tokens t
            LEFT JOIN token_states s ON s.mint_address = t.mint_address
            WHERE t.creator_address = ?
-           ORDER BY t.launched_at DESC LIMIT ?"#,
+           ORDER BY t.launched_at DESC LIMIT ?"#
     )
     .bind(creator_address.trim())
     .bind(limit.clamp(1, 500) as i64)
     .fetch_all(pool)
     .await?;
+
+    // Load a bounded recent observation history for every token in one query.
+    // This avoids an N+1 query per token while keeping the API response bounded.
+    let observation_rows = sqlx::query(
+        r#"WITH ranked AS (
+             SELECT mint_address, observation_key, observed_at, market_cap_usd,
+                    price_usd, liquidity_usd, volume_5m_usd, buy_count_5m,
+                    sell_count_5m, unique_buyers_5m, holder_concentration_pct,
+                    graduated, trading_active, evidence_json,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY mint_address ORDER BY observed_at DESC, id DESC
+                    ) AS row_number
+             FROM training_token_observations
+             WHERE creator_address = ?
+           )
+           SELECT mint_address, observation_key, observed_at, market_cap_usd,
+                  price_usd, liquidity_usd, volume_5m_usd, buy_count_5m,
+                  sell_count_5m, unique_buyers_5m, holder_concentration_pct,
+                  graduated, trading_active, evidence_json
+           FROM ranked
+           WHERE row_number <= 100
+           ORDER BY mint_address ASC, observed_at ASC"#
+    )
+    .bind(creator_address.trim())
+    .fetch_all(pool)
+    .await?;
+
+    let mut observations_by_mint: HashMap<String, Vec<TokenObservation>> = HashMap::new();
+    for row in observation_rows {
+        let observation = TokenObservation {
+            mint_address: row.try_get("mint_address")?,
+            observation_key: row.try_get("observation_key")?,
+            observed_at: row.try_get("observed_at")?,
+            market_cap_usd: row.try_get("market_cap_usd")?,
+            price_usd: row.try_get("price_usd")?,
+            liquidity_usd: row.try_get("liquidity_usd")?,
+            volume_5m_usd: row.try_get("volume_5m_usd")?,
+            buy_count_5m: row.try_get::<i64, _>("buy_count_5m")?.max(0) as u64,
+            sell_count_5m: row.try_get::<i64, _>("sell_count_5m")?.max(0) as u64,
+            unique_buyers_5m: row.try_get::<i64, _>("unique_buyers_5m")?.max(0) as u64,
+            holder_concentration_pct: row.try_get("holder_concentration_pct")?,
+            graduated: row.try_get::<i64, _>("graduated")? != 0,
+            trading_active: row.try_get::<i64, _>("trading_active")? != 0,
+            evidence_json: row.try_get("evidence_json")?,
+        };
+        observations_by_mint.entry(observation.mint_address.clone()).or_default().push(observation);
+    }
+
     rows.into_iter()
         .map(|row| {
             let token_state_json: Option<String> = row.try_get("token_state_json")?;
@@ -439,21 +634,27 @@ pub async fn list_tokens_for_creator(
                     .filter(|value| !value.is_empty())
                     .map(str::to_owned)
             };
+            let mint_address: String = row.try_get("mint_address")?;
+            let peak_market_cap_usd: Option<f64> = row.try_get("peak_market_cap_usd")?;
+            let observations = observations_by_mint.remove(&mint_address).unwrap_or_default();
+            let market_strength = calculate_market_strength(&observations, peak_market_cap_usd);
+
             Ok(TrainingToken {
-                mint_address: row.try_get("mint_address")?,
+                mint_address,
                 creator_address: row.try_get("creator_address")?,
                 source: row.try_get("source")?,
                 launched_at: row.try_get("launched_at")?,
                 last_observed_at: row.try_get("last_observed_at")?,
                 lifecycle_status: row.try_get("lifecycle_status")?,
                 graduated_at: row.try_get("graduated_at")?,
-                peak_market_cap_usd: row.try_get("peak_market_cap_usd")?,
+                peak_market_cap_usd,
                 observation_count: row.try_get::<i64, _>("observation_count")?.max(0) as u64,
                 name: identity_string("name"),
                 symbol: identity_string("symbol"),
                 logo_url: identity_string("logo_url"),
                 metadata_uri: identity_string("metadata_uri"),
                 metadata_status: identity_string("metadata_status"),
+                market_strength,
             })
         })
         .collect()
