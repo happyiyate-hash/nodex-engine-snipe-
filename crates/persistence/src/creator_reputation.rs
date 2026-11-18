@@ -228,13 +228,21 @@ fn build_breakdown(
     } else {
         "insufficient_data"
     };
-    let launch_coverage = if launches == 0 {
-        0.0
+    // Developer confidence must reflect independent launch and token coverage,
+    // not merely repeated snapshots from one token. Developing samples are capped
+    // below the trusted-creator threshold regardless of how many snapshots arrive.
+    let launch_coverage = (launches as f64 / MIN_ESTABLISHED_LAUNCHES as f64).min(1.0);
+    let token_coverage =
+        (observed.len() as f64 / MIN_ESTABLISHED_OBSERVED_TOKENS as f64).min(1.0);
+    let observation_coverage =
+        (observations as f64 / MIN_ESTABLISHED_OBSERVATIONS as f64).min(1.0);
+    let raw_confidence =
+        launch_coverage * 25.0 + token_coverage * 25.0 + observation_coverage * 50.0;
+    let sample_confidence = if sample_status == "established" {
+        raw_confidence
     } else {
-        observed.len() as f64 / launches as f64
+        raw_confidence.min(49.9)
     };
-    let volume_coverage = (observations as f64 / 24.0).min(1.0);
-    let sample_confidence = (launch_coverage.min(1.0) * 50.0) + (volume_coverage * 50.0);
 
     ScoreBreakdown {
         launches,
@@ -576,4 +584,29 @@ mod tests {
         assert_eq!(scores[4], Some(10.0));
         assert!(scores[5].unwrap() > 40.0);
     }
+    #[test]
+    fn one_token_cannot_create_high_developer_confidence() {
+        let token = evidence();
+        let score = build_breakdown(1, &[token], now());
+        assert_eq!(score.sample_status, "developing");
+        assert!(score.confidence_pct < 50.0);
+    }
+
+    #[test]
+    fn repeated_observations_from_one_token_never_establish_a_developer() {
+        let mut token = evidence();
+        token.observation_count = 10_000;
+        let score = build_breakdown(1, &[token], now());
+        assert_eq!(score.sample_status, "developing");
+        assert!(score.confidence_pct <= 49.9);
+    }
+
+    #[test]
+    fn established_developer_confidence_uses_multiple_launches_and_tokens() {
+        let tokens = vec![evidence(), evidence()];
+        let score = build_breakdown(3, &tokens, now());
+        assert_eq!(score.sample_status, "established");
+        assert_eq!(score.confidence_pct, 100.0);
+    }
+
 }
