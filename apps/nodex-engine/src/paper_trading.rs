@@ -622,7 +622,6 @@ pub(super) async fn evaluate_and_execute_paper_entry(
         trading_decisions::position_exit::assess_trailing_stop_eligibility(&entry_evidence);
     risk_policy.trailing_stop_eligible = trailing_eligible;
     risk_policy.trailing_stop_eligibility_reason = trailing_reason;
-    risk_policy.trailing_stop_enabled = false;
     if let Some(object) = position.as_object_mut() {
         object.insert(
             "risk_policy".into(),
