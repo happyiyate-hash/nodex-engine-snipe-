@@ -144,7 +144,11 @@ async fn database_file_usage(pool: &SqlitePool) -> DatabaseUsage {
 async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
     async fn count(pool: &SqlitePool, table: &str) -> u64 {
         let query = format!("SELECT COUNT(*) FROM {table}");
-        sqlx::query_scalar::<_, i64>(&query).fetch_one(pool).await.unwrap_or(0).max(0) as u64
+        sqlx::query_scalar::<_, i64>(&query)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0)
+            .max(0) as u64
     }
     let developers = count(pool, "training_developers").await;
     let tokens = count(pool, "training_tokens").await;
@@ -179,7 +183,13 @@ async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
     // dbstat includes table and index pages. If SQLite was built without dbstat,
     // fall back to the measured byte length of persisted training payload fields.
     let allocated_bytes = page_allocation.or(payload_estimate);
-    DeveloperTrainingUsage { developers, tokens, observations, trades, allocated_bytes }
+    DeveloperTrainingUsage {
+        developers,
+        tokens,
+        observations,
+        trades,
+        allocated_bytes,
+    }
 }
 
 pub async fn inspect(pool: &SqlitePool) -> StorageOverview {
