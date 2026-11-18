@@ -68,7 +68,7 @@ impl Default for TradingBotConfig {
             maximum_early_entry_market_cap_usd: 150_000.0,
             entry_horizon_mode: "both".into(),
             long_term_token_active: false,
-            high_creator_score_threshold: 80.0,
+            high_creator_score_threshold: 50.0,
             low_score_observation_seconds: 30,
             blacklist_known_rug_creators: true,
             whitelist_only_mode: false,
@@ -178,7 +178,7 @@ pub fn capture_position_risk(
         trailing_stop_eligible: false,
         trailing_stop_eligibility_reason:
             "Waiting for confirmed trade-flow and price-behaviour evidence.".into(),
-        trailing_stop_enabled: false,
+        trailing_stop_enabled: config.trailing_stop_enabled,
         trailing_activation_profit_pct: config.trailing_activation_profit_pct,
         trailing_stop_callback_pct: config.trailing_stop_callback_pct,
         trailing_stop_active: false,
@@ -354,9 +354,9 @@ pub struct TradingBotEvaluation {
     pub reasons: Vec<String>,
 }
 
-/// Evaluate one token against security, market, portfolio and creator-history gates.
-/// A strong creator score only changes the evidence/waiting threshold; it never bypasses
-/// verification, liquidity, concentration, slippage, volume or portfolio limits.
+/// Evaluate one token against scanner approval, creator history and portfolio limits.
+/// Established high-performing creators use a fast path after scanner approval; ordinary
+/// creators continue through the full market-confirmation strategy.
 pub fn evaluate_entry(
     config: &TradingBotConfig,
     creator: &CreatorReputation,
@@ -439,6 +439,49 @@ pub fn evaluate_entry(
     }
     if open_positions >= config.maximum_open_positions {
         reject!("Maximum number of open paper positions has been reached.");
+    }
+
+    // A trusted creator is identified by the exact persisted creator record loaded by
+    // the application. Once the independent scanner has approved the token and the
+    // runtime/quote gates have passed, do not make this proven creator wait for the
+    // ordinary liquidity, holder-sample, volume, buyer-count or candle-confirmation
+    // pipeline. A valid live token price and the configured price ceiling still apply.
+    if high_score {
+        if rejected {
+            return TradingBotEvaluation {
+                decision: TradingBotDecision::Reject,
+                entry_speed: "fast".into(),
+                creator_score: creator.score,
+                minimum_distinct_buyers: 0,
+                reasons,
+            };
+        }
+        match market.price_usd {
+            Some(value)
+                if value.is_finite()
+                    && value > 0.0
+                    && (config.maximum_entry_price_usd <= 0.0
+                        || value <= config.maximum_entry_price_usd) => {}
+            Some(_) => reject!("Trusted creator fast entry blocked: token price is invalid or exceeds the configured maximum entry price."),
+            None => wait!("Trusted creator recognised; waiting only for a valid live token price."),
+        }
+        let decision = if rejected {
+            TradingBotDecision::Reject
+        } else if waiting {
+            TradingBotDecision::Wait
+        } else {
+            reasons.push(
+                "Trusted creator score meets the fast-entry threshold; scanner approval, runtime controls, live quotes and portfolio limits passed.".into(),
+            );
+            TradingBotDecision::EvaluatePaperEntry
+        };
+        return TradingBotEvaluation {
+            decision,
+            entry_speed: "trusted_creator_fast".into(),
+            creator_score: creator.score,
+            minimum_distinct_buyers: 0,
+            reasons,
+        };
     }
 
     match security.top10_concentration_pct {
@@ -692,6 +735,79 @@ mod tests {
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
         assert_eq!(result.entry_speed, "fast");
         assert_eq!(result.minimum_distinct_buyers, 5);
+    }
+
+    #[test]
+    fn trusted_creator_at_fifty_enters_without_market_confirmation_waits() {
+        let mut live = market();
+        live.seconds_since_launch = 1;
+        live.liquidity_usd = None;
+        live.market_cap_usd = None;
+        live.observed_holder_count = None;
+        live.buy_volume_5m_usd = 0.0;
+        live.distinct_buyers_5m = 0;
+        live.distinct_buyers_30s = 0;
+        live.buy_count_30s = 0;
+        live.buy_pressure_30s_pct = None;
+        live.estimated_slippage_pct = None;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(50.0)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
+        assert_eq!(result.entry_speed, "trusted_creator_fast");
+        assert_eq!(result.minimum_distinct_buyers, 0);
+    }
+
+    #[test]
+    fn creator_below_fast_threshold_keeps_normal_confirmation_path() {
+        let mut live = market();
+        live.seconds_since_launch = 1;
+        let result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(49.9)),
+            &security(),
+            &live,
+            0,
+        );
+        assert_eq!(result.decision, TradingBotDecision::Wait);
+        assert_eq!(result.entry_speed, "confirmation");
+    }
+
+    #[test]
+    fn trusted_creator_fast_path_still_rejects_known_rug_and_position_limit() {
+        let mut rug = creator(Some(90.0));
+        rug.known_rug_creator = Some(true);
+        let rug_result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &rug,
+            &security(),
+            &market(),
+            0,
+        );
+        assert_eq!(rug_result.decision, TradingBotDecision::Reject);
+
+        let position_result = evaluate_entry(
+            &TradingBotConfig::default(),
+            &creator(Some(90.0)),
+            &security(),
+            &market(),
+            TradingBotConfig::default().maximum_open_positions,
+        );
+        assert_eq!(position_result.decision, TradingBotDecision::Reject);
+    }
+
+    #[test]
+    fn configured_trailing_stop_is_captured_for_new_positions() {
+        let config = TradingBotConfig {
+            trailing_stop_enabled: true,
+            ..TradingBotConfig::default()
+        };
+        let policy = capture_position_risk(&config, 1.0, 100.0).unwrap();
+        assert!(policy.trailing_stop_enabled);
     }
 
     #[test]
