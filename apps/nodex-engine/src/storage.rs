@@ -29,8 +29,11 @@ pub struct DeveloperTrainingUsage {
     pub tokens: u64,
     pub observations: u64,
     pub trades: u64,
-    /// SQLite page allocation for training tables and their indexes, when dbstat is available.
+    pub reputation_records: u64,
+    pub intelligence_records: u64,
+    /// SQLite page allocation or measured payload-byte fallback.
     pub allocated_bytes: Option<u64>,
+    pub measurement: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +157,8 @@ async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
     let tokens = count(pool, "training_tokens").await;
     let observations = count(pool, "training_token_observations").await;
     let trades = count(pool, "training_trade_events").await;
+    let reputation_records = count(pool, "creator_reputations").await;
+    let intelligence_records = count(pool, "creator_intelligence").await;
     let page_allocation = sqlx::query_scalar::<_, i64>(
         r#"SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
            WHERE name IN (
@@ -182,13 +187,21 @@ async fn developer_training_usage(pool: &SqlitePool) -> DeveloperTrainingUsage {
     .map(|bytes| bytes.max(0) as u64);
     // dbstat includes table and index pages. If SQLite was built without dbstat,
     // fall back to the measured byte length of persisted training payload fields.
+    let measurement = if page_allocation.is_some() {
+        "sqlite_page_allocation"
+    } else {
+        "payload_byte_estimate"
+    };
     let allocated_bytes = page_allocation.or(payload_estimate);
     DeveloperTrainingUsage {
         developers,
         tokens,
         observations,
         trades,
+        reputation_records,
+        intelligence_records,
         allocated_bytes,
+        measurement,
     }
 }
 
