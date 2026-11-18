@@ -96,13 +96,11 @@ fn calculate_market_strength(
     let first = observations.first();
     let count = observations.len() as u64;
 
-    let observed_span_hours = first
-        .zip(latest)
-        .and_then(|(first, latest)| {
-            let start = chrono::DateTime::parse_from_rfc3339(&first.observed_at).ok()?;
-            let end = chrono::DateTime::parse_from_rfc3339(&latest.observed_at).ok()?;
-            Some(end.signed_duration_since(start).num_seconds().max(0) as f64 / 3600.0)
-        });
+    let observed_span_hours = first.zip(latest).and_then(|(first, latest)| {
+        let start = chrono::DateTime::parse_from_rfc3339(&first.observed_at).ok()?;
+        let end = chrono::DateTime::parse_from_rfc3339(&latest.observed_at).ok()?;
+        Some(end.signed_duration_since(start).num_seconds().max(0) as f64 / 3600.0)
+    });
 
     let market_cap = latest
         .and_then(|item| item.market_cap_usd)
@@ -117,9 +115,12 @@ fn calculate_market_strength(
 
     let trading_activity = latest.and_then(|item| {
         average_available([
-            item.volume_5m_usd.map(|volume| (volume / 10_000.0 * 100.0).clamp(0.0, 100.0)),
+            item.volume_5m_usd
+                .map(|volume| (volume / 10_000.0 * 100.0).clamp(0.0, 100.0)),
             Some((item.unique_buyers_5m as f64 / 20.0 * 100.0).clamp(0.0, 100.0)),
-            Some(((item.buy_count_5m + item.sell_count_5m) as f64 / 40.0 * 100.0).clamp(0.0, 100.0)),
+            Some(
+                ((item.buy_count_5m + item.sell_count_5m) as f64 / 40.0 * 100.0).clamp(0.0, 100.0),
+            ),
         ])
     });
 
@@ -141,7 +142,10 @@ fn calculate_market_strength(
     let trading_continuity = if observations.is_empty() {
         None
     } else {
-        let active = observations.iter().filter(|item| item.trading_active).count();
+        let active = observations
+            .iter()
+            .filter(|item| item.trading_active)
+            .count();
         Some(active as f64 / observations.len() as f64 * 100.0)
     };
 
@@ -159,12 +163,17 @@ fn calculate_market_strength(
         (trading_continuity, 0.10),
         (holder_health, 0.10),
     ];
-    let available_weight: f64 = weighted.iter().filter_map(|(value, weight)| value.map(|_| *weight)).sum();
+    let available_weight: f64 = weighted
+        .iter()
+        .filter_map(|(value, weight)| value.map(|_| *weight))
+        .sum();
     let score = if available_weight > 0.0 {
         Some(
-            weighted.iter()
+            weighted
+                .iter()
                 .filter_map(|(value, weight)| value.map(|value| value * weight))
-                .sum::<f64>() / available_weight
+                .sum::<f64>()
+                / available_weight
         )
     } else {
         None
@@ -562,7 +571,7 @@ pub async fn list_tokens_for_creator(
            FROM training_tokens t
            LEFT JOIN token_states s ON s.mint_address = t.mint_address
            WHERE t.creator_address = ?
-           ORDER BY t.launched_at DESC LIMIT ?"#
+           ORDER BY t.launched_at DESC LIMIT ?"#,
     )
     .bind(creator_address.trim())
     .bind(limit.clamp(1, 500) as i64)
@@ -589,7 +598,7 @@ pub async fn list_tokens_for_creator(
                   graduated, trading_active, evidence_json
            FROM ranked
            WHERE row_number <= 100
-           ORDER BY mint_address ASC, observed_at ASC"#
+           ORDER BY mint_address ASC, observed_at ASC"#,
     )
     .bind(creator_address.trim())
     .fetch_all(pool)
@@ -613,7 +622,10 @@ pub async fn list_tokens_for_creator(
             trading_active: row.try_get::<i64, _>("trading_active")? != 0,
             evidence_json: row.try_get("evidence_json")?,
         };
-        observations_by_mint.entry(observation.mint_address.clone()).or_default().push(observation);
+        observations_by_mint
+            .entry(observation.mint_address.clone())
+            .or_default()
+            .push(observation);
     }
 
     rows.into_iter()
@@ -636,7 +648,9 @@ pub async fn list_tokens_for_creator(
             };
             let mint_address: String = row.try_get("mint_address")?;
             let peak_market_cap_usd: Option<f64> = row.try_get("peak_market_cap_usd")?;
-            let observations = observations_by_mint.remove(&mint_address).unwrap_or_default();
+            let observations = observations_by_mint
+                .remove(&mint_address)
+                .unwrap_or_default();
             let market_strength = calculate_market_strength(&observations, peak_market_cap_usd);
 
             Ok(TrainingToken {
