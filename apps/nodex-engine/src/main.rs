@@ -3490,6 +3490,53 @@ async fn storage_overview(
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
 
+async fn cleanup_developer_training(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_operator_key(&state, &headers)?;
+    let before = storage::inspect(&state.database).await;
+    let deleted = nodex_persistence::creator_training::clear_all_training_data(&state.database)
+        .await
+        .map_err(|error| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Developer training cleanup failed: {error}"),
+        ))?;
+    // Reclaim free SQLite pages so the storage page can report physical space
+    // actually returned to the database file, not only rows deleted.
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&state.database)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("SQLite checkpoint failed: {error}")))?;
+    sqlx::query("VACUUM")
+        .execute(&state.database)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("SQLite vacuum failed after cleanup: {error}")))?;
+    let after = storage::inspect(&state.database).await;
+    let before_bytes = before.database.total_file_bytes;
+    let after_bytes = after.database.total_file_bytes;
+    let bytes_freed = before_bytes.saturating_sub(after_bytes);
+    tracing::warn!(
+        developers = deleted.developers,
+        tokens = deleted.tokens,
+        observations = deleted.observations,
+        trades = deleted.trades,
+        reputation_records = deleted.reputation_records,
+        intelligence_records = deleted.intelligence_records,
+        bytes_freed,
+        "Operator cleared all learned developer training data"
+    );
+    Ok(Json(json!({
+        "status": "ok",
+        "category": "developer_training",
+        "deleted": deleted,
+        "storage_before_bytes": before_bytes,
+        "storage_after_bytes": after_bytes,
+        "bytes_freed": bytes_freed,
+        "overview": after
+    })))
+}
+
 async fn cleanup_system_journal(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6068,6 +6115,10 @@ async fn main() -> anyhow::Result<()> {
             post(clear_engine_activity_logs),
         )
         .route("/api/v1/admin/storage/overview", get(storage_overview))
+        .route(
+            "/api/v1/admin/storage/developer-training/cleanup",
+            post(cleanup_developer_training),
+        )
         .route(
             "/api/v1/admin/storage/system-journal/cleanup",
             post(cleanup_system_journal),
