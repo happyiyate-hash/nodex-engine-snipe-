@@ -45,6 +45,12 @@ pub struct TrainingToken {
     pub graduated_at: Option<String>,
     pub peak_market_cap_usd: Option<f64>,
     pub observation_count: u64,
+    /// Identity fields are read from the durable canonical token snapshot.
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub logo_url: Option<String>,
+    pub metadata_uri: Option<String>,
+    pub metadata_status: Option<String>,
 }
 
 pub async fn initialize(pool: &SqlitePool) -> Result<()> {
@@ -297,8 +303,11 @@ pub async fn list_tokens_for_creator(
     let rows = sqlx::query(
         r#"SELECT t.mint_address, t.creator_address, t.source, t.launched_at,
                   t.last_observed_at, t.lifecycle_status, t.graduated_at,
-                  t.peak_market_cap_usd, t.observation_count
-           FROM training_tokens t WHERE t.creator_address = ?
+                  t.peak_market_cap_usd, t.observation_count,
+                  s.payload_json AS token_state_json
+           FROM training_tokens t
+           LEFT JOIN token_states s ON s.mint_address = t.mint_address
+           WHERE t.creator_address = ?
            ORDER BY t.launched_at DESC LIMIT ?"#,
     )
     .bind(creator_address.trim())
@@ -307,6 +316,19 @@ pub async fn list_tokens_for_creator(
     .await?;
     rows.into_iter()
         .map(|row| {
+            let token_state_json: Option<String> = row.try_get("token_state_json")?;
+            let state: Option<serde_json::Value> = token_state_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str(payload).ok());
+            let identity = state.as_ref().and_then(|value| value.get("data"))
+                .and_then(|value| value.get("identity"));
+            let identity_string = |key: &str| -> Option<String> {
+                identity.and_then(|value| value.get(key))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
             Ok(TrainingToken {
                 mint_address: row.try_get("mint_address")?,
                 creator_address: row.try_get("creator_address")?,
@@ -317,6 +339,11 @@ pub async fn list_tokens_for_creator(
                 graduated_at: row.try_get("graduated_at")?,
                 peak_market_cap_usd: row.try_get("peak_market_cap_usd")?,
                 observation_count: row.try_get::<i64, _>("observation_count")?.max(0) as u64,
+                name: identity_string("name"),
+                symbol: identity_string("symbol"),
+                logo_url: identity_string("logo_url"),
+                metadata_uri: identity_string("metadata_uri"),
+                metadata_status: identity_string("metadata_status"),
             })
         })
         .collect()
