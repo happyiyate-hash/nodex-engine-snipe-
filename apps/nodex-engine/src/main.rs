@@ -3498,10 +3498,12 @@ async fn cleanup_developer_training(
     let before = storage::inspect(&state.database).await;
     let deleted = nodex_persistence::creator_training::clear_all_training_data(&state.database)
         .await
-        .map_err(|error| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Developer training cleanup failed: {error}"),
-        ))?;
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Developer training cleanup failed: {error}"),
+            )
+        })?;
     // Reclaim free SQLite pages so the storage page can report physical space
     // actually returned to the database file, not only rows deleted.
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
