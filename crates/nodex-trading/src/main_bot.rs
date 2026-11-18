@@ -733,8 +733,8 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
-        assert_eq!(result.entry_speed, "fast");
-        assert_eq!(result.minimum_distinct_buyers, 5);
+        assert_eq!(result.entry_speed, "trusted_creator_fast");
+        assert_eq!(result.minimum_distinct_buyers, 0);
     }
 
     #[test]
@@ -822,7 +822,7 @@ mod tests {
             0,
         );
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
-        assert_eq!(result.entry_speed, "fast");
+        assert_eq!(result.entry_speed, "trusted_creator_fast");
     }
 
     #[test]
