@@ -833,6 +833,12 @@ mod tests {
             .await
             .expect("in-memory SQLite pool");
         initialize(&pool).await.expect("training schema");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS token_states (mint_address TEXT PRIMARY KEY NOT NULL, payload_json TEXT NOT NULL)"
+        )
+        .execute(&pool)
+        .await
+        .expect("token state fixture");
         pool
     }
 
@@ -864,6 +870,26 @@ mod tests {
             trading_active: true,
             evidence_json: "{}".to_string(),
         }
+    }
+
+    #[test]
+    fn market_strength_scores_available_evidence_without_filling_missing_metrics() {
+        let observations = vec![
+            observation("bucket-1", "2026-01-02T00:05:00Z", 100_000.0, false),
+            observation("bucket-2", "2026-01-02T02:05:00Z", 200_000.0, false),
+        ];
+        let strength = calculate_market_strength(&observations, Some(200_000.0));
+        assert!(strength.score.is_some());
+        assert_eq!(strength.evidence_count, 2);
+        assert_eq!(strength.sample_status, "insufficient_data");
+        assert_eq!(strength.breakdown.liquidity_health, Some(30.0));
+        assert_eq!(strength.breakdown.holder_health, Some(65.0));
+
+        let missing = calculate_market_strength(&[], None);
+        assert_eq!(missing.score, None);
+        assert_eq!(missing.breakdown.liquidity_health, None);
+        assert_eq!(missing.breakdown.holder_health, None);
+        assert_eq!(missing.confidence_pct, 0.0);
     }
 
     #[tokio::test]
