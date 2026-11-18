@@ -851,7 +851,7 @@ mod tests {
         };
         let mut live = market();
         live.seconds_since_launch = 600;
-        let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        let result = evaluate_entry(&config, &creator(Some(49.0)), &security(), &live, 0);
         assert_eq!(result.decision, TradingBotDecision::EvaluatePaperEntry);
     }
 
@@ -864,14 +864,14 @@ mod tests {
         };
         let mut live = market();
         live.seconds_since_launch = 90;
-        let early = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        let early = evaluate_entry(&config, &creator(Some(49.0)), &security(), &live, 0);
         assert_eq!(early.decision, TradingBotDecision::Wait);
         live.seconds_since_launch = 600;
         config.long_term_token_active = false;
-        let inactive = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        let inactive = evaluate_entry(&config, &creator(Some(49.0)), &security(), &live, 0);
         assert_eq!(inactive.decision, TradingBotDecision::Wait);
         config.long_term_token_active = true;
-        let active = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        let active = evaluate_entry(&config, &creator(Some(49.0)), &security(), &live, 0);
         assert_eq!(active.decision, TradingBotDecision::EvaluatePaperEntry);
     }
 
@@ -883,7 +883,7 @@ mod tests {
         };
         let mut live = market();
         live.seconds_since_launch = 600;
-        let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        let result = evaluate_entry(&config, &creator(Some(49.0)), &security(), &live, 0);
         assert_eq!(result.decision, TradingBotDecision::Reject);
     }
 
@@ -893,7 +893,7 @@ mod tests {
         live.sell_count_30s = live.buy_count_30s;
         let result = evaluate_entry(
             &TradingBotConfig::default(),
-            &creator(Some(91.0)),
+            &creator(Some(49.0)),
             &security(),
             &live,
             0,
@@ -911,7 +911,7 @@ mod tests {
         live.market_cap_usd = Some(200_000.0);
         let result = evaluate_entry(
             &TradingBotConfig::default(),
-            &creator(Some(91.0)),
+            &creator(Some(49.0)),
             &security(),
             &live,
             0,
@@ -929,7 +929,7 @@ mod tests {
         live.observed_holder_count = None;
         let result = evaluate_entry(
             &TradingBotConfig::default(),
-            &creator(Some(91.0)),
+            &creator(Some(49.0)),
             &security(),
             &live,
             0,
@@ -949,7 +949,7 @@ mod tests {
             entry_horizon_mode: "short_term".into(),
             ..TradingBotConfig::default()
         };
-        let result = evaluate_entry(&config, &creator(Some(91.0)), &security(), &live, 0);
+        let result = evaluate_entry(&config, &creator(Some(49.0)), &security(), &live, 0);
         assert_eq!(result.decision, TradingBotDecision::Reject);
         assert!(result
             .reasons
@@ -963,7 +963,7 @@ mod tests {
         live.price_change_1m_pct = Some(16.0);
         let result = evaluate_entry(
             &TradingBotConfig::default(),
-            &creator(Some(91.0)),
+            &creator(Some(49.0)),
             &security(),
             &live,
             0,
@@ -981,7 +981,7 @@ mod tests {
         live.price_change_1m_pct = Some(-24.0);
         let result = evaluate_entry(
             &TradingBotConfig::default(),
-            &creator(Some(91.0)),
+            &creator(Some(49.0)),
             &security(),
             &live,
             0,
@@ -1105,7 +1105,7 @@ mod tests {
         live.buy_count_5m = 0;
         let result = evaluate_entry(
             &TradingBotConfig::default(),
-            &creator(Some(95.0)),
+            &creator(Some(49.0)),
             &security(),
             &live,
             0,
