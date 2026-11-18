@@ -152,7 +152,9 @@ pub async fn list_developer_training_records(
                 overall_score: row.try_get("overall_score")?,
                 confidence_pct: row.try_get("confidence_pct")?,
                 sample_status: row.try_get("sample_status")?,
-                intelligence_observations: row.try_get::<i64, _>("intelligence_observations")?.max(0) as u64,
+                intelligence_observations: row
+                    .try_get::<i64, _>("intelligence_observations")?
+                    .max(0) as u64,
             })
         })
         .collect()
