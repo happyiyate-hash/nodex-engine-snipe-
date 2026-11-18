@@ -232,10 +232,8 @@ fn build_breakdown(
     // not merely repeated snapshots from one token. Developing samples are capped
     // below the trusted-creator threshold regardless of how many snapshots arrive.
     let launch_coverage = (launches as f64 / MIN_ESTABLISHED_LAUNCHES as f64).min(1.0);
-    let token_coverage =
-        (observed.len() as f64 / MIN_ESTABLISHED_OBSERVED_TOKENS as f64).min(1.0);
-    let observation_coverage =
-        (observations as f64 / MIN_ESTABLISHED_OBSERVATIONS as f64).min(1.0);
+    let token_coverage = (observed.len() as f64 / MIN_ESTABLISHED_OBSERVED_TOKENS as f64).min(1.0);
+    let observation_coverage = (observations as f64 / MIN_ESTABLISHED_OBSERVATIONS as f64).min(1.0);
     let raw_confidence =
         launch_coverage * 25.0 + token_coverage * 25.0 + observation_coverage * 50.0;
     let sample_confidence = if sample_status == "established" {
@@ -608,5 +606,4 @@ mod tests {
         assert_eq!(score.sample_status, "established");
         assert_eq!(score.confidence_pct, 100.0);
     }
-
 }
