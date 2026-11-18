@@ -3494,7 +3494,10 @@ async fn developer_training_storage_records(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<nodex_persistence::creator_training::DeveloperTrainingRecord>>, (StatusCode, String)> {
+) -> Result<
+    Json<Vec<nodex_persistence::creator_training::DeveloperTrainingRecord>>,
+    (StatusCode, String),
+> {
     verify_operator_key(&state, &headers)?;
     let limit = query
         .get("limit")
