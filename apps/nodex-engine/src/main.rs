@@ -3507,11 +3507,21 @@ async fn cleanup_developer_training(
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
         .execute(&state.database)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("SQLite checkpoint failed: {error}")))?;
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SQLite checkpoint failed: {error}"),
+            )
+        })?;
     sqlx::query("VACUUM")
         .execute(&state.database)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("SQLite vacuum failed after cleanup: {error}")))?;
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SQLite vacuum failed after cleanup: {error}"),
+            )
+        })?;
     let after = storage::inspect(&state.database).await;
     let before_bytes = before.database.total_file_bytes;
     let after_bytes = after.database.total_file_bytes;
