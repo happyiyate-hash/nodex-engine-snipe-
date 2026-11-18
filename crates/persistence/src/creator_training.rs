@@ -320,10 +320,13 @@ pub async fn list_tokens_for_creator(
             let state: Option<serde_json::Value> = token_state_json
                 .as_deref()
                 .and_then(|payload| serde_json::from_str(payload).ok());
-            let identity = state.as_ref().and_then(|value| value.get("data"))
+            let identity = state
+                .as_ref()
+                .and_then(|value| value.get("data"))
                 .and_then(|value| value.get("identity"));
             let identity_string = |key: &str| -> Option<String> {
-                identity.and_then(|value| value.get(key))
+                identity
+                    .and_then(|value| value.get(key))
                     .and_then(serde_json::Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
