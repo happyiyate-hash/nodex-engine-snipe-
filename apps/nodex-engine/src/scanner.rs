@@ -150,6 +150,28 @@ pub(super) fn start_launch_processor(
                         }));
                     }
                 }
+                // Read persisted creator reputation early, before the full security scan.
+                // This is a quick, read-only lookup; it does not recalculate training scores.
+                let fast_creator_reputation = if let Some(address) = launch.creator_address.as_deref() {
+                    match nodex_persistence::creator_reputation::get_creator_reputation(&database, address).await {
+                        Ok(reputation) => {
+                            let trusted_score = reputation.overall_score
+                                .filter(|score| score.is_finite())
+                                .filter(|_| reputation.sample_status == "established" && reputation.confidence_pct >= 50.0);
+                            tracing::debug!(mint_address = %launch.mint_address, creator_address = %address, score = ?trusted_score, confidence_pct = reputation.confidence_pct, sample_status = %reputation.sample_status, "Early creator reputation lookup completed");
+                            Some(serde_json::json!({
+                                "creator_address": address, "score": trusted_score,
+                                "confidence_pct": reputation.confidence_pct, "sample_status": reputation.sample_status,
+                                "updated_at": reputation.updated_at, "lookup_stage": "launch_fast_path"
+                            }))
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, mint_address = %launch.mint_address, creator_address = %address, "Early reputation lookup failed; launch remains discoverable");
+                            None
+                        }
+                    }
+                } else { None };
+
                 // Unknown/unpreferred creators remain visible and monitored. Strict
                 // preferred-owner mode is an entry restriction, not a discovery filter.
                 let whitelist_settings = trading_settings.read().await;
@@ -298,7 +320,8 @@ pub(super) fn start_launch_processor(
                             "signature": launch.signature,
                             "slot": launch.slot,
                             "detected_at": launch.detected_at,
-                            "metadata_status": metadata.status
+                            "metadata_status": metadata.status,
+                            "early_creator_reputation": fast_creator_reputation
                         },
                         "security": {
                             // A retry is a new scan generation, not a continuation of
