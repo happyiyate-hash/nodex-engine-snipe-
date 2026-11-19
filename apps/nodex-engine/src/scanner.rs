@@ -203,9 +203,9 @@ pub(super) fn start_launch_processor(
                             None
                         }
                     }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
 
                 // Unknown/unpreferred creators remain visible and monitored. Strict
                 // preferred-owner mode is an entry restriction, not a discovery filter.
