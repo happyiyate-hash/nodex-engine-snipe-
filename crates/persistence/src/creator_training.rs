@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 /// A durable link between a creator wallet and a token launch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +78,11 @@ pub struct TokenMarketStrength {
 }
 
 fn average_available(values: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
-    let values: Vec<f64> = values.into_iter().flatten().filter(|value| value.is_finite()).collect();
+    let values: Vec<f64> = values
+        .into_iter()
+        .flatten()
+        .filter(|value| value.is_finite())
+        .collect();
     if values.is_empty() {
         None
     } else {
@@ -173,7 +177,7 @@ fn calculate_market_strength(
                 .iter()
                 .filter_map(|(value, weight)| value.map(|value| value * weight))
                 .sum::<f64>()
-                / available_weight
+                / available_weight,
         )
     } else {
         None
