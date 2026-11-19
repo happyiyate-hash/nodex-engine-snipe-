@@ -105,6 +105,108 @@ pub(super) fn start_launch_processor(
                             "message":error.to_string(),"signature":signature,
                             "received_at":chrono::Utc::now().to_rfc3339()
                         }}));
+
+                        // Resolve optional metadata independently after the minimal launch is
+                        // persisted and broadcast. Metadata failures cannot delay launch consumers.
+                        let metadata_rpc = rpc.clone();
+                        let metadata_events = events.clone();
+                        let metadata_registry = token_registry.clone();
+                        let metadata_database = database.clone();
+                        let metadata_mint = mint_address.clone();
+                        tokio::spawn(async move {
+                            let metadata_result = tokio::time::timeout(
+                                Duration::from_secs(10),
+                                resolve_discovery_metadata(
+                                    &metadata_rpc,
+                                    &metadata_mint,
+                                    &metadata_events,
+                                ),
+                            )
+                            .await;
+                            let resolved = match metadata_result {
+                                Ok(Ok(value)) => value,
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%error, mint_address=%metadata_mint, "Background metadata resolution failed");
+                                    let _ = metadata_events.publish(json!({
+                                        "type":"token_diagnostic",
+                                        "data":token_diagnostic(
+                                            &metadata_mint,
+                                            "metadata_resolution",
+                                            "solana_rpc",
+                                            error.to_string(),
+                                            provider_error_details(&format!("{error:#}"))
+                                        )
+                                    }));
+                                    return;
+                                }
+                                Err(_) => {
+                                    let message = "Background token metadata resolution timed out after 10 seconds.";
+                                    tracing::warn!(mint_address=%metadata_mint, "{message}");
+                                    let _ = metadata_events.publish(json!({
+                                        "type":"token_diagnostic",
+                                        "data":token_diagnostic(
+                                            &metadata_mint,
+                                            "metadata_resolution",
+                                            "solana_rpc",
+                                            message,
+                                            json!({"kind":"timeout","timeout_seconds":10})
+                                        )
+                                    }));
+                                    return;
+                                }
+                            };
+                            let mut identity_patch = serde_json::Map::new();
+                            if let Some(value) = resolved.name.as_ref() {
+                                identity_patch.insert("name".into(), json!(value));
+                            }
+                            if let Some(value) = resolved.symbol.as_ref() {
+                                identity_patch.insert("symbol".into(), json!(value));
+                            }
+                            if let Some(value) = resolved.decimals {
+                                identity_patch.insert("decimals".into(), json!(value));
+                            }
+                            if let Some(value) = resolved.metadata_uri.as_ref() {
+                                identity_patch.insert("metadata_uri".into(), json!(value));
+                            }
+                            if let Some(value) = resolved.logo_url.as_ref() {
+                                identity_patch.insert("logo_url".into(), json!(value));
+                            }
+                            if let Ok(patched) = metadata_registry.upsert_patch(
+                                &metadata_mint,
+                                json!({
+                                    "identity":identity_patch,
+                                    "discovery":{"metadata_status":resolved.status}
+                                }),
+                            ) {
+                                if let Err(error) = nodex_persistence::save_token_state(
+                                    &metadata_database,
+                                    &patched,
+                                ).await {
+                                    tracing::warn!(%error, mint_address=%metadata_mint, "Could not persist background token metadata");
+                                    let _ = metadata_events.publish(json!({
+                                        "type":"token_diagnostic",
+                                        "data":token_diagnostic(
+                                            &metadata_mint,
+                                            "metadata_resolution",
+                                            "sqlite",
+                                            error.to_string(),
+                                            json!({"kind":"database_persistence_error","message":error.to_string()})
+                                        )
+                                    }));
+                                    return;
+                                }
+                                let _ = metadata_events.publish(json!({
+                                    "type":"token_state_updated",
+                                    "data":patched
+                                }));
+                            }
+                            for diagnostic in resolved.errors {
+                                let _ = metadata_events.publish(json!({
+                                    "type":"token_diagnostic",
+                                    "data":diagnostic
+                                }));
+                            }
+                        });
                         continue;
                     }
                 };
@@ -354,107 +456,6 @@ pub(super) fn start_launch_processor(
                 );
                 match initial_state {
                     Ok(snapshot) => {
-                        // Resolve optional metadata independently after the minimal launch is
-                        // persisted and broadcast. Metadata failures cannot delay launch consumers.
-                        let metadata_rpc = rpc.clone();
-                        let metadata_events = events.clone();
-                        let metadata_registry = token_registry.clone();
-                        let metadata_database = database.clone();
-                        let metadata_mint = mint_address.clone();
-                        tokio::spawn(async move {
-                            let metadata_result = tokio::time::timeout(
-                                Duration::from_secs(10),
-                                resolve_discovery_metadata(
-                                    &metadata_rpc,
-                                    &metadata_mint,
-                                    &metadata_events,
-                                ),
-                            )
-                            .await;
-                            let resolved = match metadata_result {
-                                Ok(Ok(value)) => value,
-                                Ok(Err(error)) => {
-                                    tracing::warn!(%error, mint_address=%metadata_mint, "Background metadata resolution failed");
-                                    let _ = metadata_events.publish(json!({
-                                        "type":"token_diagnostic",
-                                        "data":token_diagnostic(
-                                            &metadata_mint,
-                                            "metadata_resolution",
-                                            "solana_rpc",
-                                            error.to_string(),
-                                            provider_error_details(&format!("{error:#}"))
-                                        )
-                                    }));
-                                    return;
-                                }
-                                Err(_) => {
-                                    let message = "Background token metadata resolution timed out after 10 seconds.";
-                                    tracing::warn!(mint_address=%metadata_mint, "{message}");
-                                    let _ = metadata_events.publish(json!({
-                                        "type":"token_diagnostic",
-                                        "data":token_diagnostic(
-                                            &metadata_mint,
-                                            "metadata_resolution",
-                                            "solana_rpc",
-                                            message,
-                                            json!({"kind":"timeout","timeout_seconds":10})
-                                        )
-                                    }));
-                                    return;
-                                }
-                            };
-                            let mut identity_patch = serde_json::Map::new();
-                            if let Some(value) = resolved.name.as_ref() {
-                                identity_patch.insert("name".into(), json!(value));
-                            }
-                            if let Some(value) = resolved.symbol.as_ref() {
-                                identity_patch.insert("symbol".into(), json!(value));
-                            }
-                            if let Some(value) = resolved.decimals {
-                                identity_patch.insert("decimals".into(), json!(value));
-                            }
-                            if let Some(value) = resolved.metadata_uri.as_ref() {
-                                identity_patch.insert("metadata_uri".into(), json!(value));
-                            }
-                            if let Some(value) = resolved.logo_url.as_ref() {
-                                identity_patch.insert("logo_url".into(), json!(value));
-                            }
-                            if let Ok(patched) = metadata_registry.upsert_patch(
-                                &metadata_mint,
-                                json!({
-                                    "identity":identity_patch,
-                                    "discovery":{"metadata_status":resolved.status}
-                                }),
-                            ) {
-                                if let Err(error) = nodex_persistence::save_token_state(
-                                    &metadata_database,
-                                    &patched,
-                                ).await {
-                                    tracing::warn!(%error, mint_address=%metadata_mint, "Could not persist background token metadata");
-                                    let _ = metadata_events.publish(json!({
-                                        "type":"token_diagnostic",
-                                        "data":token_diagnostic(
-                                            &metadata_mint,
-                                            "metadata_resolution",
-                                            "sqlite",
-                                            error.to_string(),
-                                            json!({"kind":"database_persistence_error","message":error.to_string()})
-                                        )
-                                    }));
-                                    return;
-                                }
-                                let _ = metadata_events.publish(json!({
-                                    "type":"token_state_updated",
-                                    "data":patched
-                                }));
-                            }
-                            for diagnostic in resolved.errors {
-                                let _ = metadata_events.publish(json!({
-                                    "type":"token_diagnostic",
-                                    "data":diagnostic
-                                }));
-                            }
-                        });
                         // Persist the in-progress lifecycle before expensive provider calls.
                         // On restart, a stale "scanning" state can be retried instead of lost.
                         if let Err(error) =
