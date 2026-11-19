@@ -160,7 +160,7 @@ pub(super) fn start_launch_processor(
                     )
                     .await
                     {
-                        Ok(reputation) => {
+                        Ok(Some(reputation)) => {
                             let trusted_score = reputation
                                 .overall_score
                                 .filter(|score| score.is_finite())
@@ -168,15 +168,38 @@ pub(super) fn start_launch_processor(
                                     reputation.sample_status == "established"
                                         && reputation.confidence_pct >= 50.0
                                 });
-                            tracing::debug!(mint_address = %launch.mint_address, creator_address = %address, score = ?trusted_score, confidence_pct = reputation.confidence_pct, sample_status = %reputation.sample_status, "Early creator reputation lookup completed");
+                            tracing::debug!(
+                                mint_address = %launch.mint_address,
+                                creator_address = %address,
+                                score = ?trusted_score,
+                                confidence_pct = reputation.confidence_pct,
+                                sample_status = %reputation.sample_status,
+                                "Early creator reputation lookup completed"
+                            );
                             Some(serde_json::json!({
-                                "creator_address": address, "score": trusted_score,
-                                "confidence_pct": reputation.confidence_pct, "sample_status": reputation.sample_status,
-                                "updated_at": reputation.updated_at, "lookup_stage": "launch_fast_path"
+                                "creator_address": address,
+                                "score": trusted_score,
+                                "confidence_pct": reputation.confidence_pct,
+                                "sample_status": reputation.sample_status,
+                                "updated_at": reputation.updated_at,
+                                "lookup_stage": "launch_fast_path"
                             }))
                         }
+                        Ok(None) => {
+                            tracing::debug!(
+                                mint_address = %launch.mint_address,
+                                creator_address = %address,
+                                "Creator has no persisted reputation yet"
+                            );
+                            None
+                        }
                         Err(error) => {
-                            tracing::warn!(%error, mint_address = %launch.mint_address, creator_address = %address, "Early reputation lookup failed; launch remains discoverable");
+                            tracing::warn!(
+                                %error,
+                                mint_address = %launch.mint_address,
+                                creator_address = %address,
+                                "Early reputation lookup failed; launch remains discoverable"
+                            );
                             None
                         }
                     }
